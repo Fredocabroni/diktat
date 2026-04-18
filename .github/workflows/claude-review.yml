@@ -1,0 +1,59 @@
+name: claude-review
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  review:
+    name: security · copy · addiction
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Gate via repo Variable (Settings → Secrets and variables → Variables):
+    #   set ENABLE_CLAUDE_REVIEW=true once ANTHROPIC_API_KEY secret is configured.
+    if: ${{ vars.ENABLE_CLAUDE_REVIEW == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install Claude Code
+        run: npm i -g @anthropic-ai/claude-code
+
+      - name: Run security-reviewer
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          claude -p "Run the security-reviewer subagent on this PR's diff. Post the findings as a single PR comment via gh." \
+            --output-format text || true
+
+      - name: Run copy-linter
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          claude -p "Run the copy-linter subagent on apps/web/**/*.tsx and apps/bots/**/templates/** changed in this PR. Post the findings as a PR comment via gh." \
+            --output-format text || true
+
+      - name: Run addiction-auditor
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          claude -p "Run the addiction-auditor subagent on engagement-mechanic changes in this PR. Post the findings as a PR comment via gh." \
+            --output-format text || true
