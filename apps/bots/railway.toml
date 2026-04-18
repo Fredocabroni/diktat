@@ -1,0 +1,14 @@
+# Railway service: diktat-bots
+# TODO(railway): create service, set RAILWAY_TOKEN, ENABLE_RAILWAY_DEPLOY=true.
+
+[build]
+builder = "NIXPACKS"
+buildCommand = "pnpm install --frozen-lockfile && pnpm turbo build --filter=@diktat/bots"
+
+[deploy]
+startCommand = "node apps/bots/dist/index.js"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
+
+[env]
+NODE_ENV = "production"
