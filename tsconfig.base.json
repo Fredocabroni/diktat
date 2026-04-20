@@ -37,7 +37,9 @@
       "@diktat/shared": ["packages/shared/src/index.ts"],
       "@diktat/shared/*": ["packages/shared/src/*"],
       "@diktat/ai-fabric": ["packages/ai-fabric/src/index.ts"],
-      "@diktat/ai-fabric/*": ["packages/ai-fabric/src/*"]
+      "@diktat/ai-fabric/*": ["packages/ai-fabric/src/*"],
+      "@diktat/auth": ["packages/auth/src/index.ts"],
+      "@diktat/auth/*": ["packages/auth/src/*"]
     }
   }
 }

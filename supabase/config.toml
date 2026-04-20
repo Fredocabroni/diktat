@@ -62,11 +62,13 @@ otp_expiry = 3600
 enable_signup = false
 enable_confirmations = false
 
-# X / Twitter OAuth — wire env vars when ready
+# X / Twitter OAuth — TODO: flip enabled = true once X_CLIENT_ID + X_CLIENT_SECRET
+# are set in .env.local. env() refs resolve to empty strings when the vars are
+# missing, which is harmless while enabled = false.
 [auth.external.twitter]
 enabled = false
-client_id = ""
-secret = ""
+client_id = "env(X_CLIENT_ID)"
+secret = "env(X_CLIENT_SECRET)"
 redirect_uri = ""
 
 [edge_runtime]
