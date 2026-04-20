@@ -1,0 +1,5 @@
+# Local Supabase state
+.branches
+.temp
+.env
+*.tar

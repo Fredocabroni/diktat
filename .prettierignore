@@ -1,0 +1,12 @@
+node_modules
+.next
+.turbo
+dist
+coverage
+.pnpm-store
+pnpm-lock.yaml
+.env*
+.vercel
+.railway
+.claude/state
+SESSION_LOGS/*.md

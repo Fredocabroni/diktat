@@ -1,1 +1,40 @@
-.env.local
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build artifacts
+dist/
+build/
+.next/
+.turbo/
+*.tsbuildinfo
+
+# Test
+coverage/
+
+# Env (anything *.local stays out of git)
+.env
+.env.*
+!.env.example
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Deploy provider state
+.vercel/
+.railway/
+
+# Claude Code transient state
+.claude/state/
+.claude/local-overrides.json

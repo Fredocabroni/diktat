@@ -1,0 +1,57 @@
+{
+  "$schema": "https://modelcontextprotocol.io/schema/mcp.json",
+  "mcpServers": {
+    "supabase": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@supabase/mcp-server-supabase@latest",
+        "--read-only",
+        "--project-ref=${SUPABASE_PROJECT_REF_DEV}"
+      ],
+      "env": {
+        "SUPABASE_ACCESS_TOKEN": "${SUPABASE_SERVICE_ROLE_KEY_DEV}"
+      }
+    },
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
+      }
+    },
+    "axiom": {
+      "command": "npx",
+      "args": ["-y", "axiom-mcp@latest"],
+      "env": {
+        "AXIOM_TOKEN": "${AXIOM_TOKEN}",
+        "AXIOM_DATASET": "${AXIOM_DATASET}"
+      }
+    },
+    "livekit": {
+      "command": "npx",
+      "args": ["-y", "@livekit/mcp-server@latest"],
+      "env": {
+        "LIVEKIT_API_KEY": "${LIVEKIT_API_KEY}",
+        "LIVEKIT_API_SECRET": "${LIVEKIT_API_SECRET}",
+        "LIVEKIT_URL": "${LIVEKIT_URL}"
+      }
+    },
+    "_vercel_TODO": {
+      "_note": "Disabled until Vercel account exists and VERCEL_TOKEN is populated. Rename key to 'vercel' to enable.",
+      "command": "npx",
+      "args": ["-y", "@vercel/mcp-adapter@latest"],
+      "env": {
+        "VERCEL_TOKEN": "${VERCEL_TOKEN}"
+      }
+    },
+    "_railway_TODO": {
+      "_note": "Disabled until RAILWAY_TOKEN is populated. Rename key to 'railway' to enable.",
+      "command": "npx",
+      "args": ["-y", "@railway/mcp-server@latest"],
+      "env": {
+        "RAILWAY_TOKEN": "${RAILWAY_TOKEN}"
+      }
+    }
+  }
+}

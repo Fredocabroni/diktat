@@ -1,0 +1,55 @@
+name: deploy-railway
+
+# TODO(railway): activates only when RAILWAY_TOKEN secret is present AND repo
+# variable ENABLE_RAILWAY_DEPLOY=true. Until then this workflow is a no-op stub
+# and does NOT fail CI.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/api/**"
+      - "apps/workers/**"
+      - "apps/bots/**"
+      - "packages/db/**"
+      - "packages/shared/**"
+      - "packages/ai-fabric/**"
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    name: deploy-guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Skip — TODO(railway)
+        run: |
+          echo "Railway deploy stub. Set repo variable ENABLE_RAILWAY_DEPLOY=true and"
+          echo "secret RAILWAY_TOKEN once you sign up for Railway. Stub is a no-op."
+
+  deploy:
+    name: deploy ${{ matrix.service }} → Railway
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: ${{ vars.ENABLE_RAILWAY_DEPLOY == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [api, workers, bots]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Railway CLI
+        run: |
+          curl -fsSL https://railway.app/install.sh | sh
+          echo "$HOME/.railway/bin" >> "$GITHUB_PATH"
+
+      - name: Deploy
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          cd "apps/${{ matrix.service }}"
+          railway up --service "diktat-${{ matrix.service }}" --detach
