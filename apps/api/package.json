@@ -4,6 +4,12 @@
   "private": true,
   "type": "module",
   "main": "dist/server.js",
+  "exports": {
+    "./router": {
+      "types": "./src/routers/index.ts",
+      "default": "./src/routers/index.ts"
+    }
+  },
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "tsc -p tsconfig.build.json",
