@@ -1,2 +1,3 @@
-// @diktat/shared — cross-cutting types + utilities. Phase 0 placeholder.
-export {};
+export * from './ids.js';
+export * from './enums.js';
+export * from './errors.js';

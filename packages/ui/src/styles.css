@@ -1,0 +1,119 @@
+/* @diktat/ui — runtime CSS custom properties.
+ *
+ * These mirror the values exported from src/tokens/. Non-Tailwind consumers
+ * (raw CSS, inline styles, third-party widgets) can read tokens via these
+ * variables. Tailwind users can also reference them, e.g.
+ * `bg-[var(--color-brand-primary)]`.
+ *
+ * Keep this file in sync with src/tokens/colors.ts and src/tokens/motion.ts.
+ */
+
+:root {
+    /* Brand */
+    --color-brand-primary: #7b2cff;
+    --color-brand-primary-fg: #ffffff;
+    --color-brand-accent: #6ee7ff;
+    --color-brand-accent-fg: #0a0a0f;
+
+    /* Ink (12-stop, dark-first) */
+    --color-ink-0: #0a0a0f;
+    --color-ink-50: #0f0f16;
+    --color-ink-100: #15151f;
+    --color-ink-200: #1c1c28;
+    --color-ink-300: #262633;
+    --color-ink-400: #34343f;
+    --color-ink-500: #454553;
+    --color-ink-600: #5c5c6b;
+    --color-ink-700: #7a7a8c;
+    --color-ink-800: #a0a0b0;
+    --color-ink-900: #cacad6;
+    --color-ink-1000: #f2f2f7;
+
+    /* Paper (12-stop, light-first) */
+    --color-paper-0: #ffffff;
+    --color-paper-50: #fafafc;
+    --color-paper-100: #f2f2f7;
+    --color-paper-200: #e6e6ee;
+    --color-paper-300: #d5d5e0;
+    --color-paper-400: #b8b8c8;
+    --color-paper-500: #9a9aae;
+    --color-paper-600: #7a7a8c;
+    --color-paper-700: #5c5c6b;
+    --color-paper-800: #3f3f4d;
+    --color-paper-900: #1f1f2a;
+    --color-paper-1000: #0a0a0f;
+
+    /* Semantic */
+    --color-success: #22c55e;
+    --color-success-fg: #ffffff;
+    --color-success-soft: #1a3a2a;
+    --color-success-soft-fg: #86efac;
+    --color-danger: #ef4444;
+    --color-danger-fg: #ffffff;
+    --color-danger-soft: #3a1a1a;
+    --color-danger-soft-fg: #fca5a5;
+    --color-warning: #f59e0b;
+    --color-warning-fg: #0a0a0f;
+    --color-warning-soft: #3a2e1a;
+    --color-warning-soft-fg: #fcd34d;
+    --color-info: #6ee7ff;
+    --color-info-fg: #0a0a0f;
+    --color-info-soft: #1a2d3a;
+    --color-info-soft-fg: #7dd3fc;
+
+    /* Surface */
+    --color-surface-app: #0a0a0f;
+    --color-surface-card: #15151f;
+    --color-surface-raised: #1c1c28;
+    --color-surface-sunken: #0f0f16;
+    --color-surface-overlay: rgba(10, 10, 15, 0.72);
+    --color-surface-scrim: rgba(0, 0, 0, 0.56);
+
+    /* Text */
+    --color-text-primary: #f2f2f7;
+    --color-text-secondary: #cacad6;
+    --color-text-tertiary: #a0a0b0;
+    --color-text-inverse: #0a0a0f;
+    --color-text-disabled: #5c5c6b;
+    --color-text-link: #6ee7ff;
+    --color-text-link-hover: #a5f0ff;
+
+    /* Tier ladder (base color only — full ring/fg/glow live in JS tokens) */
+    --color-tier-t0: #6b7280;
+    --color-tier-t1: #64748b;
+    --color-tier-t2: #0ea5e9;
+    --color-tier-t3: #3b82f6;
+    --color-tier-t4: #f59e0b;
+    --color-tier-t5: #14b8a6;
+    --color-tier-t6: #7b2cff;
+    --color-tier-t7: #6d28d9;
+    --color-tier-t8: #c026d3;
+    --color-tier-t9: #dc2626;
+    --color-tier-t10: #facc15;
+    --color-tier-t11: #f0f0f8;
+
+    /* Motion — tier-up severity ladder */
+    --duration-instant: 100ms;
+    --duration-fast: 200ms;
+    --duration-normal: 300ms;
+    --duration-slow: 500ms;
+    --duration-ritual: 800ms;
+    --duration-tier-up-1: 600ms;
+    --duration-tier-up-2: 900ms;
+    --duration-tier-up-3: 1200ms;
+    --duration-tier-up-4: 1600ms;
+
+    /* Easing */
+    --easing-standard: cubic-bezier(0.2, 0, 0, 1);
+    --easing-decelerate: cubic-bezier(0, 0, 0.2, 1);
+    --easing-accelerate: cubic-bezier(0.4, 0, 1, 1);
+    --easing-emphasized: cubic-bezier(0.2, 0, 0, 1.2);
+
+    /* Type */
+    --font-sans: 'Inter Variable', 'Inter', system-ui, -apple-system,
+      'Segoe UI', Roboto, sans-serif;
+    --font-display: 'Inter Display', 'Inter Variable', 'Inter', system-ui,
+      -apple-system, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, 'JetBrains Mono', Menlo,
+    Consolas, monospace;
+}
