@@ -1,4 +1,4 @@
-// @diktat/ui — design tokens + (later) primitives + 12 tier badges.
-// TierBadge ships in a follow-up commit on this branch.
+// @diktat/ui — design tokens, Tailwind preset, and the 12-tier badge system.
 
 export * from './tokens/index.js';
+export * from './components/tiers/index.js';
