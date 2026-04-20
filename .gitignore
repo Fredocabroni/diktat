@@ -10,6 +10,12 @@ build/
 storybook-static/
 *.tsbuildinfo
 
+# Serwist generated service worker (built into apps/web/public at build time)
+apps/web/public/sw.js
+apps/web/public/sw.js.map
+apps/web/public/swe-worker-*.js
+apps/web/public/swe-worker-*.js.map
+
 # Test
 coverage/
 
