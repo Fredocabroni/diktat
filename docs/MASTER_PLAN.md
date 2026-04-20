@@ -11,6 +11,7 @@
 Diktat is a Gen Z political news + debate PWA where status comes from being right, not loud. "TikTok meets Duolingo meets Reuters raised by Clash Royale." Every news card is a fork: consume, swipe, wager AP, or fight someone in a battle. Not a news reader — a political combat sport with news as the launchpad.
 
 **Non-negotiables:**
+
 - One unified score (Arena Points). No multi-score systems.
 - 12 tiers. Mythic is ~3 years of daily play. Sacred.
 - Three battle modes: Trivia, Open Debate, Voice Debate.
@@ -59,22 +60,22 @@ Diktat is a Gen Z political news + debate PWA where status comes from being righ
 
 ## 2. TECH STACK
 
-| Layer | Choice |
-|---|---|
-| Frontend | Next.js 15 App Router + React 19 |
-| Styling | Tailwind + CSS Modules |
-| Animation | Framer Motion + Lottie |
-| State | Zustand + TanStack Query |
-| Auth | Supabase Auth (email OTP + X OAuth) |
-| DB | Postgres via Supabase |
-| Cache | Upstash Redis |
-| Realtime | Supabase Realtime + LiveKit |
-| Voice | LiveKit Cloud |
-| Queue | BullMQ on Redis |
-| Wallet | Privy (custodial, shows USD) |
-| Deploy | Vercel (web), Railway (api/workers/bots) |
-| Observability | Axiom + Sentry |
-| Monorepo | Turborepo + pnpm |
+| Layer         | Choice                                   |
+| ------------- | ---------------------------------------- |
+| Frontend      | Next.js 15 App Router + React 19         |
+| Styling       | Tailwind + CSS Modules                   |
+| Animation     | Framer Motion + Lottie                   |
+| State         | Zustand + TanStack Query                 |
+| Auth          | Supabase Auth (email OTP + X OAuth)      |
+| DB            | Postgres via Supabase                    |
+| Cache         | Upstash Redis                            |
+| Realtime      | Supabase Realtime + LiveKit              |
+| Voice         | LiveKit Cloud                            |
+| Queue         | BullMQ on Redis                          |
+| Wallet        | Privy (custodial, shows USD)             |
+| Deploy        | Vercel (web), Railway (api/workers/bots) |
+| Observability | Axiom + Sentry                           |
+| Monorepo      | Turborepo + pnpm                         |
 
 ---
 
@@ -106,17 +107,17 @@ diktat/
 
 One router (`packages/ai-fabric/`), multiple backends. Route by task type.
 
-| Task | Primary | Backup |
-|---|---|---|
-| Code generation | Claude Opus 4.7 | Claude Sonnet 4.6 |
-| Trivia generation | Claude Sonnet 4.6 | GPT-5 |
-| Live fact-checks | Grok | Perplexity |
-| Sourced fact-checks | Perplexity Sonar | Claude Opus |
-| Debate scoring | Claude Opus 4.7 | Gemini 2.5 Pro |
-| News ranking | Claude Haiku 4.5 | GPT-5 mini |
-| Clip generation | Gemini 2.5 Pro | Claude Sonnet 4.6 |
-| X post generation | Claude Sonnet 4.6 | Grok |
-| Fingerprint calc | Claude Opus 4.7 | — |
+| Task                | Primary           | Backup            |
+| ------------------- | ----------------- | ----------------- |
+| Code generation     | Claude Opus 4.7   | Claude Sonnet 4.6 |
+| Trivia generation   | Claude Sonnet 4.6 | GPT-5             |
+| Live fact-checks    | Grok              | Perplexity        |
+| Sourced fact-checks | Perplexity Sonar  | Claude Opus       |
+| Debate scoring      | Claude Opus 4.7   | Gemini 2.5 Pro    |
+| News ranking        | Claude Haiku 4.5  | GPT-5 mini        |
+| Clip generation     | Gemini 2.5 Pro    | Claude Sonnet 4.6 |
+| X post generation   | Claude Sonnet 4.6 | Grok              |
+| Fingerprint calc    | Claude Opus 4.7   | —                 |
 
 Router: `{ task, context, priority } → { model, endpoint, fallbacks[] }`. Retry on 429/5xx with exponential backoff, auto-fail over to backup, cost caps per task type, all calls logged to Axiom.
 
@@ -127,8 +128,9 @@ Router: `{ task, context, priority } → { model, endpoint, fallbacks[] }`. Retr
 ## 5. DATABASE SCHEMA (SUMMARY)
 
 Full tables defined in Phase 1:
+
 - users, wallets, ap_transactions, tiers
-- battles, battle_rounds
+- battles, battle_participants, battle_rounds
 - trivia_questions, trivia_answers
 - news_topics, opinion_shifts
 - predictions, fact_checks, clips
@@ -137,15 +139,38 @@ Full tables defined in Phase 1:
 
 All FKs + indexes + RLS + created_at/updated_at.
 
+### Tier ladder (locked)
+
+12 tiers, monotonic AP thresholds. Mythic targets ~3 years of dedicated daily play per ADDICTION_ARCHITECTURE pacing. Tiers 0–6 are floor-protected (AP cannot drop below `ap_min`); tiers 7+ trade safety for prestige. Payout-eligible from tier 3 (Operative) onward.
+
+| id  | name       | ap_min | ap_max | payout | floor protected |
+| --- | ---------- | ------ | ------ | ------ | --------------- |
+| 0   | Citizen    | 0      | 99     | f      | t               |
+| 1   | Voter      | 100    | 299    | f      | t               |
+| 2   | Partisan   | 300    | 749    | f      | t               |
+| 3   | Operative  | 750    | 1 499  | t      | t               |
+| 4   | Strategist | 1 500  | 2 999  | t      | t               |
+| 5   | Tactician  | 3 000  | 5 499  | t      | t               |
+| 6   | Vanguard   | 5 500  | 9 999  | t      | t               |
+| 7   | Senator    | 10 000 | 17 999 | t      | f               |
+| 8   | Statesman  | 18 000 | 29 999 | t      | f               |
+| 9   | Architect  | 30 000 | 46 999 | t      | f               |
+| 10  | Legendary  | 47 000 | 74 999 | t      | f               |
+| 11  | Mythic     | 75 000 | —      | t      | f               |
+
+Locked names (do not rename without product approval): Strategist (4), Vanguard (6), Legendary (10), Mythic (11).
+
 ---
 
 ## 6. NEWS FEED — HYBRID ADDICTION MODEL
 
 Per ADDICTION_ARCHITECTURE.md, the feed leans:
+
 - TikTok hook speed (snappy swipe, 15-second engagement floor)
 - Duolingo reward loop (streaks, completion, tier climb)
 
 Features:
+
 - TikTok-style vertical swipe, full-screen, one claim per card
 - Swipe up = next, right = agree, left = disagree
 - Each card has "⚔️ Battle This" CTA
@@ -188,6 +213,7 @@ Landing page, onboarding, moderation, analytics, bug bash, soft launch to 100 in
 ## 8. CONTENT SOURCING — NON-MSM FACT-CHECK STACK
 
 Primary sources only. Fact-check fabric pulls from:
+
 - Congress.gov, FRED, BLS, Federal Reserve, SEC filings, CBO, DOJ
 - WHO/CDC raw data, Census, state election commissions
 - Ballotpedia, GovTrack, OpenSecrets
@@ -195,22 +221,22 @@ Primary sources only. Fact-check fabric pulls from:
 - Grok with live X data for breaking claims
 - Our own users (AP-weighted community voting)
 
-**Explicitly NOT sourced as truth:** CNN, Fox, MSNBC, NYT, WaPo, WSJ editorials, HuffPost, Daily Wire, Breitbart, Jacobin. They can be *referenced* as framing ("here's how [outlet] framed it") but never as truth source.
+**Explicitly NOT sourced as truth:** CNN, Fox, MSNBC, NYT, WaPo, WSJ editorials, HuffPost, Daily Wire, Breitbart, Jacobin. They can be _referenced_ as framing ("here's how [outlet] framed it") but never as truth source.
 
 ---
 
 ## 9. RISK REGISTER
 
-| Risk | Mitigation |
-|---|---|
-| X ToS ban on bot | Manual posts first, gradual automation, respect rate limits |
-| LiveKit bandwidth cost spike | Cap concurrent rooms until paid tiers, text fallback |
-| Polymarket API changes | Cache odds, Kalshi + Manifold as backups |
-| AI cost explosion | Hard caps per task, daily budget alerts, smaller-model fallback |
+| Risk                                   | Mitigation                                                                 |
+| -------------------------------------- | -------------------------------------------------------------------------- |
+| X ToS ban on bot                       | Manual posts first, gradual automation, respect rate limits                |
+| LiveKit bandwidth cost spike           | Cap concurrent rooms until paid tiers, text fallback                       |
+| Polymarket API changes                 | Cache odds, Kalshi + Manifold as backups                                   |
+| AI cost explosion                      | Hard caps per task, daily budget alerts, smaller-model fallback            |
 | Regulatory knock on prediction markets | AP is not real money. Keep it that way until lawyer consulted at 10K users |
-| Tier inflation | Launch conservative AP rates, adjust weekly on telemetry |
-| Toxicity in voice | Perspective API + reporting + tier penalties + kick-to-text fallback |
-| Single-model API outage | Router failovers handle this |
+| Tier inflation                         | Launch conservative AP rates, adjust weekly on telemetry                   |
+| Toxicity in voice                      | Perspective API + reporting + tier penalties + kick-to-text fallback       |
+| Single-model API outage                | Router failovers handle this                                               |
 
 ---
 
