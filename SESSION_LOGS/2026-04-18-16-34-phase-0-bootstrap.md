@@ -70,7 +70,11 @@ Hooks were wired but not yet active during this session (settings.json was commi
 - MCP servers `vercel` and `railway` keyed as `_vercel_TODO` / `_railway_TODO` so Claude doesn't try to invoke them; rename to enable.
 
 ## Open PRs
-PR will be opened from this branch as a final step.
+- #1 — Phase 0: operating system (turborepo + .claude + supabase + ci)
+  https://github.com/Fredocabroni/diktat/pull/1
+
+## Push outcome
+Initial push rejected: cached HTTPS PAT lacked `workflow` scope (required because PR touches `.github/workflows/`). User added the `workflow` scope to the PAT at github.com/settings/tokens. Second push succeeded against the same cached credential. Resolved without changing remote URL or git config.
 
 ## AI fabric spend
 N/A this session (no LLM calls outside this Claude Code session itself).
