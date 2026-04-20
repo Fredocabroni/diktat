@@ -1,6 +1,8 @@
-import type { Metadata } from 'next';
+import type { Metadata, Viewport } from 'next';
 import { Inter } from 'next/font/google';
 import type { ReactNode } from 'react';
+
+import { Providers } from '../components/providers';
 
 import './globals.css';
 
@@ -23,12 +25,27 @@ const interDisplay = Inter({
 export const metadata: Metadata = {
   title: 'Diktat',
   description: 'Politics is a combat sport. We built the arena.',
+  manifest: '/manifest.json',
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: 'black-translucent',
+    title: 'Diktat',
+  },
+};
+
+export const viewport: Viewport = {
+  width: 'device-width',
+  initialScale: 1,
+  viewportFit: 'cover',
+  themeColor: '#4C3AF7',
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en" className={`dark ${inter.variable} ${interDisplay.variable}`}>
-      <body className="bg-surface-app font-sans text-text-primary antialiased">{children}</body>
+      <body className="bg-surface-app font-sans text-text-primary antialiased">
+        <Providers>{children}</Providers>
+      </body>
     </html>
   );
 }
