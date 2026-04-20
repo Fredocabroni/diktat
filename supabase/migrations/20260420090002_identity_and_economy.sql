@@ -22,7 +22,7 @@ create policy tiers_select_all on public.tiers for select to anon, authenticated
 
 create table public.users (
   id                uuid primary key references auth.users(id) on delete cascade,
-  handle            citext not null unique,
+  handle            extensions.citext not null unique,
   display_name      text,
   avatar_url        text,
   current_ap        integer not null default 100 check (current_ap >= 0),

@@ -7,7 +7,7 @@ begin;
 
 create table public.news_topics (
   id                  uuid primary key default gen_random_uuid(),
-  slug                citext not null unique,
+  slug                extensions.citext not null unique,
   headline            text not null,
   summary             text,
   primary_source_url  text,

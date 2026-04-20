@@ -6,7 +6,7 @@ begin;
 
 create table public.tribes (
   id          uuid primary key default gen_random_uuid(),
-  slug        citext not null unique,
+  slug        extensions.citext not null unique,
   name        text not null,
   description text,
   manifesto   text,
