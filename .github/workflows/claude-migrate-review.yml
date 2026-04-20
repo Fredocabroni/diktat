@@ -35,4 +35,5 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           claude -p "Run the schema-reviewer subagent on the supabase/migrations/ files changed in this PR. Post the verdict (APPROVE or BLOCK) and full checklist as a PR comment via gh." \
+            --model claude-sonnet-4-6 \
             --output-format text
