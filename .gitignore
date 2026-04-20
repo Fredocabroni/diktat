@@ -39,3 +39,4 @@ pnpm-debug.log*
 # Claude Code transient state
 .claude/state/
 .claude/local-overrides.json
+.claude/worktrees/
