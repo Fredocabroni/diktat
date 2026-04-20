@@ -42,6 +42,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           claude -p "Run the security-reviewer subagent on this PR's diff. Post the findings as a single PR comment via gh." \
+            --model claude-sonnet-4-6 \
             --output-format text || true
 
       - name: Run copy-linter
@@ -49,6 +50,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           claude -p "Run the copy-linter subagent on apps/web/**/*.tsx and apps/bots/**/templates/** changed in this PR. Post the findings as a PR comment via gh." \
+            --model claude-sonnet-4-6 \
             --output-format text || true
 
       - name: Run addiction-auditor
@@ -56,4 +58,5 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           claude -p "Run the addiction-auditor subagent on engagement-mechanic changes in this PR. Post the findings as a PR comment via gh." \
+            --model claude-sonnet-4-6 \
             --output-format text || true
