@@ -12,10 +12,20 @@
     "build": "tsc -p tsconfig.build.json",
     "lint": "eslint src",
     "typecheck": "tsc --noEmit",
-    "test": "echo \"(no tests yet)\" && exit 0",
+    "test": "vitest run",
     "clean": "rm -rf dist .turbo"
   },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@diktat/shared": "workspace:*",
+    "@google/genai": "^0.7.0",
+    "openai": "^4.77.0",
+    "zod": "^3.24.1",
+    "zod-to-json-schema": "^3.24.1"
+  },
   "devDependencies": {
-    "typescript": "^5.7.3"
+    "@vitest/coverage-v8": "^2.1.8",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8"
   }
 }
