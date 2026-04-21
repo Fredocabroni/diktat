@@ -19,7 +19,9 @@ export default function OnboardWelcomePage() {
   return (
     <main className="mx-auto flex min-h-dvh max-w-md flex-col justify-between px-6 py-10">
       <div>
-        <h1 className="font-display text-3xl font-bold">Welcome to the arena.</h1>
+        <h1 className="font-display text-4xl font-bold tracking-tight text-text-primary">
+          Welcome to the arena.
+        </h1>
         <p className="mt-3 text-text-secondary">
           Politics is a combat sport. Here, it has rules, receipts, and points.
         </p>
@@ -42,7 +44,7 @@ export default function OnboardWelcomePage() {
       <div className="flex flex-col gap-2">
         <Link
           href="/onboard/tribe"
-          className="rounded-full bg-accent-primary px-4 py-3 text-center font-semibold text-white"
+          className="rounded-full bg-brand px-4 py-3 text-center font-display font-bold text-brand-fg shadow-glow-violet transition hover:bg-brand/90 active:scale-[0.99]"
         >
           Pick a tribe
         </Link>
@@ -50,7 +52,7 @@ export default function OnboardWelcomePage() {
           type="button"
           onClick={() => complete.mutate()}
           disabled={complete.isPending}
-          className="rounded-full px-4 py-3 text-center text-sm font-semibold text-text-secondary hover:text-text-primary disabled:opacity-60"
+          className="rounded-full px-4 py-3 text-center text-sm font-semibold text-text-secondary transition hover:text-text-primary disabled:opacity-60"
         >
           {complete.isPending ? 'One moment…' : 'Skip for now'}
         </button>

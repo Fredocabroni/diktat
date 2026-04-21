@@ -43,7 +43,7 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
       <InstallPrompt />
       <nav
         aria-label="Primary"
-        className="fixed inset-x-0 bottom-0 z-30 border-t border-white/5 bg-surface-app/90 pb-[env(safe-area-inset-bottom)] backdrop-blur"
+        className="fixed inset-x-0 bottom-0 z-30 border-t border-ink-300 bg-surface-app/90 pb-[env(safe-area-inset-bottom)] backdrop-blur"
       >
         <ul className="mx-auto flex max-w-md items-stretch justify-between px-4 py-2">
           {TABS.map((tab) => (

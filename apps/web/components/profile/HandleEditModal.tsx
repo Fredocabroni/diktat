@@ -76,9 +76,9 @@ export function HandleEditModal({
       <form
         onSubmit={submit}
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-sm rounded-2xl bg-surface-elevated p-5 ring-1 ring-white/10"
+        className="w-full max-w-sm rounded-2xl border border-ink-300 bg-surface-card p-5"
       >
-        <h2 id="handle-edit-title" className="font-display text-lg font-bold">
+        <h2 id="handle-edit-title" className="font-display text-lg font-bold text-text-primary">
           Choose a handle
         </h2>
         <p className="mt-1 text-sm text-text-secondary">
@@ -92,12 +92,12 @@ export function HandleEditModal({
           spellCheck={false}
           value={value}
           onChange={(e) => setValue(e.target.value)}
-          className="mt-4 w-full rounded-xl border border-white/10 bg-surface-app px-4 py-3 text-text-primary"
+          className="mt-4 w-full rounded-xl border border-ink-500 bg-surface-app px-4 py-3 text-text-primary placeholder:text-text-tertiary focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/40"
           aria-invalid={Boolean(error)}
           aria-describedby={error ? 'handle-edit-error' : undefined}
         />
         {error && (
-          <p id="handle-edit-error" className="mt-2 text-sm text-accent-danger">
+          <p id="handle-edit-error" role="alert" className="mt-2 text-sm text-danger-soft-fg">
             {error}
           </p>
         )}
@@ -105,14 +105,14 @@ export function HandleEditModal({
           <button
             type="button"
             onClick={onClose}
-            className="rounded-full px-4 py-2 text-sm text-text-secondary hover:text-text-primary"
+            className="rounded-full px-4 py-2 text-sm text-text-secondary transition hover:text-text-primary"
           >
             Cancel
           </button>
           <button
             type="submit"
             disabled={updateHandle.isPending}
-            className="rounded-full bg-accent-primary px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
+            className="rounded-full bg-brand px-4 py-2 text-sm font-semibold text-brand-fg transition hover:bg-brand/90 disabled:cursor-not-allowed disabled:opacity-60"
           >
             {updateHandle.isPending ? 'Saving…' : 'Save'}
           </button>

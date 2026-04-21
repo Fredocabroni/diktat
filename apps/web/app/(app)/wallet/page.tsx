@@ -25,15 +25,15 @@ export default function WalletPage() {
   return (
     <section className="mx-auto max-w-md space-y-4 px-4 py-6">
       <header>
-        <h1 className="font-display text-2xl font-bold">Wallet</h1>
+        <h1 className="font-display text-3xl font-bold tracking-tight text-text-primary">Wallet</h1>
       </header>
 
-      <div className="rounded-2xl bg-surface-elevated p-5">
+      <div className="rounded-2xl border border-ink-300 bg-surface-card p-5">
         <p className="text-xs uppercase tracking-wide text-text-tertiary">Arena Points</p>
-        <p className="mt-1 font-display text-4xl font-bold">
+        <p className="mt-1 font-display text-4xl font-bold text-text-primary">
           {balance.isLoading ? '—' : (balance.data?.currentAp ?? 0)}
         </p>
-        <div className="mt-4 flex items-baseline justify-between border-t border-white/5 pt-3">
+        <div className="mt-4 flex items-baseline justify-between border-t border-ink-200 pt-3">
           <p className="text-sm text-text-secondary">USD balance</p>
           <p className="font-display text-lg font-bold text-text-primary">
             ${balance.isLoading ? '—' : (balance.data?.usd.toFixed(2) ?? '0.00')}
@@ -49,7 +49,7 @@ export default function WalletPage() {
         {transactions.isLoading ? (
           <p className="text-sm text-text-secondary">Loading…</p>
         ) : rows.length === 0 ? (
-          <p className="rounded-2xl bg-surface-elevated p-4 text-sm text-text-secondary">
+          <p className="rounded-2xl border border-ink-300 bg-surface-card p-4 text-sm text-text-secondary">
             No activity yet. Your first battle lands here.
           </p>
         ) : (
@@ -71,7 +71,7 @@ export default function WalletPage() {
             type="button"
             onClick={() => transactions.fetchNextPage()}
             disabled={transactions.isFetchingNextPage}
-            className="mt-3 w-full rounded-full border border-white/10 py-3 text-sm font-semibold text-text-secondary hover:text-text-primary disabled:opacity-60"
+            className="mt-3 w-full rounded-full border border-ink-400 py-3 text-sm font-semibold text-text-secondary transition hover:border-ink-500 hover:text-text-primary disabled:opacity-60"
           >
             {transactions.isFetchingNextPage ? 'Loading…' : 'Load more'}
           </button>

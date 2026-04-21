@@ -98,14 +98,16 @@ function LoginInner() {
 
   return (
     <main className="mx-auto flex min-h-dvh max-w-md flex-col justify-center px-6 py-10">
-      <h1 className="font-display text-3xl font-bold">Welcome to the arena.</h1>
-      <p className="mt-2 text-text-secondary">
+      <h1 className="font-display text-4xl font-bold tracking-tight text-text-primary">
+        Welcome to the arena.
+      </h1>
+      <p className="mt-3 text-text-secondary">
         Enter your email. We&rsquo;ll send a six-digit code.
       </p>
 
       {step === 'email' && (
         <form onSubmit={requestCode} className="mt-8 flex flex-col gap-3">
-          <label htmlFor="email" className="text-sm text-text-secondary">
+          <label htmlFor="email" className="text-sm font-medium text-text-secondary">
             Email
           </label>
           <input
@@ -116,13 +118,13 @@ function LoginInner() {
             required
             value={email}
             onChange={(e) => setEmail(e.target.value)}
-            className="rounded-xl border border-white/10 bg-surface-elevated px-4 py-3 text-text-primary"
+            className="rounded-xl border border-ink-500 bg-surface-card px-4 py-3 text-text-primary placeholder:text-text-tertiary focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/40"
             placeholder="you@example.com"
           />
           <button
             type="submit"
             disabled={busy}
-            className="rounded-full bg-accent-primary px-4 py-3 font-semibold text-white disabled:opacity-60"
+            className="mt-1 rounded-full bg-brand px-4 py-3 font-display font-bold text-brand-fg shadow-glow-violet transition hover:bg-brand/90 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-60 disabled:shadow-none"
           >
             {busy ? 'Sending…' : 'Send code'}
           </button>
@@ -131,7 +133,7 @@ function LoginInner() {
 
       {step === 'code' && (
         <form onSubmit={verifyCode} className="mt-8 flex flex-col gap-3">
-          <label htmlFor="code" className="text-sm text-text-secondary">
+          <label htmlFor="code" className="text-sm font-medium text-text-secondary">
             Six-digit code
           </label>
           <input
@@ -143,33 +145,37 @@ function LoginInner() {
             required
             value={code}
             onChange={(e) => setCode(e.target.value)}
-            className="rounded-xl border border-white/10 bg-surface-elevated px-4 py-3 text-center font-mono text-2xl tracking-widest text-text-primary"
+            className="rounded-xl border border-ink-500 bg-surface-card px-4 py-3 text-center font-mono text-2xl tracking-widest text-text-primary placeholder:text-text-tertiary focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/40"
             placeholder="••••••"
           />
           <button
             type="submit"
             disabled={busy}
-            className="rounded-full bg-accent-primary px-4 py-3 font-semibold text-white disabled:opacity-60"
+            className="mt-1 rounded-full bg-brand px-4 py-3 font-display font-bold text-brand-fg shadow-glow-violet transition hover:bg-brand/90 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-60 disabled:shadow-none"
           >
             {busy ? 'Verifying…' : 'Verify'}
           </button>
           <button
             type="button"
             onClick={() => setStep('email')}
-            className="text-sm text-text-secondary underline-offset-4 hover:underline"
+            className="text-sm text-text-secondary underline-offset-4 hover:text-text-primary hover:underline"
           >
             Use a different email
           </button>
         </form>
       )}
 
-      {error && <p className="mt-3 text-sm text-accent-danger">{error}</p>}
+      {error && (
+        <p role="alert" className="mt-3 text-sm text-danger-soft-fg">
+          {error}
+        </p>
+      )}
 
-      <div className="mt-10 border-t border-white/5 pt-6">
+      <div className="mt-10 border-t border-ink-300 pt-6">
         <button
           type="button"
           disabled={!clientEnv.X_OAUTH_ENABLED}
-          className="w-full rounded-full border border-white/10 px-4 py-3 text-sm font-semibold text-text-secondary disabled:cursor-not-allowed disabled:opacity-50"
+          className="w-full rounded-full border border-ink-400 px-4 py-3 text-sm font-semibold text-text-secondary transition hover:border-ink-500 hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:border-ink-400 disabled:hover:text-text-secondary"
         >
           Continue with X
         </button>

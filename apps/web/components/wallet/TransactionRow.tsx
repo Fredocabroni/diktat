@@ -38,14 +38,14 @@ export function TransactionRow(props: TransactionRowProps) {
   const label = REASON_LABELS[props.reason] ?? props.reason;
   const positive = props.delta >= 0;
   return (
-    <li className="flex items-center justify-between gap-4 rounded-xl bg-surface-elevated px-4 py-3">
+    <li className="flex items-center justify-between gap-4 rounded-xl border border-ink-200 bg-surface-card px-4 py-3">
       <div className="min-w-0">
         <p className="truncate text-sm font-medium text-text-primary">{label}</p>
         <p className="text-xs text-text-tertiary">{relativeTime(props.createdAt)}</p>
       </div>
       <div className="text-right">
         <p
-          className={`font-display text-base font-bold ${positive ? 'text-accent-success' : 'text-accent-danger'}`}
+          className={`font-display text-base font-bold ${positive ? 'text-success-soft-fg' : 'text-danger-soft-fg'}`}
         >
           {positive ? '+' : ''}
           {props.delta} AP

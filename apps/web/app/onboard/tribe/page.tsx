@@ -30,7 +30,9 @@ export default function OnboardTribePage() {
   return (
     <main className="mx-auto flex min-h-dvh max-w-md flex-col px-6 py-10">
       <header>
-        <h1 className="font-display text-2xl font-bold">Choose a tribe</h1>
+        <h1 className="font-display text-3xl font-bold tracking-tight text-text-primary">
+          Choose a tribe
+        </h1>
         <p className="mt-2 text-sm text-text-secondary">
           Start with the one that feels closest. You can change later.
         </p>
@@ -39,7 +41,7 @@ export default function OnboardTribePage() {
       <ul className="mt-6 space-y-3">
         {tribes.isLoading &&
           Array.from({ length: 5 }).map((_, i) => (
-            <li key={i} className="h-24 animate-pulse rounded-2xl bg-surface-elevated/60" />
+            <li key={i} className="h-24 animate-pulse rounded-2xl bg-surface-card/60" />
           ))}
         {tribes.data?.map((tribe) => {
           const isPending = join.isPending && selected === tribe.id;
@@ -49,7 +51,7 @@ export default function OnboardTribePage() {
                 type="button"
                 onClick={() => pick(tribe.id)}
                 disabled={join.isPending}
-                className="flex w-full flex-col items-start rounded-2xl bg-surface-elevated p-4 text-left ring-1 ring-transparent transition hover:ring-white/10 disabled:opacity-60"
+                className="flex w-full flex-col items-start rounded-2xl border border-ink-300 bg-surface-card p-4 text-left transition hover:border-brand hover:bg-surface-raised disabled:opacity-60"
               >
                 <p className="font-display text-lg font-bold text-text-primary">{tribe.name}</p>
                 {tribe.description && (
@@ -63,7 +65,7 @@ export default function OnboardTribePage() {
       </ul>
 
       {join.error && (
-        <p className="mt-4 text-sm text-accent-danger">
+        <p role="alert" className="mt-4 text-sm text-danger-soft-fg">
           Could not join that tribe. Try again, or skip for now.
         </p>
       )}
@@ -71,7 +73,7 @@ export default function OnboardTribePage() {
       <div className="mt-8 flex flex-col items-center gap-2 pb-4">
         <Link
           href="/onboard/preview"
-          className="rounded-full px-4 py-2 text-sm font-semibold text-text-secondary hover:text-text-primary"
+          className="rounded-full px-4 py-2 text-sm font-semibold text-text-secondary transition hover:text-text-primary"
         >
           Skip for now
         </Link>
