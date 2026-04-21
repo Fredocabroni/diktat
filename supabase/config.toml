@@ -59,7 +59,9 @@ secure_password_change = true
 # not be sent" on retries during the first signup test.
 max_frequency = "60s"
 otp_length = 6
-otp_expiry = 3600
+# 10 min expiry per NIST SP 800-63B §5.1.1.1 for out-of-band OTPs. The old
+# 1-hour window made a single intercepted code usable for too long.
+otp_expiry = 600
 
 # Custom SMTP via Resend. The hosted Supabase project's built-in sender
 # only delivers to team members for non-verified recipients, which is why

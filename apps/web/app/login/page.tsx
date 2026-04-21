@@ -90,7 +90,7 @@ function LoginInner() {
     const { error } = await supabase.auth.verifyOtp({ email, token: code, type: 'email' });
     setBusy(false);
     if (error) {
-      setError('That code did not match. Request a new one if it has expired.');
+      setError('Code did not match. Request a new code to try again.');
       return;
     }
     window.location.href = '/';
@@ -99,7 +99,9 @@ function LoginInner() {
   return (
     <main className="mx-auto flex min-h-dvh max-w-md flex-col justify-center px-6 py-10">
       <h1 className="font-display text-3xl font-bold">Welcome to the arena.</h1>
-      <p className="mt-2 text-text-secondary">Sign in with your email to continue.</p>
+      <p className="mt-2 text-text-secondary">
+        Enter your email. We&rsquo;ll send a six-digit code.
+      </p>
 
       {step === 'email' && (
         <form onSubmit={requestCode} className="mt-8 flex flex-col gap-3">
@@ -167,7 +169,6 @@ function LoginInner() {
         <button
           type="button"
           disabled={!clientEnv.X_OAUTH_ENABLED}
-          title={clientEnv.X_OAUTH_ENABLED ? undefined : 'X sign-in is not available yet.'}
           className="w-full rounded-full border border-white/10 px-4 py-3 text-sm font-semibold text-text-secondary disabled:cursor-not-allowed disabled:opacity-50"
         >
           Continue with X
