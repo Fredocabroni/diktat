@@ -6,12 +6,29 @@
 
 'use client';
 
+import type { AuthError } from '@supabase/supabase-js';
 import { useState } from 'react';
 
 import { clientEnv } from '../../lib/env';
 import { getBrowserSupabaseClient } from '../../lib/supabase/browser';
 
 type Step = 'email' | 'code' | 'sent';
+
+// Map Supabase OTP failures to actionable copy. Anything unrecognized falls
+// through to the generic message so we never surface an internal string.
+function describeOtpError(err: AuthError): string {
+  const msg = err.message?.toLowerCase() ?? '';
+  if (err.status === 429 || msg.includes('rate limit')) {
+    return 'Too many attempts. Wait 60 seconds and try again.';
+  }
+  if (msg.includes('invalid') && msg.includes('email')) {
+    return 'That address is not valid. Check it and try again.';
+  }
+  if (msg.includes('disabled') || msg.includes('not allowed')) {
+    return 'Email sign-in is paused for this address. Contact support.';
+  }
+  return 'We could not send the code. Check the address and try again.';
+}
 
 export default function LoginPage() {
   const [step, setStep] = useState<Step>('email');
@@ -27,11 +44,16 @@ export default function LoginPage() {
     const supabase = getBrowserSupabaseClient();
     const { error } = await supabase.auth.signInWithOtp({
       email,
-      options: { emailRedirectTo: `${window.location.origin}/auth/callback` },
+      options: {
+        // shouldCreateUser keeps the signup path active — the trigger in
+        // migration 0007 auto-provisions user, wallet, streak, and audit row.
+        shouldCreateUser: true,
+        emailRedirectTo: `${window.location.origin}/auth/callback`,
+      },
     });
     setBusy(false);
     if (error) {
-      setError('We could not send the code. Check the address and try again.');
+      setError(describeOtpError(error));
       return;
     }
     setStep('code');

@@ -6,6 +6,14 @@
  * `bg-[var(--color-brand-primary)]`.
  *
  * Keep this file in sync with src/tokens/colors.ts and src/tokens/motion.ts.
+ *
+ * IMPORTANT: do not declare `--font-sans` or `--font-display` here. Those two
+ * vars are owned by `next/font` in the consuming app (see
+ * apps/web/app/layout.tsx — `Inter({ variable: '--font-sans' })`). next/font
+ * emits an `@font-face` + a class-scoped custom property; if :root redeclares
+ * the same name, :root wins on source order and resolves to a font family
+ * the page never actually loaded, which cascades into the browser fallback
+ * chain (the "flat black-and-white" regression on preview/prod).
  */
 
 :root {
@@ -109,11 +117,8 @@
     --easing-accelerate: cubic-bezier(0.4, 0, 1, 1);
     --easing-emphasized: cubic-bezier(0.2, 0, 0, 1.2);
 
-    /* Type */
-    --font-sans: 'Inter Variable', 'Inter', system-ui, -apple-system,
-      'Segoe UI', Roboto, sans-serif;
-    --font-display: 'Inter Display', 'Inter Variable', 'Inter', system-ui,
-      -apple-system, sans-serif;
+  /* Type — --font-sans and --font-display are owned by next/font in the
+     consuming app (see note at top). Only --font-mono lives here. */
   --font-mono: ui-monospace, SFMono-Regular, 'JetBrains Mono', Menlo,
     Consolas, monospace;
 }

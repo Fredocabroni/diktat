@@ -54,9 +54,32 @@ enable_signup = true
 double_confirm_changes = true
 enable_confirmations = false
 secure_password_change = true
-max_frequency = "1s"
+# 60s between sends per email deters enumeration + runaway OTP fanout.
+# Supabase default of 1s was too permissive and surfaced as "code could
+# not be sent" on retries during the first signup test.
+max_frequency = "60s"
 otp_length = 6
 otp_expiry = 3600
+
+# Custom SMTP via Resend. The hosted Supabase project's built-in sender
+# only delivers to team members for non-verified recipients, which is why
+# the first external signup on diktat-web1.vercel.app failed with "code
+# could not be sent". RESEND_API_KEY must be set on the hosted project
+# (Dashboard → Project Settings → Configuration → Auth → SMTP Settings,
+# OR via supabase secrets set RESEND_API_KEY=...). The sender domain must
+# be verified in the Resend dashboard.
+#
+# Local dev uses inbucket (see [inbucket] above), so this block is inert
+# for `supabase start` but authoritative for `supabase db push` + the
+# `supabase config push` flow once the project is linked.
+[auth.email.smtp]
+enabled = true
+host = "smtp.resend.com"
+port = 465
+user = "resend"
+pass = "env(RESEND_API_KEY)"
+admin_email = "auth@diktat.app"
+sender_name = "Diktat"
 
 [auth.sms]
 enable_signup = false

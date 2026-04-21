@@ -1,5 +1,9 @@
+/* @import must precede @tailwind per postcss-import / CSS @import rules.
+   Loading the @diktat/ui token vars first also keeps them resolvable inside
+   Tailwind base (preflight) and in Tailwind utilities generated from the
+   preset. */
+@import '@diktat/ui/styles.css';
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
-
-@import '@diktat/ui/styles.css';
