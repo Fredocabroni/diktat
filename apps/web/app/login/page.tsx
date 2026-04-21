@@ -7,15 +7,20 @@
 'use client';
 
 import type { AuthError } from '@supabase/supabase-js';
-import { useState } from 'react';
+import { useSearchParams } from 'next/navigation';
+import { Suspense, useMemo, useState } from 'react';
 
 import { clientEnv } from '../../lib/env';
 import { getBrowserSupabaseClient } from '../../lib/supabase/browser';
 
 type Step = 'email' | 'code' | 'sent';
 
-// Map Supabase OTP failures to actionable copy. Anything unrecognized falls
-// through to the generic message so we never surface an internal string.
+const GENERIC_SEND_ERROR = 'Code not sent. Check the address and try again.';
+
+// Map Supabase OTP failures to actionable copy. Only distinguish signals the
+// user can act on (rate limit, malformed address). Anything that would hint
+// at "we found an account but will not help you" collapses into the generic
+// fallback to avoid an account-enumeration oracle.
 function describeOtpError(err: AuthError): string {
   const msg = err.message?.toLowerCase() ?? '';
   if (err.status === 429 || msg.includes('rate limit')) {
@@ -24,18 +29,36 @@ function describeOtpError(err: AuthError): string {
   if (msg.includes('invalid') && msg.includes('email')) {
     return 'That address is not valid. Check it and try again.';
   }
-  if (msg.includes('disabled') || msg.includes('not allowed')) {
-    return 'Email sign-in is paused for this address. Contact support.';
-  }
-  return 'We could not send the code. Check the address and try again.';
+  return GENERIC_SEND_ERROR;
 }
 
+// Callback redirect errors (see apps/web/app/auth/callback/route.ts). Keep
+// the copy generic — the callback already logged the specific cause.
+const CALLBACK_ERRORS: Record<string, string> = {
+  missing_code: 'Sign-in link was incomplete. Request a new code.',
+  exchange_failed: 'Sign-in link expired or already used. Request a new code.',
+};
+
 export default function LoginPage() {
+  return (
+    <Suspense>
+      <LoginInner />
+    </Suspense>
+  );
+}
+
+function LoginInner() {
+  const searchParams = useSearchParams();
+  const callbackError = useMemo(() => {
+    const code = searchParams.get('error');
+    return code ? (CALLBACK_ERRORS[code] ?? GENERIC_SEND_ERROR) : null;
+  }, [searchParams]);
+
   const [step, setStep] = useState<Step>('email');
   const [email, setEmail] = useState('');
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(callbackError);
 
   async function requestCode(e: React.FormEvent) {
     e.preventDefault();
@@ -144,13 +167,15 @@ export default function LoginPage() {
         <button
           type="button"
           disabled={!clientEnv.X_OAUTH_ENABLED}
-          title={clientEnv.X_OAUTH_ENABLED ? undefined : 'X sign-in arrives soon.'}
+          title={clientEnv.X_OAUTH_ENABLED ? undefined : 'X sign-in is not available yet.'}
           className="w-full rounded-full border border-white/10 px-4 py-3 text-sm font-semibold text-text-secondary disabled:cursor-not-allowed disabled:opacity-50"
         >
           Continue with X
         </button>
         {!clientEnv.X_OAUTH_ENABLED && (
-          <p className="mt-2 text-center text-xs text-text-tertiary">X sign-in arrives soon.</p>
+          <p className="mt-2 text-center text-xs text-text-tertiary">
+            X sign-in is not available yet.
+          </p>
         )}
       </div>
     </main>
