@@ -1,6 +1,7 @@
 import { BudgetExceededError } from '@diktat/shared';
 import type { CostRecord, LogSink, Task } from './types.js';
 import { logCall } from './logging.js';
+import type { CostSink } from './redis-cost-sink.js';
 
 /**
  * Per-task daily caps. Sum equals the global ceiling exactly ($30/day).
@@ -58,6 +59,20 @@ const ledger: CostRecord = {
 
 let alertedThisDay = false;
 
+// Optional cross-process observability sink (Upstash REST in production).
+// When set, every recordSpend ALSO fires a non-blocking write to the
+// sink. The in-memory ledger remains the authoritative gate for
+// assertUnderCap — see redis-cost-sink.ts for the rationale.
+let costSink: CostSink | null = null;
+
+export function setCostSink(sink: CostSink | null): void {
+  costSink = sink;
+}
+
+export function getCostSink(): CostSink | null {
+  return costSink;
+}
+
 /** Resets the in-memory ledger if `now` lands on a new UTC day. */
 export function resetIfNewUtcDay(now: Date): void {
   const key = utcDayKey(now);
@@ -111,6 +126,49 @@ export function recordSpend(
       opts.sink,
     );
   }
+  // Fire-and-forget cross-process mirror. Failures here degrade
+  // observability, never the caller's request — they're only logged.
+  if (costSink !== null && usd > 0) {
+    const utcDay = ledger.utcDay;
+    void costSink.recordSpend(utcDay, task, usd).catch((err) => {
+      logCall(
+        {
+          ts: now.toISOString(),
+          level: 'warn',
+          task,
+          provider: 'redis' as never,
+          model: 'cost-sink',
+          usd: 0,
+          latencyMs: 0,
+          status: 'fail',
+          message: 'cost sink write failed',
+          error: err instanceof Error ? err.message : String(err),
+        },
+        opts.sink,
+      );
+    });
+  }
+}
+
+/**
+ * Hydrate the in-memory ledger from the configured cost sink. Call once
+ * at process boot AFTER `setCostSink(...)` so a restarted worker picks
+ * up the day's accumulated spend instead of starting at zero.
+ *
+ * No-op when no sink is configured.
+ */
+export async function hydrateLedgerFromSink(now: Date = new Date()): Promise<void> {
+  if (costSink === null) return;
+  const utcDay = utcDayKey(now);
+  const snapshot = await costSink.loadDailySpend(utcDay);
+  ledger.utcDay = utcDay;
+  ledger.byTask = ZERO_BY_TASK();
+  for (const t of Object.keys(snapshot.byTask) as Task[]) {
+    const v = snapshot.byTask[t];
+    if (typeof v === 'number') ledger.byTask[t] = v;
+  }
+  ledger.total = snapshot.total;
+  alertedThisDay = ledger.total >= ALERT_AT_USD;
 }
 
 export function getDailySpend(): { byTask: Record<Task, number>; total: number; utcDay: string } {
@@ -127,4 +185,5 @@ export function __resetLedgerForTests(): void {
   ledger.byTask = ZERO_BY_TASK();
   ledger.total = 0;
   alertedThisDay = false;
+  costSink = null;
 }

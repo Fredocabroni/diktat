@@ -19,6 +19,7 @@
     "@anthropic-ai/sdk": "^0.39.0",
     "@diktat/shared": "workspace:*",
     "@google/genai": "^0.7.0",
+    "@upstash/redis": "^1.34.3",
     "openai": "^4.77.0",
     "zod": "^3.24.1",
     "zod-to-json-schema": "^3.24.1"

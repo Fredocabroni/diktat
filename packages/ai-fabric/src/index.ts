@@ -6,6 +6,7 @@ export * from './types.js';
 export * from './env.js';
 export * from './routing.js';
 export * from './cost.js';
+export * from './redis-cost-sink.js';
 export * from './retry.js';
 export * from './structured.js';
 export * from './logging.js';
