@@ -3,8 +3,9 @@
 Background runners for Diktat. Currently hosts:
 
 - **Privy provisioning listener** (`src/jobs/privy-provision.ts`) — `LISTEN privy_provision` on Postgres. Each notification (one per non-bot signup, emitted by the `handle_new_user` trigger) spawns a Privy custodial-wallet creation and UPDATEs `public.wallets` with the resulting ids. Feature-flagged behind `PRIVY_ENABLED`.
+- **AI cost-ledger sink** (`src/redis.ts` → `@diktat/ai-fabric` `setCostSink`) — wires Upstash REST as a fire-and-forget mirror of every `recordSpend()` call. Hydrates the in-memory ledger from Redis on boot so a restarted worker resumes the day's accumulated spend.
 
-Phase 4 will add BullMQ-backed queues for matchmaking, battle settlement, and trivia generation. Until then, the workers process is a single LISTEN loop with auto-reconnect.
+Phase 4 will add BullMQ-backed durable queues for battle settlement, X-bot scheduling, and other retry-heavy work. That requires a TCP-form `REDIS_URL` (Upstash exposes this separately from REST). Until then, the workers process is a pg LISTEN loop plus an Upstash REST observability sink.
 
 ## Local development
 
@@ -27,6 +28,8 @@ Copy `.env.example` to `.env.local` and fill these:
 | `SUPABASE_SERVICE_ROLE_KEY`         | Service-role key for the wallet UPDATE.                                                                                      |
 | `PRIVY_ENABLED`                     | `true` to enable real wallet creation. Default `false` ships the listener as a no-op.                                        |
 | `PRIVY_APP_ID` / `PRIVY_APP_SECRET` | Required when the flag is on. The boot path also gates on these being non-empty as defense-in-depth.                         |
+| `UPSTASH_REDIS_REST_URL`            | Upstash REST endpoint. Used as the AI cost-ledger sink and (in PR #17) as the matchmaking sorted-set store.                  |
+| `UPSTASH_REDIS_REST_TOKEN`          | Bearer token for the Upstash REST client.                                                                                    |
 
 ## Listener behaviour
 
