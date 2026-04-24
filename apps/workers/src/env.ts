@@ -17,6 +17,12 @@ const envSchema = z.object({
   SUPABASE_URL: z.string().url(),
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
 
+  // Upstash Redis (REST). Used as the cross-process cost-ledger sink for
+  // ai-fabric and as the durable store for matchmaking sorted sets when
+  // the matchmaking router lands (PR #17).
+  UPSTASH_REDIS_REST_URL: z.string().url(),
+  UPSTASH_REDIS_REST_TOKEN: z.string().min(1),
+
   // Privy. The flag must be 'true' AND both keys must be non-empty before
   // the listener actually calls the SDK; otherwise it logs a skip and
   // returns. Defense-in-depth so a misconfigured staging env can't half-
