@@ -63,7 +63,7 @@ export function InstallPrompt() {
     <div
       role="region"
       aria-label="Install Diktat on your home screen"
-      className="fixed inset-x-4 bottom-[calc(env(safe-area-inset-bottom)+88px)] z-40 flex items-center justify-between gap-3 rounded-2xl bg-surface-elevated px-4 py-3 shadow-lg ring-1 ring-white/10"
+      className="fixed inset-x-4 bottom-[calc(env(safe-area-inset-bottom)+88px)] z-40 flex items-center justify-between gap-3 rounded-2xl border border-ink-300 bg-surface-card px-4 py-3 shadow-lg"
     >
       <p className="text-sm text-text-primary">Add Diktat to your home screen.</p>
       <div className="flex gap-2">
@@ -76,7 +76,7 @@ export function InstallPrompt() {
         </button>
         <button
           type="button"
-          className="rounded-full bg-accent-primary px-3 py-1 text-xs font-semibold text-white"
+          className="rounded-full bg-brand px-3 py-1 text-xs font-semibold text-brand-fg hover:bg-brand/90"
           onClick={async () => {
             await deferred.prompt();
             await deferred.userChoice;

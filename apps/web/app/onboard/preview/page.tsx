@@ -19,13 +19,15 @@ export default function OnboardPreviewPage() {
   return (
     <main className="mx-auto flex min-h-dvh max-w-md flex-col justify-between px-6 py-10">
       <div>
-        <h1 className="font-display text-2xl font-bold">Tonight&rsquo;s Drop</h1>
+        <h1 className="font-display text-3xl font-bold tracking-tight text-text-primary">
+          Tonight&rsquo;s Drop
+        </h1>
         <p className="mt-3 text-sm text-text-secondary">
           Every evening, one news topic becomes the arena. Battle it from three angles — trivia,
           debate, prediction — and the points compound.
         </p>
 
-        <section className="mt-6 rounded-2xl bg-surface-elevated p-5 ring-1 ring-white/5">
+        <section className="mt-6 rounded-2xl border border-ink-300 bg-surface-card p-5">
           <p className="text-xs uppercase tracking-wide text-text-tertiary">Tonight — Preview</p>
           <p className="mt-2 font-display text-lg font-bold text-text-primary">
             Real topics drop in Phase 3.
@@ -57,12 +59,12 @@ export default function OnboardPreviewPage() {
           type="button"
           onClick={() => complete.mutate()}
           disabled={complete.isPending}
-          className="rounded-full bg-accent-primary px-4 py-3 text-center font-semibold text-white disabled:opacity-60"
+          className="rounded-full bg-brand px-4 py-3 text-center font-display font-bold text-brand-fg shadow-glow-violet transition hover:bg-brand/90 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-60 disabled:shadow-none"
         >
           {complete.isPending ? 'One moment…' : 'Enter the arena'}
         </button>
         {complete.error && (
-          <p className="text-center text-sm text-accent-danger">
+          <p role="alert" className="text-center text-sm text-danger-soft-fg">
             Something got stuck. Try that again.
           </p>
         )}

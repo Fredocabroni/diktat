@@ -15,9 +15,9 @@ export function GhostEarningsCard() {
   if (q.data.totalAp <= 0) return null;
 
   return (
-    <section className="rounded-2xl border border-white/5 bg-surface-elevated p-4">
+    <section className="rounded-2xl border border-ink-300 bg-surface-card p-4">
       <h2 className="text-xs uppercase tracking-wide text-text-tertiary">Ghost earnings</h2>
-      <p className="mt-1 font-display text-2xl font-bold">{q.data.totalAp} AP</p>
+      <p className="mt-1 font-display text-2xl font-bold text-text-primary">{q.data.totalAp} AP</p>
       <p className="mt-2 text-sm text-text-secondary">
         What you would have earned at tier 3. Payouts unlock at tier 3.
       </p>
