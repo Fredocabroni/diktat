@@ -4,10 +4,24 @@
 // routers that opt in see it.
 
 import { verifyJwt } from '@diktat/auth';
+import { Redis } from '@upstash/redis';
 import type { FastifyRequest } from 'fastify';
 
 import type { Env } from './env.js';
 import { userScopedClient, type DbClient } from './supabase.js';
+
+/**
+ * Minimal Redis surface the routers depend on. Lets tests substitute
+ * a fake without pulling the real Upstash client.
+ */
+export interface RedisClient {
+  zadd(key: string, score_member: { score: number; member: string }): Promise<unknown>;
+  zrem(key: string, ...members: string[]): Promise<number>;
+  zscore(key: string, member: string): Promise<number | null>;
+  set(key: string, value: string, opts?: { ex?: number }): Promise<unknown>;
+  get(key: string): Promise<unknown | null>;
+  del(...keys: string[]): Promise<number>;
+}
 
 export interface Context {
   readonly env: Env;
@@ -15,6 +29,17 @@ export interface Context {
   readonly role: string;
   readonly db: DbClient;
   readonly bearerToken: string | null;
+  readonly redis: RedisClient;
+}
+
+let cachedRedis: Redis | null = null;
+function getOrBuildRedis(env: Env): Redis {
+  if (cachedRedis !== null) return cachedRedis;
+  cachedRedis = new Redis({
+    url: env.UPSTASH_REDIS_REST_URL,
+    token: env.UPSTASH_REDIS_REST_TOKEN,
+  });
+  return cachedRedis;
 }
 
 function extractBearer(header: unknown): string | null {
@@ -55,5 +80,12 @@ export async function buildContext(env: Env, req: FastifyRequest): Promise<Conte
   // public procedures that do a DB read with a stale client token.
   const db = userScopedClient(env, verifiedToken);
 
-  return { env, userId, role, db, bearerToken: verifiedToken };
+  return {
+    env,
+    userId,
+    role,
+    db,
+    bearerToken: verifiedToken,
+    redis: getOrBuildRedis(env),
+  };
 }
