@@ -37,6 +37,12 @@ export interface ApTransactionDraft {
   readonly refType: 'battle' | null;
   readonly refId: BattleId | null;
   readonly idempotencyKey: string;
+  /**
+   * True when this draft came from a battle where at least one participant
+   * was a bot. Practice drafts trigger the 200/day cap inside the
+   * apply_ap_drafts SQL function (migration 0013).
+   */
+  readonly isPractice: boolean;
 }
 
 /**
@@ -50,7 +56,7 @@ export function idempotencyKeyFor(battleId: BattleId, userId: UserId, reason: Ap
 export function settleBattle(input: BattleSettleInput): ApTransactionDraft[] {
   if (input.status === 'void') return [];
 
-  const { battleId, mode, winner, loser } = input;
+  const { battleId, mode, winner, loser, isPractice } = input;
 
   // 1) Raw ELO swing.
   const { winnerDelta: rawWinnerDelta, loserDelta: rawLoserDelta } = computeApDelta({
@@ -62,34 +68,44 @@ export function settleBattle(input: BattleSettleInput): ApTransactionDraft[] {
   });
 
   // 2) Loser-side: loss-streak reduction first (operates on the magnitude),
-  //    then tier floor (clamps based on resulting balance).
-  const streakAdjusted = applyLossStreakProtection({
-    rawLoss: rawLoserDelta,
-    consecutiveLosses: loser.consecutiveLosses,
-    reductionsUsed: loser.reductionsUsed,
-  });
+  //    then tier floor (clamps based on resulting balance). Practice
+  //    matches zero out the loss entirely — losing to a bot must never
+  //    take real AP.
+  let loserDeltaFinal: number;
+  if (isPractice) {
+    loserDeltaFinal = 0;
+  } else {
+    const streakAdjusted = applyLossStreakProtection({
+      rawLoss: rawLoserDelta,
+      consecutiveLosses: loser.consecutiveLosses,
+      reductionsUsed: loser.reductionsUsed,
+    });
+    loserDeltaFinal = applyTierFloor({
+      currentAp: loser.apBefore,
+      tier: loser.tier,
+      proposedDelta: streakAdjusted.adjustedLoss,
+    });
+  }
 
-  const loserDeltaFinal = applyTierFloor({
-    currentAp: loser.apBefore,
-    tier: loser.tier,
-    proposedDelta: streakAdjusted.adjustedLoss,
-  });
-
-  // 3) Winner-side: no protections, ghost mint maybe.
-  const winnerDeltaFinal = rawWinnerDelta;
-  const ghost = computeGhostEarnings({ tier: winner.tier, apDelta: winnerDeltaFinal });
+  // 3) Winner-side: practice halves the credit (the SQL function further
+  //    enforces a 200/day cap). Ghost-USD mint stays gated by tier — a
+  //    practice win at tier 0–2 still mints ghost dollars, since "what
+  //    you'd earn if real" is the whole point of the ghost ledger.
+  const winnerDeltaPreCap = isPractice ? Math.floor(rawWinnerDelta / 2) : rawWinnerDelta;
+  const ghost = computeGhostEarnings({ tier: winner.tier, apDelta: winnerDeltaPreCap });
 
   const drafts: ApTransactionDraft[] = [];
 
   // Winner: battle_win
   drafts.push({
     userId: winner.userId,
-    delta: winnerDeltaFinal,
+    delta: winnerDeltaPreCap,
     ghostUsdMicros: 0n,
     reason: 'battle_win',
     refType: 'battle',
     refId: battleId,
     idempotencyKey: idempotencyKeyFor(battleId, winner.userId, 'battle_win'),
+    isPractice,
   });
 
   // Winner: ghost_credit (only when eligible)
@@ -102,6 +118,7 @@ export function settleBattle(input: BattleSettleInput): ApTransactionDraft[] {
       refType: 'battle',
       refId: battleId,
       idempotencyKey: idempotencyKeyFor(battleId, winner.userId, 'ghost_credit'),
+      isPractice,
     });
   }
 
@@ -115,6 +132,7 @@ export function settleBattle(input: BattleSettleInput): ApTransactionDraft[] {
     refType: 'battle',
     refId: battleId,
     idempotencyKey: idempotencyKeyFor(battleId, loser.userId, 'battle_loss'),
+    isPractice,
   });
 
   return drafts;

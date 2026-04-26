@@ -163,6 +163,9 @@ importers:
       '@diktat/ai-fabric':
         specifier: workspace:*
         version: link:../../packages/ai-fabric
+      '@diktat/ap-engine':
+        specifier: workspace:*
+        version: link:../../packages/ap-engine
       '@diktat/shared':
         specifier: workspace:*
         version: link:../../packages/shared

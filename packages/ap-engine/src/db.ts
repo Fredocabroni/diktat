@@ -3,70 +3,86 @@
  *
  * RESPONSIBILITY BOUNDARY
  * This is the only file in `@diktat/ap-engine` that may import Supabase.
- * Everything upstream of `applyDrafts` is pure, deterministic, and testable
- * without a database. The adapter does the minimum bookkeeping:
+ * Everything upstream of `applyDrafts` is pure, deterministic, and
+ * testable without a database.
  *
- *   1. Read fresh `users.current_ap` for every distinct user in the drafts
- *      (one batched select).
- *   2. Compute `balance_after = current_ap + draft.delta`, floored at 0
- *      (the DB also enforces `current_ap >= 0` via CHECK; we floor here so
- *      the engine never proposes a write the DB will reject).
- *   3. Insert all rows in a single `ap_transactions` upsert with
- *      `ignoreDuplicates: true` on the `idempotency_key` unique constraint.
- *   4. For each draft, return whether it was newly applied or skipped as
- *      a duplicate (so the caller can short-circuit downstream side effects).
+ * Phase 3 onward: this adapter calls the `apply_ap_drafts(jsonb)` SQL
+ * function (migration 0013) which atomically:
+ *   1. Looks up each draft's idempotency_key — duplicates short-circuit.
+ *   2. Locks `users.id FOR UPDATE` so concurrent settles for the same
+ *      user serialize.
+ *   3. Enforces the practice 200/day cap on positive practice deltas.
+ *   4. Inserts `ap_transactions`, updates `users.current_ap`, and (for
+ *      ghost mints) bumps `wallets.usdc_balance_micro` — all in one
+ *      transaction.
  *
- * ATOMICITY CAVEAT — TODO(phase-2)
- * Supabase JS does not expose multi-statement transactions client-side.
- * This adapter is therefore best-effort:
- *   - The select-then-insert window is non-atomic. A concurrent settle
- *     touching the same user could read a stale `current_ap`.
- *   - The `ap_transactions` insert is atomic per row (PostgREST batch),
- *     and the unique `idempotency_key` blocks duplicates, but
- *     `users.current_ap` is NOT updated here.
- *   - In Phase 2 we will move this whole flow into a Postgres function
- *     `apply_ap_drafts(jsonb) returns jsonb` that does the read, write,
- *     balance update, and wallet ghost mint inside a single transaction.
- *     Until then, callers MUST update `users.current_ap` and `wallets`
- *     in their own code path (or accept eventual consistency).
+ * The function is `SECURITY DEFINER` and granted to `service_role` only;
+ * callers MUST hold a service-role client.
  *
  * TYPE BOUNDARY
  * The client is typed as `SupabaseClient<unknown>` because `@diktat/db`
- * does not yet emit generated `Database` types. Once that lands, widen
- * the parameter to `SupabaseClient<Database>` and drop the local
- * `ApTransactionRow` shim. The shim mirrors the table column-for-column.
+ * may not yet emit the `apply_ap_drafts` function in `Database['public']
+ * ['Functions']`. Once regenerated, callers can pass `SupabaseClient<
+ * Database>` and the cast inside this file becomes a no-op.
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 
 import type { ApTransactionDraft } from './settle.js';
 
-// Local minimal row shape for `ap_transactions` insert. Mirrors:
-//   supabase/migrations/20260420090002_identity_and_economy.sql
-// Drop this once `@diktat/db` regenerates `Database['public']['Tables']`.
-interface ApTransactionRow {
+export interface ApplyResult {
+  readonly idempotencyKey: string;
+  readonly applied: boolean;
+  /** Live `users.current_ap` after the apply. Null when the user row was missing. */
+  readonly balanceAfter: number | null;
+  /** Delta actually credited — may differ from draft.delta when the practice cap kicks in. */
+  readonly cappedDelta: number;
+  readonly skippedReason?: 'duplicate' | 'user_not_found';
+}
+
+interface RpcDraftPayload {
   user_id: string;
   delta: number;
-  balance_after: number;
+  ghost_usd_micros: string;
   reason: string;
   ref_type: string | null;
   ref_id: string | null;
   idempotency_key: string;
+  is_practice: boolean;
 }
 
-export interface ApplyResult {
-  readonly idempotencyKey: string;
-  readonly applied: boolean;
-  readonly skippedReason?: 'duplicate';
+interface RpcResultRow {
+  idempotency_key: string;
+  applied: boolean;
+  balance_after: number | null;
+  capped_delta: number;
+  skipped_reason: 'duplicate' | 'user_not_found' | null;
+}
+
+function toRpcPayload(draft: ApTransactionDraft): RpcDraftPayload {
+  return {
+    user_id: draft.userId as string,
+    delta: draft.delta,
+    // jsonb numbers in PostgREST round-trip safely as strings for bigints.
+    ghost_usd_micros: draft.ghostUsdMicros.toString(),
+    reason: draft.reason,
+    ref_type: draft.refType,
+    ref_id: draft.refId as string | null,
+    idempotency_key: draft.idempotencyKey,
+    is_practice: draft.isPractice,
+  };
 }
 
 /**
- * Insert a batch of drafts into `ap_transactions`. Idempotent: re-running
- * with the same drafts produces the same `applied:false / skippedReason:'duplicate'`
- * outcome instead of double-spending AP.
+ * Apply a batch of drafts via the `apply_ap_drafts(jsonb)` SQL function.
+ * Idempotent: re-running with the same drafts produces
+ * `applied=false / skippedReason='duplicate'` for already-recorded
+ * idempotency keys.
  *
- * Throws on Supabase errors; returns one `ApplyResult` per input draft, in
- * the same order, on success.
+ * Throws on transport / function-level errors. Per-draft failures
+ * (e.g. user_not_found) come back as `applied=false` with a
+ * `skippedReason` — the function never aborts the batch on a per-draft
+ * issue.
  */
 export async function applyDrafts(
   client: SupabaseClient<unknown>,
@@ -74,72 +90,40 @@ export async function applyDrafts(
 ): Promise<ApplyResult[]> {
   if (drafts.length === 0) return [];
 
-  // 1) Fetch live balances for every distinct user touched by these drafts.
-  //    NOTE: this is the non-atomic window described in the file header.
-  const userIds = Array.from(new Set(drafts.map((d) => d.userId as string)));
-  // Cast through `unknown` because `SupabaseClient<unknown>.from()` returns a
-  // PostgrestQueryBuilder<unknown, never, never, never> that does not narrow
-  // table columns. The local `ApTransactionRow` / `users.current_ap` shape is
-  // the contract we're enforcing — widen this once `@diktat/db` ships generated types.
+  const payload = drafts.map(toRpcPayload);
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const usersTable = (client as any).from('users');
-  const { data: userRows, error: usersErr } = (await usersTable
-    .select('id, current_ap')
-    .in('id', userIds)) as {
-    data: { id: string; current_ap: number }[] | null;
+  const rpcResult = (await (client as any).rpc('apply_ap_drafts', { p_drafts: payload })) as {
+    data: RpcResultRow[] | null;
     error: { message: string } | null;
   };
 
-  if (usersErr) {
-    throw new Error(`applyDrafts: failed to read users.current_ap: ${usersErr.message}`);
+  if (rpcResult.error) {
+    throw new Error(`applyDrafts: apply_ap_drafts failed: ${rpcResult.error.message}`);
   }
 
-  const balanceByUser = new Map<string, number>();
-  for (const row of userRows ?? []) balanceByUser.set(row.id, row.current_ap);
+  const rows = rpcResult.data ?? [];
+  const byKey = new Map<string, RpcResultRow>();
+  for (const row of rows) byKey.set(row.idempotency_key, row);
 
-  // 2) Build insert payloads. Floor balance_after at 0 — the DB CHECK enforces
-  //    this too, but we want to never propose an illegal row.
-  const payload: ApTransactionRow[] = drafts.map((draft) => {
-    const current = balanceByUser.get(draft.userId as string) ?? 0;
-    const projected = current + draft.delta;
-    const balanceAfter = projected < 0 ? 0 : projected;
-    // Mutate the running map so two drafts for the same user (e.g. battle_win
-    // + ghost_credit, where ghost is delta=0) compute against the running balance.
-    balanceByUser.set(draft.userId as string, balanceAfter);
-    return {
-      user_id: draft.userId as string,
-      delta: draft.delta,
-      balance_after: balanceAfter,
-      reason: draft.reason,
-      ref_type: draft.refType,
-      ref_id: draft.refId as string | null,
-      idempotency_key: draft.idempotencyKey,
+  return drafts.map((draft): ApplyResult => {
+    const row = byKey.get(draft.idempotencyKey);
+    if (!row) {
+      // Defensive — should never happen if the function is well-behaved.
+      return {
+        idempotencyKey: draft.idempotencyKey,
+        applied: false,
+        balanceAfter: null,
+        cappedDelta: 0,
+        skippedReason: 'user_not_found',
+      };
+    }
+    const base: ApplyResult = {
+      idempotencyKey: row.idempotency_key,
+      applied: row.applied,
+      balanceAfter: row.balance_after,
+      cappedDelta: row.capped_delta,
     };
-  });
-
-  // 3) Batched upsert with on-conflict-do-nothing on the unique idempotency key.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const apTxTable = (client as any).from('ap_transactions');
-  const { data: insertedRows, error: insertErr } = (await apTxTable
-    .upsert(payload, {
-      onConflict: 'idempotency_key',
-      ignoreDuplicates: true,
-    })
-    .select('idempotency_key')) as {
-    data: { idempotency_key: string }[] | null;
-    error: { message: string } | null;
-  };
-
-  if (insertErr) {
-    throw new Error(`applyDrafts: failed to insert ap_transactions: ${insertErr.message}`);
-  }
-
-  const insertedKeys = new Set((insertedRows ?? []).map((r) => r.idempotency_key));
-
-  return drafts.map((draft) => {
-    const applied = insertedKeys.has(draft.idempotencyKey);
-    return applied
-      ? { idempotencyKey: draft.idempotencyKey, applied: true }
-      : { idempotencyKey: draft.idempotencyKey, applied: false, skippedReason: 'duplicate' };
+    return row.skipped_reason ? { ...base, skippedReason: row.skipped_reason } : base;
   });
 }

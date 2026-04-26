@@ -1,5 +1,6 @@
 import { router } from '../trpc.js';
 import { authRouter } from './auth.js';
+import { battlesRouter } from './battles.js';
 import { feedRouter } from './feed.js';
 import { matchmakingRouter } from './matchmaking.js';
 import { tribesRouter } from './tribes.js';
@@ -12,6 +13,7 @@ export const appRouter = router({
   wallet: walletRouter,
   tribes: tribesRouter,
   matchmaking: matchmakingRouter,
+  battles: battlesRouter,
   feed: feedRouter,
 });
 
