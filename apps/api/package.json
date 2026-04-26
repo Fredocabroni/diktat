@@ -17,6 +17,7 @@
     "lint": "eslint src",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "seed:bots": "tsx scripts/seed-bots.ts",
     "clean": "rm -rf dist .turbo"
   },
   "dependencies": {
