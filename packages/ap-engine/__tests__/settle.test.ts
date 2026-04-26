@@ -13,6 +13,7 @@ const baseInput = (overrides: Partial<BattleSettleInput> = {}): BattleSettleInpu
   battleId: BID,
   mode: 'trivia',
   status: 'settled',
+  isPractice: false,
   winner: { userId: WINNER, apBefore: 2000, tier: 4 },
   loser: { userId: LOSER, apBefore: 2000, tier: 4, consecutiveLosses: 0, reductionsUsed: 0 },
   ...overrides,
@@ -63,5 +64,20 @@ describe('settleBattle', () => {
     const drafts = settleBattle(baseInput());
     expect(drafts[0]!.idempotencyKey).toBe(idempotencyKeyFor(BID, WINNER, 'battle_win'));
     expect(drafts[1]!.idempotencyKey).toBe(idempotencyKeyFor(BID, LOSER, 'battle_loss'));
+  });
+
+  it('halves the winner delta and zeros the loser delta when isPractice=true', () => {
+    const real = settleBattle(baseInput());
+    const practice = settleBattle(baseInput({ isPractice: true }));
+
+    const realWin = real.find((d) => d.reason === 'battle_win')!;
+    const practiceWin = practice.find((d) => d.reason === 'battle_win')!;
+    const practiceLoss = practice.find((d) => d.reason === 'battle_loss')!;
+
+    expect(practiceWin.delta).toBe(Math.floor(realWin.delta / 2));
+    expect(practiceLoss.delta).toBe(0);
+    expect(practiceWin.isPractice).toBe(true);
+    expect(practiceLoss.isPractice).toBe(true);
+    expect(realWin.isPractice).toBe(false);
   });
 });

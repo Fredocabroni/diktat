@@ -38,6 +38,14 @@ export const BattleSettleInputSchema = z.object({
   battleId: BattleIdSchema,
   mode: BattleModeSchema,
   status: z.enum(['settled', 'void']),
+  /**
+   * True when at least one participant is a bot (matchmaking fell back).
+   * Practice settles halve the winner's AP gain and zero the loser's loss
+   * so a human can't grind real-ladder AP off bots, and practice wins are
+   * additionally capped at 200 AP/day inside the apply_ap_drafts SQL
+   * function (migration 0013).
+   */
+  isPractice: z.boolean().default(false),
   winner: z.object({
     userId: UserIdSchema,
     apBefore: z.number().int().nonnegative(),
