@@ -13,10 +13,13 @@ import { buildUpstashCostSink, hydrateLedgerFromSink, setCostSink } from '@dikta
 import { Client as PgClient } from 'pg';
 
 import { loadEnv, privyReady } from './env.js';
+import { runMatchmakingTick } from './jobs/matchmake.js';
 import { startPrivyProvisionListener, type PrivyWalletProvider } from './jobs/privy-provision.js';
 import { buildLogger } from './logger.js';
 import { buildRedis } from './redis.js';
 import { buildServiceClient } from './supabase.js';
+
+const MATCHMAKE_TICK_MS = 1_000;
 
 async function main(): Promise<void> {
   const env = loadEnv();
@@ -50,8 +53,27 @@ async function main(): Promise<void> {
     buildPgClient: () => new PgClient({ connectionString: env.DATABASE_URL }),
   });
 
+  // Matchmaking polling loop — single-instance assumption keeps races
+  // out of scope. Phase 3.5 BullMQ migration adds distributed locks.
+  let matchmakingBusy = false;
+  const matchmakingInterval = setInterval(() => {
+    if (matchmakingBusy) return;
+    matchmakingBusy = true;
+    runMatchmakingTick({ redis, supabase, logger })
+      .catch((err) => {
+        logger.error({
+          event: 'matchmake.tick_failed',
+          message: err instanceof Error ? err.message : String(err),
+        });
+      })
+      .finally(() => {
+        matchmakingBusy = false;
+      });
+  }, MATCHMAKE_TICK_MS);
+
   const shutdown = (signal: string): void => {
     logger.info({ event: 'workers.shutdown', signal });
+    clearInterval(matchmakingInterval);
     void listener.stop().finally(() => process.exit(0));
   };
   process.on('SIGTERM', () => shutdown('SIGTERM'));
