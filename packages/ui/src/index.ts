@@ -2,3 +2,4 @@
 
 export * from './tokens/index.js';
 export * from './components/tiers/index.js';
+export * from './components/battle/index.js';

@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@diktat/ai-fabric": "workspace:*",
+    "@diktat/ap-engine": "workspace:*",
     "@diktat/shared": "workspace:*",
     "@privy-io/server-auth": "^1.18.4",
     "@supabase/supabase-js": "^2.47.10",

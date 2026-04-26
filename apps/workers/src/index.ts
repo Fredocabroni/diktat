@@ -13,6 +13,7 @@ import { buildUpstashCostSink, hydrateLedgerFromSink, setCostSink } from '@dikta
 import { Client as PgClient } from 'pg';
 
 import { loadEnv, privyReady } from './env.js';
+import { buildBattlePoller } from './jobs/battle-poller.js';
 import { runMatchmakingTick } from './jobs/matchmake.js';
 import { startPrivyProvisionListener, type PrivyWalletProvider } from './jobs/privy-provision.js';
 import { buildLogger } from './logger.js';
@@ -20,6 +21,7 @@ import { buildRedis } from './redis.js';
 import { buildServiceClient } from './supabase.js';
 
 const MATCHMAKE_TICK_MS = 1_000;
+const BATTLE_POLLER_TICK_MS = 5_000;
 
 async function main(): Promise<void> {
   const env = loadEnv();
@@ -71,10 +73,33 @@ async function main(): Promise<void> {
       });
   }, MATCHMAKE_TICK_MS);
 
+  // Battle poller — discovers status='live' battle rows (created by
+  // the matchmaking tick above) and spawns the in-process runner for
+  // each. Single-instance ownership; Phase 3.5 BullMQ migration adds
+  // distributed locks.
+  const battlePoller = buildBattlePoller({ supabase, logger });
+  let battlePollerBusy = false;
+  const battlePollerInterval = setInterval(() => {
+    if (battlePollerBusy) return;
+    battlePollerBusy = true;
+    battlePoller
+      .scanOnce()
+      .catch((err) => {
+        logger.error({
+          event: 'battle.poller.scan_failed',
+          message: err instanceof Error ? err.message : String(err),
+        });
+      })
+      .finally(() => {
+        battlePollerBusy = false;
+      });
+  }, BATTLE_POLLER_TICK_MS);
+
   const shutdown = (signal: string): void => {
     logger.info({ event: 'workers.shutdown', signal });
     clearInterval(matchmakingInterval);
-    void listener.stop().finally(() => process.exit(0));
+    clearInterval(battlePollerInterval);
+    void Promise.all([battlePoller.stop(), listener.stop()]).finally(() => process.exit(0));
   };
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
