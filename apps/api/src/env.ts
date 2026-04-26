@@ -12,6 +12,11 @@ const envSchema = z.object({
   SUPABASE_JWT_SECRET: z.string().min(1),
   SUPABASE_JWT_ISSUER: z.string().url().optional(),
 
+  // Upstash REST. The matchmaking router writes to the same
+  // sorted-set and meta keys that the workers tick consumes.
+  UPSTASH_REDIS_REST_URL: z.string().url(),
+  UPSTASH_REDIS_REST_TOKEN: z.string().min(1),
+
   // Comma-separated list of allowed CORS origins. Default is local dev only.
   WEB_ORIGINS: z
     .string()
