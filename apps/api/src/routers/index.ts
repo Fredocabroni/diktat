@@ -1,5 +1,6 @@
 import { router } from '../trpc.js';
 import { authRouter } from './auth.js';
+import { battlesRouter } from './battles.js';
 import { tribesRouter } from './tribes.js';
 import { userRouter } from './user.js';
 import { walletRouter } from './wallet.js';
@@ -9,6 +10,7 @@ export const appRouter = router({
   user: userRouter,
   wallet: walletRouter,
   tribes: tribesRouter,
+  battles: battlesRouter,
 });
 
 export type AppRouter = typeof appRouter;
