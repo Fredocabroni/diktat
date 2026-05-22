@@ -12,12 +12,27 @@ permissions:
 
 jobs:
   review:
-    name: security · copy · addiction
+    name: ${{ matrix.reviewer.name }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Each reviewer is its own parallel matrix job with an independent
+    # timeout. Previously all three ran sequentially in one 10-minute job,
+    # which starved addiction-auditor (see PR #23). 12 min covers setup
+    # (~1-2 min) plus one Claude review with comfortable headroom.
+    timeout-minutes: 12
     # Gate via repo Variable (Settings → Secrets and variables → Variables):
     #   set ENABLE_CLAUDE_REVIEW=true once ANTHROPIC_API_KEY secret is configured.
     if: ${{ vars.ENABLE_CLAUDE_REVIEW == 'true' }}
+    strategy:
+      # One reviewer timing out must not cancel the other two.
+      fail-fast: false
+      matrix:
+        reviewer:
+          - name: security-reviewer
+            prompt: "Run the security-reviewer subagent on this PR's diff. Post the findings as a single PR comment via gh."
+          - name: copy-linter
+            prompt: "Run the copy-linter subagent on apps/web/**/*.tsx and apps/bots/**/templates/** changed in this PR. Post the findings as a PR comment via gh."
+          - name: addiction-auditor
+            prompt: "Run the addiction-auditor subagent on engagement-mechanic changes in this PR. Post the findings as a PR comment via gh."
     steps:
       - uses: actions/checkout@v4
         with:
@@ -37,26 +52,11 @@ jobs:
       - name: Install Claude Code
         run: npm i -g @anthropic-ai/claude-code
 
-      - name: Run security-reviewer
+      - name: Run ${{ matrix.reviewer.name }}
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          REVIEW_PROMPT: ${{ matrix.reviewer.prompt }}
         run: |
-          claude -p "Run the security-reviewer subagent on this PR's diff. Post the findings as a single PR comment via gh." \
-            --model claude-sonnet-4-6 \
-            --output-format text || true
-
-      - name: Run copy-linter
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: |
-          claude -p "Run the copy-linter subagent on apps/web/**/*.tsx and apps/bots/**/templates/** changed in this PR. Post the findings as a PR comment via gh." \
-            --model claude-sonnet-4-6 \
-            --output-format text || true
-
-      - name: Run addiction-auditor
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: |
-          claude -p "Run the addiction-auditor subagent on engagement-mechanic changes in this PR. Post the findings as a PR comment via gh." \
+          claude -p "$REVIEW_PROMPT" \
             --model claude-sonnet-4-6 \
             --output-format text || true
