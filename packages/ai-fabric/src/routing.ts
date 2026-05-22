@@ -68,12 +68,19 @@ const TABLE: Record<Task, RawDecision> = {
   },
   sourced_factcheck: {
     primary: { provider: 'perplexity', model: MODELS.perplexity_sonar },
-    fallbacks: [{ provider: 'anthropic', model: MODELS.anthropic_opus_47 }],
+    // Perplexity-present fallback: Sonnet 4.6, not Opus 4.7 — Opus's empty
+    // `{}` tool-input bug (see whenPerplexityMissing below) would resurface
+    // here the moment Perplexity is wired and ever falls back. Revisit if
+    // the Opus forced-tool / thinking path is fixed later.
+    fallbacks: [{ provider: 'anthropic', model: MODELS.anthropic_sonnet_46 }],
     whenPerplexityMissing: {
+      // Sonnet 4.6 — the model the generator already uses — is reliable on
+      // the forced-tool structured-output path. Opus 4.7 returns an empty
+      // `{}` tool input on ~30-40% of calls (2026-05-22 seed diagnostics),
+      // so the verifier routes to Sonnet, not Opus, when Perplexity is off.
       primary: {
         provider: 'anthropic',
-        model: MODELS.anthropic_opus_47,
-        extendedThinking: true,
+        model: MODELS.anthropic_sonnet_46,
       },
       fallbacks: [],
     },
