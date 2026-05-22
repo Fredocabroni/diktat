@@ -16,12 +16,14 @@ import { loadEnv, privyReady } from './env.js';
 import { buildBattlePoller } from './jobs/battle-poller.js';
 import { runMatchmakingTick } from './jobs/matchmake.js';
 import { startPrivyProvisionListener, type PrivyWalletProvider } from './jobs/privy-provision.js';
+import { defaultHandlers, runSchedulerTick } from './jobs/scheduler.js';
 import { buildLogger } from './logger.js';
 import { buildRedis } from './redis.js';
 import { buildServiceClient } from './supabase.js';
 
 const MATCHMAKE_TICK_MS = 1_000;
 const BATTLE_POLLER_TICK_MS = 5_000;
+const SCHEDULER_TICK_MS = 60_000; // ~1 min -- a committed due-row fires within the next minute.
 
 async function main(): Promise<void> {
   const env = loadEnv();
@@ -95,10 +97,37 @@ async function main(): Promise<void> {
       });
   }, BATTLE_POLLER_TICK_MS);
 
+  // Scheduler poll — drains public.scheduled_jobs rows emitted by pg_cron
+  // and dispatches by job_type to the handler registry. This PR registers
+  // 'heartbeat' only; feature PRs extend defaultHandlers with their own
+  // job types (drop_publish in 4.2, risk_push in 4.4, etc.).
+  const schedulerWorkerId = `workers-${process.pid}-${Date.now()}`;
+  let schedulerBusy = false;
+  const schedulerInterval = setInterval(() => {
+    if (schedulerBusy) return;
+    schedulerBusy = true;
+    runSchedulerTick({
+      supabase,
+      logger,
+      workerId: schedulerWorkerId,
+      handlers: defaultHandlers,
+    })
+      .catch((err) => {
+        logger.error({
+          event: 'scheduler.tick_failed',
+          message: err instanceof Error ? err.message : String(err),
+        });
+      })
+      .finally(() => {
+        schedulerBusy = false;
+      });
+  }, SCHEDULER_TICK_MS);
+
   const shutdown = (signal: string): void => {
     logger.info({ event: 'workers.shutdown', signal });
     clearInterval(matchmakingInterval);
     clearInterval(battlePollerInterval);
+    clearInterval(schedulerInterval);
     void Promise.all([battlePoller.stop(), listener.stop()]).finally(() => process.exit(0));
   };
   process.on('SIGTERM', () => shutdown('SIGTERM'));
