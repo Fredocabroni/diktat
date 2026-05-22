@@ -48,10 +48,11 @@ describe('routing — xAI/Perplexity dropped when env keys missing', () => {
     expect(d.fallbacks).toEqual([]);
   });
 
-  it('sourced_factcheck without perplexity falls back to Anthropic Opus extended-thinking', () => {
+  it('sourced_factcheck without perplexity routes to Anthropic Sonnet 4.6', () => {
     const d = route({ task: 'sourced_factcheck' }, ONLY_XAI);
     expect(d.primary).toBe('anthropic');
-    expect(d.extendedThinking).toBe(true);
+    expect(d.model).toBe('claude-sonnet-4-6');
+    expect(d.extendedThinking).toBeUndefined();
     expect(d.fallbacks).toEqual([]);
   });
 

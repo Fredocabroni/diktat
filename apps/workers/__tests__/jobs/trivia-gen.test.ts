@@ -62,8 +62,10 @@ const SAMPLE_DRAFT = {
   choices: ['Treasury', 'Federal Reserve', 'BLS', 'OMB'],
   correct_index: 2,
   difficulty: 4,
-  source_url: 'https://www.bls.gov/cpi/',
-  source_label: 'Bureau of Labor Statistics',
+  // govtrack.us is intentionally NOT in trivia-gen's HEAD_CHECK_WHITELIST, so
+  // the HEAD probe actually runs — the 'HEAD fails' test depends on that.
+  source_url: 'https://www.govtrack.us/',
+  source_label: 'GovTrack',
 };
 
 const SAMPLE_DRAFT_2 = {
@@ -73,6 +75,17 @@ const SAMPLE_DRAFT_2 = {
   difficulty: 3,
   source_url: 'https://www.congress.gov/',
   source_label: 'Congress.gov',
+};
+
+// www.bls.gov IS in trivia-gen's HEAD_CHECK_WHITELIST — its HEAD probe is
+// skipped, so verification proceeds even when the probe would have failed.
+const WHITELISTED_DRAFT = {
+  prompt: 'Which agency publishes the monthly Consumer Price Index release?',
+  choices: ['Treasury', 'Federal Reserve', 'BLS', 'OMB'],
+  correct_index: 2,
+  difficulty: 4,
+  source_url: 'https://www.bls.gov/cpi/',
+  source_label: 'Bureau of Labor Statistics',
 };
 
 function buildFetch(headStatus: number): typeof globalThis.fetch {
@@ -159,6 +172,198 @@ describe('runTriviaGen', () => {
     expect(supabase.inserts[0]!.payload).toMatchObject({ verified: false });
     // Verifier should not be called when HEAD fails.
     expect(invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips the HEAD check for whitelisted hosts and still verifies', async () => {
+    const supabase = buildSupabase();
+    const logger = buildLogger();
+    const invoke = vi.fn();
+    invoke.mockResolvedValueOnce({
+      output: { questions: [WHITELISTED_DRAFT] },
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-6',
+      task: 'trivia_gen',
+      usd: 0.005,
+      latencyMs: 800,
+    });
+    invoke.mockResolvedValueOnce({
+      output: { agrees: true, confidence: 0.91, reason: 'cite confirms' },
+      provider: 'anthropic',
+      model: 'claude-opus-4-7',
+      task: 'sourced_factcheck',
+      usd: 0.004,
+      latencyMs: 600,
+    });
+
+    // HEAD would 404 if probed — a whitelisted host must skip the probe.
+    const fetchMock = buildFetch(404);
+    const result = await runTriviaGen(
+      { category: 'fed', count: 1, difficultyBand: [3, 5] },
+      {
+        invoke: invoke as never,
+        supabase: supabase.client,
+        logger,
+        fetch: fetchMock,
+      },
+    );
+
+    expect(result).toEqual({ generated: 1, verified: 1, rejected: 0, failed: 0 });
+    expect(supabase.inserts[0]!.payload).toMatchObject({ verified: true });
+    // Generator + verifier both run; the HEAD probe is skipped, not performed.
+    expect(invoke).toHaveBeenCalledTimes(2);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(
+      logger.calls.find(
+        (c) => (c.obj as { event?: string }).event === 'trivia.gen.head_skipped_whitelist',
+      ),
+    ).toBeDefined();
+  });
+
+  it('treats a 403 HEAD as advisory pass and reaches the verifier', async () => {
+    const supabase = buildSupabase();
+    const logger = buildLogger();
+    const invoke = vi.fn();
+    invoke.mockResolvedValueOnce({
+      output: { questions: [SAMPLE_DRAFT] },
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-6',
+      task: 'trivia_gen',
+      usd: 0.005,
+      latencyMs: 800,
+    });
+    invoke.mockResolvedValueOnce({
+      output: { agrees: true, confidence: 0.9, reason: 'cite confirms' },
+      provider: 'anthropic',
+      model: 'claude-opus-4-7',
+      task: 'sourced_factcheck',
+      usd: 0.004,
+      latencyMs: 600,
+    });
+
+    const result = await runTriviaGen(
+      { category: 'fed', count: 1, difficultyBand: [3, 5] },
+      {
+        invoke: invoke as never,
+        supabase: supabase.client,
+        logger,
+        fetch: buildFetch(403),
+      },
+    );
+
+    expect(result).toEqual({ generated: 1, verified: 1, rejected: 0, failed: 0 });
+    // 403 is a CDN bot-block, not a dead link — the verifier still runs.
+    expect(invoke).toHaveBeenCalledTimes(2);
+    const headLog = logger.calls.find(
+      (c) => (c.obj as { event?: string }).event === 'trivia.gen.head_check',
+    );
+    expect(headLog).toBeDefined();
+    expect(headLog?.obj).toMatchObject({ outcome: 'advisory_pass', status: 403 });
+  });
+
+  it('rejects a 404 HEAD as a dead link without calling the verifier', async () => {
+    const supabase = buildSupabase();
+    const logger = buildLogger();
+    const invoke = vi.fn();
+    invoke.mockResolvedValueOnce({
+      output: { questions: [SAMPLE_DRAFT] },
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-6',
+      task: 'trivia_gen',
+      usd: 0.005,
+      latencyMs: 800,
+    });
+
+    const result = await runTriviaGen(
+      { category: 'fed', count: 1, difficultyBand: [3, 5] },
+      {
+        invoke: invoke as never,
+        supabase: supabase.client,
+        logger,
+        fetch: buildFetch(404),
+      },
+    );
+
+    expect(result).toEqual({ generated: 1, verified: 0, rejected: 1, failed: 0 });
+    expect(supabase.inserts[0]!.payload).toMatchObject({ verified: false });
+    expect(invoke).toHaveBeenCalledTimes(1);
+    const headLog = logger.calls.find(
+      (c) => (c.obj as { event?: string }).event === 'trivia.gen.head_check',
+    );
+    expect(headLog).toBeDefined();
+    expect(headLog?.obj).toMatchObject({ outcome: 'reject', status: 404 });
+  });
+
+  it('rejects a 410 HEAD as a dead link without calling the verifier', async () => {
+    const supabase = buildSupabase();
+    const logger = buildLogger();
+    const invoke = vi.fn();
+    invoke.mockResolvedValueOnce({
+      output: { questions: [SAMPLE_DRAFT] },
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-6',
+      task: 'trivia_gen',
+      usd: 0.005,
+      latencyMs: 800,
+    });
+
+    const result = await runTriviaGen(
+      { category: 'fed', count: 1, difficultyBand: [3, 5] },
+      {
+        invoke: invoke as never,
+        supabase: supabase.client,
+        logger,
+        fetch: buildFetch(410),
+      },
+    );
+
+    expect(result).toEqual({ generated: 1, verified: 0, rejected: 1, failed: 0 });
+    expect(invoke).toHaveBeenCalledTimes(1);
+    const headLog = logger.calls.find(
+      (c) => (c.obj as { event?: string }).event === 'trivia.gen.head_check',
+    );
+    expect(headLog).toBeDefined();
+    expect(headLog?.obj).toMatchObject({ outcome: 'reject', status: 410 });
+  });
+
+  it('treats a 503 HEAD as advisory pass (un-enumerated default) and reaches the verifier', async () => {
+    const supabase = buildSupabase();
+    const logger = buildLogger();
+    const invoke = vi.fn();
+    invoke.mockResolvedValueOnce({
+      output: { questions: [SAMPLE_DRAFT] },
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-6',
+      task: 'trivia_gen',
+      usd: 0.005,
+      latencyMs: 800,
+    });
+    invoke.mockResolvedValueOnce({
+      output: { agrees: true, confidence: 0.9, reason: 'cite confirms' },
+      provider: 'anthropic',
+      model: 'claude-opus-4-7',
+      task: 'sourced_factcheck',
+      usd: 0.004,
+      latencyMs: 600,
+    });
+
+    const result = await runTriviaGen(
+      { category: 'fed', count: 1, difficultyBand: [3, 5] },
+      {
+        invoke: invoke as never,
+        supabase: supabase.client,
+        logger,
+        fetch: buildFetch(503),
+      },
+    );
+
+    expect(result).toEqual({ generated: 1, verified: 1, rejected: 0, failed: 0 });
+    // 503 is transient server trouble, not a dead link — only 404/410 reject.
+    expect(invoke).toHaveBeenCalledTimes(2);
+    const headLog = logger.calls.find(
+      (c) => (c.obj as { event?: string }).event === 'trivia.gen.head_check',
+    );
+    expect(headLog).toBeDefined();
+    expect(headLog?.obj).toMatchObject({ outcome: 'advisory_pass', status: 503 });
   });
 
   it('rejects (verified=false) when verifier disagrees', async () => {

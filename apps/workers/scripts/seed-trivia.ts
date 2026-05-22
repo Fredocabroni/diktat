@@ -72,11 +72,33 @@ async function main(): Promise<void> {
 
   let totals = { generated: 0, verified: 0, rejected: 0, failed: 0 };
 
+  // Skip categories that already have enough verified rows. Re-running the
+  // seed after partial completion (network failure, ctrl-c) shouldn't re-spend
+  // on categories that are already done.
+  const SKIP_THRESHOLD = 15;
+
   for (const plan of CATEGORIES) {
+    const existing = await supabase
+      .from('trivia_questions')
+      .select('id', { count: 'exact', head: true })
+      .eq('category', plan.category)
+      .eq('verified', true);
+    const verifiedCount = existing.count ?? 0;
+    if (verifiedCount >= SKIP_THRESHOLD) {
+      logger.info({
+        event: 'seed-trivia.batch.skip',
+        category: plan.category,
+        verifiedCount,
+        threshold: SKIP_THRESHOLD,
+      });
+      continue;
+    }
+
     logger.info({
       event: 'seed-trivia.batch.start',
       category: plan.category,
       count: plan.count,
+      existingVerified: verifiedCount,
     });
 
     const result = await runTriviaGen(plan, {

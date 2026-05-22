@@ -1,17 +1,12 @@
 // Stateless JWT verifier for Supabase-issued tokens. Used by `apps/api` to
 // authenticate incoming tRPC requests without round-tripping to Supabase.
 //
-// Supabase signs JWTs with the project's HS256 JWT secret (Settings → API).
-// The verifier requires:
-//   - the secret (raw string),
-//   - optional issuer (defaults to permissive — pass for stricter checks),
-//   - optional audience (defaults to 'authenticated', the role Supabase
-//     stamps on signed-in user JWTs).
-//
-// All failure modes throw `ValidationError` with a message a caller can log
-// safely. Never echo the token itself to the user.
+// Supports HS256 (legacy shared-secret) and ES256/RS256/EdDSA (asymmetric,
+// via JWKS). Pick one of `secret` or `jwksUrl` per call. Modern Supabase
+// projects sign with asymmetric keys and expose JWKS at
+// `<projectUrl>/auth/v1/.well-known/jwks.json`.
 
-import { jwtVerify, errors as joseErrors } from 'jose';
+import { jwtVerify, errors as joseErrors, createRemoteJWKSet } from 'jose';
 
 import { ValidationError } from '@diktat/shared';
 
@@ -23,40 +18,61 @@ export interface VerifiedClaims {
 }
 
 export interface VerifyJwtOptions {
-  /** Supabase project JWT secret. Required. */
-  readonly secret: string;
+  /** HS256 shared secret. Mutually exclusive with `jwksUrl`. */
+  readonly secret?: string;
+  /** Asymmetric JWKS endpoint URL. Mutually exclusive with `secret`. */
+  readonly jwksUrl?: string;
   /** Strict issuer check, e.g. `https://<ref>.supabase.co/auth/v1`. Optional. */
   readonly issuer?: string;
   /** JWT `aud` claim — Supabase signed-in users carry `'authenticated'`. */
   readonly audience?: string;
 }
 
-/**
- * Verify a Supabase JWT. Returns the canonical claims on success; throws
- * `ValidationError` on every failure mode (expired, malformed, wrong sig,
- * wrong issuer/audience, missing `sub`).
- */
+// Cache JWKS sets per URL so we don't refetch on every request.
+const jwksCache = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
+
+function getJwks(url: string): ReturnType<typeof createRemoteJWKSet> {
+  let jwks = jwksCache.get(url);
+  if (jwks === undefined) {
+    jwks = createRemoteJWKSet(new URL(url));
+    jwksCache.set(url, jwks);
+  }
+  return jwks;
+}
+
 export async function verifyJwt(
   token: string,
   opts: VerifyJwtOptions,
 ): Promise<VerifiedClaims> {
-  if (!opts.secret) {
-    throw new ValidationError('verifyJwt: missing JWT secret');
-  }
   if (!token || typeof token !== 'string') {
     throw new ValidationError('verifyJwt: token must be a non-empty string');
   }
+  if (!opts.secret && !opts.jwksUrl) {
+    throw new ValidationError('verifyJwt: must supply either secret or jwksUrl');
+  }
 
-  const key = new TextEncoder().encode(opts.secret);
+  const baseOpts = {
+    ...(opts.issuer ? { issuer: opts.issuer } : {}),
+    audience: opts.audience ?? 'authenticated',
+  };
 
   let payload: Awaited<ReturnType<typeof jwtVerify>>['payload'];
   try {
-    const result = await jwtVerify(token, key, {
-      algorithms: ['HS256'],
-      ...(opts.issuer ? { issuer: opts.issuer } : {}),
-      audience: opts.audience ?? 'authenticated',
-    });
-    payload = result.payload;
+    if (opts.jwksUrl) {
+      const jwks = getJwks(opts.jwksUrl);
+      const result = await jwtVerify(token, jwks, {
+        algorithms: ['ES256', 'RS256', 'EdDSA'],
+        ...baseOpts,
+      });
+      payload = result.payload;
+    } else {
+      const key = new TextEncoder().encode(opts.secret as string);
+      const result = await jwtVerify(token, key, {
+        algorithms: ['HS256'],
+        ...baseOpts,
+      });
+      payload = result.payload;
+    }
   } catch (err) {
     if (err instanceof joseErrors.JWTExpired) {
       throw new ValidationError('verifyJwt: token expired', err);

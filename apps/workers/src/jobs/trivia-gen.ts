@@ -44,7 +44,10 @@ const QuestionBatchSchema = z.object({
 const VerifyResultSchema = z.object({
   agrees: z.boolean(),
   confidence: z.number().min(0).max(1),
-  reason: z.string().max(500),
+  // No length cap — `reason` is logged for observability then discarded,
+  // never persisted. A cap here only risks a ZodError that silently turns
+  // a valid verdict into a rejection (see the verifyOne catch block).
+  reason: z.string(),
 });
 
 export interface TriviaGenInput {
@@ -210,21 +213,160 @@ interface VerifyVerdict {
     | 'verifier_error';
 }
 
-async function verifyOne(draft: QuestionDraft, deps: VerifyOneDeps): Promise<VerifyVerdict> {
-  // 1. HEAD-check the source URL. A 200 OK is required regardless of
-  //    what the verifier model thinks — a broken citation can't
-  //    substantiate the answer.
-  let headOk = false;
+// MASTER_PLAN.md §8 primary sources whose hosts are known to block automated
+// HEAD probes (Akamai/CDN WAF rejects bare-fetch User-Agents) but are stable
+// enough to skip the liveness gate. A wrong URL on these hosts will still get
+// caught by the substance check (verifier model reads the URL).
+// See CLAUDE.md "Phase 3.5 — HEAD-check whitelist".
+const HEAD_CHECK_WHITELIST: ReadonlyArray<string> = [
+  // §8 primary sources where Node fetch HEAD is unreliable from this network
+  // (CDN-WAF blocks, IPv6 routing, slow handshake). The substance verifier
+  // (Opus reads the URL) is the real correctness gate; HEAD is just a
+  // liveness probe and these hosts are stable enough to skip it.
+  'congress.gov',
+  'www.congress.gov',
+  'fred.stlouisfed.org',
+  'www.federalreserve.gov',
+  'federalreserve.gov',
+  'www.bls.gov',
+  'bls.gov',
+  'www.fbi.gov',
+  'fbi.gov',
+  'www.cdc.gov',
+  'cdc.gov',
+  'www.sec.gov',
+  'sec.gov',
+  'www.dol.gov',
+  'dol.gov',
+  'www.defense.gov',
+  'defense.gov',
+  'home.treasury.gov',
+  'www.supremecourt.gov',
+  'supremecourt.gov',
+  'www.census.gov',
+  'census.gov',
+  'www.cbo.gov',
+  'cbo.gov',
+  'www.justice.gov',
+  'justice.gov',
+];
+
+function shouldSkipHeadCheck(url: string): boolean {
   try {
-    const response = await deps.fetch(draft.source_url, { method: 'HEAD' });
-    headOk = response.ok;
+    const host = new URL(url).hostname.toLowerCase();
+    return HEAD_CHECK_WHITELIST.includes(host);
+  } catch {
+    return false;
+  }
+}
+
+function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return '(invalid-url)';
+  }
+}
+
+// HTTP statuses that mean the cited page is genuinely gone — a real dead
+// link. Every other status means the host answered: 2xx is healthy, and
+// bot-blocks (403/405/429) or transient 5xx still prove the host is live.
+// Curl-probe evidence: ucr.fbi.gov, supreme.justia.com and
+// constitution.congress.gov 403 every HTTP shape yet are live primary
+// sources — the liveness gate must not reject those.
+const HEAD_DEAD_STATUSES: ReadonlySet<number> = new Set([404, 410]);
+
+/**
+ * Probe the source URL with a HEAD request and decide whether it clears the
+ * liveness gate. Returns `true` to proceed to the verifier, `false` to reject
+ * as `source_unreachable`. Every outcome is logged with host + status.
+ *
+ *   2xx                              -> pass
+ *   404 / 410                        -> reject (dead link)
+ *   403 / 405 / 429 + other non-2xx  -> advisory pass (host answered, not dead)
+ *   thrown (DNS / refused / timeout) -> reject (genuinely unreachable)
+ */
+async function runHeadCheck(url: string, deps: VerifyOneDeps): Promise<boolean> {
+  const host = hostOf(url);
+  let status: number;
+  try {
+    const response = await deps.fetch(url, {
+      method: 'HEAD',
+      signal: AbortSignal.timeout(5000),
+    });
+    status = response.status;
   } catch (err) {
     deps.logger.warn({
-      event: 'trivia.gen.head_failed',
-      url: draft.source_url,
-      message: err instanceof Error ? err.message : String(err),
+      event: 'trivia.gen.head_check',
+      url,
+      host,
+      status: null,
+      outcome: 'reject',
+      error: err instanceof Error ? err.message : String(err),
     });
-    headOk = false;
+    return false;
+  }
+
+  if (HEAD_DEAD_STATUSES.has(status)) {
+    deps.logger.warn({ event: 'trivia.gen.head_check', url, host, status, outcome: 'reject' });
+    return false;
+  }
+  if (status >= 200 && status < 300) {
+    deps.logger.info({ event: 'trivia.gen.head_check', url, host, status, outcome: 'pass' });
+    return true;
+  }
+  // Non-2xx, non-dead: 403/405/429 CDN bot-blocks and transient 5xx. The host
+  // answered, so the citation is not a dead link — proceed to the verifier,
+  // but log loudly so a run can be audited.
+  deps.logger.warn({ event: 'trivia.gen.head_check', url, host, status, outcome: 'advisory_pass' });
+  return true;
+}
+
+/**
+ * Walk an error's `cause` chain (Diktat errors forward `cause` to the native
+ * Error). Returns `'schema_mismatch'` when any link is a Zod or Diktat
+ * validation error — the model answered but our schema rejected it — versus
+ * `'provider_error'` for transport / API / budget failures. Lets a seed
+ * re-run self-validate: zero `schema_mismatch` rejections means the fix held.
+ */
+function classifyVerifierFailure(err: unknown): 'schema_mismatch' | 'provider_error' {
+  let cursor: unknown = err;
+  for (let depth = 0; depth < 8 && cursor instanceof Error; depth++) {
+    if (cursor.name === 'ZodError') return 'schema_mismatch';
+    if ((cursor as { code?: unknown }).code === 'VALIDATION_FAILED') return 'schema_mismatch';
+    cursor = (cursor as { cause?: unknown }).cause;
+  }
+  return 'provider_error';
+}
+
+/** Deepest message in the cause chain — the real failure, not the wrapper. */
+function rootCauseMessage(err: unknown): string {
+  let cursor: unknown = err;
+  let message = err instanceof Error ? err.message : String(err);
+  for (let depth = 0; depth < 8 && cursor instanceof Error; depth++) {
+    message = cursor.message;
+    cursor = (cursor as { cause?: unknown }).cause;
+  }
+  return message;
+}
+
+async function verifyOne(draft: QuestionDraft, deps: VerifyOneDeps): Promise<VerifyVerdict> {
+  // 1. HEAD-check the source URL — a *liveness* gate, not a content check.
+  //    Many primary-source CDNs (Akamai/WAF) 403 every server-side request
+  //    regardless of method or headers, so the gate is status-aware: only a
+  //    genuinely-dead signal (404/410, DNS failure, refused, timeout) rejects;
+  //    a bot-block on a host that answered is advisory-pass. Whitelisted hosts
+  //    skip the probe entirely.
+  let headOk: boolean;
+  if (shouldSkipHeadCheck(draft.source_url)) {
+    deps.logger.info({
+      event: 'trivia.gen.head_skipped_whitelist',
+      url: draft.source_url,
+      host: hostOf(draft.source_url),
+    });
+    headOk = true;
+  } else {
+    headOk = await runHeadCheck(draft.source_url, deps);
   }
 
   if (!headOk) {
@@ -249,6 +391,19 @@ async function verifyOne(draft: QuestionDraft, deps: VerifyOneDeps): Promise<Ver
       maxTokens: 1024,
     });
     const verdict = result.output as z.infer<typeof VerifyResultSchema>;
+    // Log every verdict's actual reason text + length. A re-run can grep
+    // `reasonLength` to confirm reasons now flow past the old 500-char cap,
+    // and `agrees: false` here marks a genuine model disagreement (distinct
+    // from the schema/transport failures logged in the catch below).
+    deps.logger.info({
+      event: 'trivia.gen.verifier_verdict',
+      url: draft.source_url,
+      prompt: draft.prompt,
+      agrees: verdict.agrees,
+      confidence: verdict.confidence,
+      reasonLength: verdict.reason.length,
+      reason: verdict.reason,
+    });
     if (!verdict.agrees) {
       return { outcome: 'rejected', reason: 'ai_disagree' };
     }
@@ -257,10 +412,16 @@ async function verifyOne(draft: QuestionDraft, deps: VerifyOneDeps): Promise<Ver
     }
     return { outcome: 'verified', reason: 'ai_consensus' };
   } catch (err) {
+    // failureKind splits our-schema-rejected-a-valid-answer (`schema_mismatch`)
+    // from a real provider/transport failure (`provider_error`). After the
+    // reason-cap removal, `schema_mismatch` rejections should drop to zero.
+    const failureKind = classifyVerifierFailure(err);
     deps.logger.warn({
       event: 'trivia.gen.verifier_failed',
       url: draft.source_url,
+      failureKind,
       message: err instanceof Error ? err.message : String(err),
+      detail: rootCauseMessage(err),
     });
     return { outcome: 'rejected', reason: 'verifier_error' };
   }

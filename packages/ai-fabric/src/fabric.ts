@@ -6,7 +6,7 @@ import { googleAdapter } from './adapters/google.js';
 import { openaiAdapter } from './adapters/openai.js';
 import { perplexityAdapter } from './adapters/perplexity.js';
 import { xaiAdapter } from './adapters/xai.js';
-import { assertUnderCap, recordSpend } from './cost.js';
+import { assertUnderCap, readBilledUsd, recordSpend } from './cost.js';
 import { defaultSink, logCall } from './logging.js';
 import { withRetry } from './retry.js';
 import { modelFor, route } from './routing.js';
@@ -122,6 +122,18 @@ export async function invoke<S extends ZodTypeAny | undefined = undefined>(
       };
     } catch (err) {
       lastError = err;
+      // A call that reached the provider (and was billed) but failed
+      // downstream — e.g. a structured-output parse error — stamps its real
+      // cost on the thrown error. Record it so the ledger and per-task cap
+      // are not blind to billed-but-failed spend.
+      const billedUsd = readBilledUsd(err);
+      if (billedUsd > 0) {
+        recordSpend(req.task, billedUsd, {
+          sink,
+          provider: link.provider,
+          model: link.model,
+        });
+      }
       logCall(
         {
           ts: new Date().toISOString(),
@@ -129,7 +141,7 @@ export async function invoke<S extends ZodTypeAny | undefined = undefined>(
           task: req.task,
           provider: link.provider,
           model: link.model,
-          usd: 0,
+          usd: billedUsd,
           latencyMs: 0,
           status: 'fail',
           message: 'adapter failed; trying next link in chain',

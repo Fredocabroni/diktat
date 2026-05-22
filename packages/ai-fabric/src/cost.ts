@@ -151,6 +151,35 @@ export function recordSpend(
 }
 
 /**
+ * A thrown error carrying the USD a provider already billed before a
+ * downstream failure (e.g. a structured-output parse error).
+ */
+interface BilledError {
+  billedUsd?: number;
+}
+
+/**
+ * Stamp the already-incurred USD onto an error so the fabric fail path can
+ * still record it. Closes the gap where a call that reached the provider
+ * (and was billed) but failed downstream recorded $0.
+ */
+export function stampBilledUsd(err: unknown, usd: number): unknown {
+  if (err !== null && typeof err === 'object' && Number.isFinite(usd) && usd > 0) {
+    (err as BilledError).billedUsd = usd;
+  }
+  return err;
+}
+
+/** Read back the USD stamped by `stampBilledUsd`, or 0 when absent. */
+export function readBilledUsd(err: unknown): number {
+  if (err !== null && typeof err === 'object' && 'billedUsd' in err) {
+    const v = (err as BilledError).billedUsd;
+    if (typeof v === 'number' && Number.isFinite(v) && v > 0) return v;
+  }
+  return 0;
+}
+
+/**
  * Hydrate the in-memory ledger from the configured cost sink. Call once
  * at process boot AFTER `setCostSink(...)` so a restarted worker picks
  * up the day's accumulated spend instead of starting at zero.
