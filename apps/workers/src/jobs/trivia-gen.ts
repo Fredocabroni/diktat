@@ -260,6 +260,68 @@ function shouldSkipHeadCheck(url: string): boolean {
   }
 }
 
+function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return '(invalid-url)';
+  }
+}
+
+// HTTP statuses that mean the cited page is genuinely gone — a real dead
+// link. Every other status means the host answered: 2xx is healthy, and
+// bot-blocks (403/405/429) or transient 5xx still prove the host is live.
+// Curl-probe evidence: ucr.fbi.gov, supreme.justia.com and
+// constitution.congress.gov 403 every HTTP shape yet are live primary
+// sources — the liveness gate must not reject those.
+const HEAD_DEAD_STATUSES: ReadonlySet<number> = new Set([404, 410]);
+
+/**
+ * Probe the source URL with a HEAD request and decide whether it clears the
+ * liveness gate. Returns `true` to proceed to the verifier, `false` to reject
+ * as `source_unreachable`. Every outcome is logged with host + status.
+ *
+ *   2xx                              -> pass
+ *   404 / 410                        -> reject (dead link)
+ *   403 / 405 / 429 + other non-2xx  -> advisory pass (host answered, not dead)
+ *   thrown (DNS / refused / timeout) -> reject (genuinely unreachable)
+ */
+async function runHeadCheck(url: string, deps: VerifyOneDeps): Promise<boolean> {
+  const host = hostOf(url);
+  let status: number;
+  try {
+    const response = await deps.fetch(url, {
+      method: 'HEAD',
+      signal: AbortSignal.timeout(5000),
+    });
+    status = response.status;
+  } catch (err) {
+    deps.logger.warn({
+      event: 'trivia.gen.head_check',
+      url,
+      host,
+      status: null,
+      outcome: 'reject',
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
+
+  if (HEAD_DEAD_STATUSES.has(status)) {
+    deps.logger.warn({ event: 'trivia.gen.head_check', url, host, status, outcome: 'reject' });
+    return false;
+  }
+  if (status >= 200 && status < 300) {
+    deps.logger.info({ event: 'trivia.gen.head_check', url, host, status, outcome: 'pass' });
+    return true;
+  }
+  // Non-2xx, non-dead: 403/405/429 CDN bot-blocks and transient 5xx. The host
+  // answered, so the citation is not a dead link — proceed to the verifier,
+  // but log loudly so a run can be audited.
+  deps.logger.warn({ event: 'trivia.gen.head_check', url, host, status, outcome: 'advisory_pass' });
+  return true;
+}
+
 /**
  * Walk an error's `cause` chain (Diktat errors forward `cause` to the native
  * Error). Returns `'schema_mismatch'` when any link is a Zod or Diktat
@@ -289,32 +351,22 @@ function rootCauseMessage(err: unknown): string {
 }
 
 async function verifyOne(draft: QuestionDraft, deps: VerifyOneDeps): Promise<VerifyVerdict> {
-  // 1. HEAD-check the source URL. A 200 OK is required regardless of
-  //    what the verifier model thinks — a broken citation can't
-  //    substantiate the answer. Whitelisted hosts (CDN-WAF blocks bare
-  //    fetches) skip this gate and rely on the substance verifier.
-  let headOk = false;
+  // 1. HEAD-check the source URL — a *liveness* gate, not a content check.
+  //    Many primary-source CDNs (Akamai/WAF) 403 every server-side request
+  //    regardless of method or headers, so the gate is status-aware: only a
+  //    genuinely-dead signal (404/410, DNS failure, refused, timeout) rejects;
+  //    a bot-block on a host that answered is advisory-pass. Whitelisted hosts
+  //    skip the probe entirely.
+  let headOk: boolean;
   if (shouldSkipHeadCheck(draft.source_url)) {
     deps.logger.info({
       event: 'trivia.gen.head_skipped_whitelist',
       url: draft.source_url,
+      host: hostOf(draft.source_url),
     });
     headOk = true;
   } else {
-    try {
-      const response = await deps.fetch(draft.source_url, {
-        method: 'HEAD',
-        signal: AbortSignal.timeout(5000),
-      });
-      headOk = response.ok;
-    } catch (err) {
-      deps.logger.warn({
-        event: 'trivia.gen.head_failed',
-        url: draft.source_url,
-        message: err instanceof Error ? err.message : String(err),
-      });
-      headOk = false;
-    }
+    headOk = await runHeadCheck(draft.source_url, deps);
   }
 
   if (!headOk) {
