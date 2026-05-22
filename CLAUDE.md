@@ -29,6 +29,16 @@ A Gen Z political news + debate PWA. "TikTok meets Duolingo meets Reuters raised
 - When touching anything user-facing, run `copy-linter` subagent.
 - When designing mechanics, run `addiction-auditor` subagent.
 
+## Build / debugging discipline
+
+Standing rules for diagnosis and debugging work — apply these by default, no reminder needed.
+
+- **Instrument before you spend.** Add logging / visibility _before_ re-running anything that costs AI tokens or real money. Never re-run a failing expensive job blind — make the next run produce evidence.
+- **Confirm the hypothesis with evidence before acting on it.** Never apply a fix based on a plausible-but-unconfirmed cause. A cause that "looks obvious" is not a confirmed cause — instrument, observe, _then_ fix. (Phase 3.5 lesson: the reason-cap and `maxTokens`-truncation hypotheses both looked obvious; both were wrong. The real causes — a status-blind HEAD gate, then an Opus 4.7 forced-`tool_choice` bug — only surfaced once the calls were instrumented.)
+- **One variable per change.** Change one thing at a time and validate it, so you know what actually worked. Don't bundle a model swap with a prompt tweak with a retry change.
+- **Abort-guard on cost.** When a run incurs AI spend, monitor it live, define the abort condition up front, and abort the moment it trips. Track the daily cost-ledger cap — a capped run is acceptable, a blown budget is not.
+- **Match loop size to uncertainty.** Tight single-step iterations when guessing or spending real money — show work and checkpoint. Larger autonomous batches when executing a known, validated plan.
+
 ## Deployment
 
 - web → Vercel (auto from `main` via GitHub) — **TODO until VERCEL_TOKEN is added**
