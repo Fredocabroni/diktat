@@ -5,6 +5,7 @@ import { zodToJsonSchema } from 'zod-to-json-schema';
 import type { ZodTypeAny } from 'zod';
 import type { AdapterResult, ProviderEnv } from '../types.js';
 import { parseStructured } from '../structured.js';
+import { stampBilledUsd } from '../cost.js';
 
 /** Anthropic per-1M-token pricing snapshot. Adjust as the price page moves. */
 const PRICE_PER_M_INPUT_USD: Record<string, number> = {
@@ -117,14 +118,65 @@ export const anthropicAdapter = {
 
     if (schema) {
       const toolUse = response.content.find((block) => block.type === 'tool_use');
+      const textBlockCount = response.content.filter((b) => b.type === 'text').length;
+      const textChars = response.content.reduce(
+        (n, b) => n + (b.type === 'text' ? b.text.length : 0),
+        0,
+      );
+
       if (!toolUse || toolUse.type !== 'tool_use') {
-        throw new ProviderError('anthropic', 'expected tool_use block in structured response');
+        // Instrumentation: a structured call that returned no tool_use block.
+        console.warn(
+          JSON.stringify({
+            event: 'anthropic.structured.fail',
+            reason: 'no_tool_use_block',
+            model,
+            stop_reason: response.stop_reason,
+            usage,
+            text_blocks: textBlockCount,
+            text_chars: textChars,
+            tool_use_present: false,
+          }),
+        );
+        throw stampBilledUsd(
+          new ProviderError('anthropic', 'expected tool_use block in structured response'),
+          usd,
+        );
       }
-      return {
-        output: schema.parse(toolUse.input) as never,
-        usd,
-        latencyMs,
-      };
+
+      try {
+        const output = schema.parse(toolUse.input) as never;
+        // Instrumentation: stop_reason + usage on the structured success path.
+        console.info(
+          JSON.stringify({
+            event: 'anthropic.structured.ok',
+            model,
+            stop_reason: response.stop_reason,
+            usage,
+          }),
+        );
+        return { output, usd, latencyMs };
+      } catch (parseErr) {
+        // Instrumentation: the tool_use input failed Zod validation. Capture
+        // stop_reason, usage, any preamble text blocks, and the raw input —
+        // the evidence that decides whether the empty `{}` is a max_tokens
+        // truncation. The error still throws; logging only, no degradation.
+        console.warn(
+          JSON.stringify({
+            event: 'anthropic.structured.fail',
+            reason: 'schema_parse',
+            model,
+            stop_reason: response.stop_reason,
+            usage,
+            text_blocks: textBlockCount,
+            text_chars: textChars,
+            tool_use_present: true,
+            raw_tool_input: toolUse.input,
+            parse_error: parseErr instanceof Error ? parseErr.message : String(parseErr),
+          }),
+        );
+        throw stampBilledUsd(parseErr, usd);
+      }
     }
 
     const textBlocks = response.content
