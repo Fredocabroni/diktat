@@ -210,21 +210,77 @@ interface VerifyVerdict {
     | 'verifier_error';
 }
 
+// MASTER_PLAN.md §8 primary sources whose hosts are known to block automated
+// HEAD probes (Akamai/CDN WAF rejects bare-fetch User-Agents) but are stable
+// enough to skip the liveness gate. A wrong URL on these hosts will still get
+// caught by the substance check (verifier model reads the URL).
+// See CLAUDE.md "Phase 3.5 — HEAD-check whitelist".
+const HEAD_CHECK_WHITELIST: ReadonlyArray<string> = [
+  // §8 primary sources where Node fetch HEAD is unreliable from this network
+  // (CDN-WAF blocks, IPv6 routing, slow handshake). The substance verifier
+  // (Opus reads the URL) is the real correctness gate; HEAD is just a
+  // liveness probe and these hosts are stable enough to skip it.
+  'congress.gov',
+  'www.congress.gov',
+  'fred.stlouisfed.org',
+  'www.federalreserve.gov',
+  'federalreserve.gov',
+  'www.bls.gov',
+  'bls.gov',
+  'www.fbi.gov',
+  'fbi.gov',
+  'www.cdc.gov',
+  'cdc.gov',
+  'www.sec.gov',
+  'sec.gov',
+  'www.dol.gov',
+  'dol.gov',
+  'www.defense.gov',
+  'defense.gov',
+  'home.treasury.gov',
+  'www.supremecourt.gov',
+  'supremecourt.gov',
+  'www.census.gov',
+  'census.gov',
+  'www.cbo.gov',
+  'cbo.gov',
+  'www.justice.gov',
+  'justice.gov',
+];
+
+function shouldSkipHeadCheck(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return HEAD_CHECK_WHITELIST.includes(host);
+  } catch {
+    return false;
+  }
+}
+
 async function verifyOne(draft: QuestionDraft, deps: VerifyOneDeps): Promise<VerifyVerdict> {
   // 1. HEAD-check the source URL. A 200 OK is required regardless of
   //    what the verifier model thinks — a broken citation can't
-  //    substantiate the answer.
+  //    substantiate the answer. Whitelisted hosts (CDN-WAF blocks bare
+  //    fetches) skip this gate and rely on the substance verifier.
   let headOk = false;
-  try {
-    const response = await deps.fetch(draft.source_url, { method: 'HEAD' });
-    headOk = response.ok;
-  } catch (err) {
-    deps.logger.warn({
-      event: 'trivia.gen.head_failed',
+  if (shouldSkipHeadCheck(draft.source_url)) {
+    deps.logger.info({
+      event: 'trivia.gen.head_skipped_whitelist',
       url: draft.source_url,
-      message: err instanceof Error ? err.message : String(err),
     });
-    headOk = false;
+    headOk = true;
+  } else {
+    try {
+      const response = await deps.fetch(draft.source_url, { method: 'HEAD', signal: AbortSignal.timeout(5000) });
+      headOk = response.ok;
+    } catch (err) {
+      deps.logger.warn({
+        event: 'trivia.gen.head_failed',
+        url: draft.source_url,
+        message: err instanceof Error ? err.message : String(err),
+      });
+      headOk = false;
+    }
   }
 
   if (!headOk) {

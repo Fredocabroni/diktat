@@ -90,9 +90,10 @@ export const anthropicAdapter = {
         string,
         unknown
       >;
+      // Anthropic API rejects `thinking` + forced `tool_choice` together.
+      // Structured outputs always force the tool, so omit thinkingParam here.
       const toolParams = {
         ...baseParams,
-        ...thinkingParam,
         tools: [
           {
             name: 'respond',

@@ -59,7 +59,11 @@ export async function buildContext(env: Env, req: FastifyRequest): Promise<Conte
   if (rawBearer) {
     try {
       const claims = await verifyJwt(rawBearer, {
-        secret: env.SUPABASE_JWT_SECRET,
+        // Prefer JWKS (asymmetric ES256/RS256) when configured. Fall back
+        // to legacy HS256 shared-secret verification.
+        ...(env.SUPABASE_JWKS_URL
+          ? { jwksUrl: env.SUPABASE_JWKS_URL }
+          : { secret: env.SUPABASE_JWT_SECRET }),
         ...(env.SUPABASE_JWT_ISSUER ? { issuer: env.SUPABASE_JWT_ISSUER } : {}),
       });
       userId = claims.sub;

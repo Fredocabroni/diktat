@@ -11,6 +11,7 @@ const envSchema = z.object({
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
   SUPABASE_JWT_SECRET: z.string().min(1),
   SUPABASE_JWT_ISSUER: z.string().url().optional(),
+  SUPABASE_JWKS_URL: z.string().url().optional(),
 
   // Upstash REST. The matchmaking router writes to the same
   // sorted-set and meta keys that the workers tick consumes.
