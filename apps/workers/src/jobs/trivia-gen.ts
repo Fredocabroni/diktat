@@ -44,7 +44,10 @@ const QuestionBatchSchema = z.object({
 const VerifyResultSchema = z.object({
   agrees: z.boolean(),
   confidence: z.number().min(0).max(1),
-  reason: z.string().max(500),
+  // No length cap — `reason` is logged for observability then discarded,
+  // never persisted. A cap here only risks a ZodError that silently turns
+  // a valid verdict into a rejection (see the verifyOne catch block).
+  reason: z.string(),
 });
 
 export interface TriviaGenInput {
@@ -257,6 +260,34 @@ function shouldSkipHeadCheck(url: string): boolean {
   }
 }
 
+/**
+ * Walk an error's `cause` chain (Diktat errors forward `cause` to the native
+ * Error). Returns `'schema_mismatch'` when any link is a Zod or Diktat
+ * validation error — the model answered but our schema rejected it — versus
+ * `'provider_error'` for transport / API / budget failures. Lets a seed
+ * re-run self-validate: zero `schema_mismatch` rejections means the fix held.
+ */
+function classifyVerifierFailure(err: unknown): 'schema_mismatch' | 'provider_error' {
+  let cursor: unknown = err;
+  for (let depth = 0; depth < 8 && cursor instanceof Error; depth++) {
+    if (cursor.name === 'ZodError') return 'schema_mismatch';
+    if ((cursor as { code?: unknown }).code === 'VALIDATION_FAILED') return 'schema_mismatch';
+    cursor = (cursor as { cause?: unknown }).cause;
+  }
+  return 'provider_error';
+}
+
+/** Deepest message in the cause chain — the real failure, not the wrapper. */
+function rootCauseMessage(err: unknown): string {
+  let cursor: unknown = err;
+  let message = err instanceof Error ? err.message : String(err);
+  for (let depth = 0; depth < 8 && cursor instanceof Error; depth++) {
+    message = cursor.message;
+    cursor = (cursor as { cause?: unknown }).cause;
+  }
+  return message;
+}
+
 async function verifyOne(draft: QuestionDraft, deps: VerifyOneDeps): Promise<VerifyVerdict> {
   // 1. HEAD-check the source URL. A 200 OK is required regardless of
   //    what the verifier model thinks — a broken citation can't
@@ -271,7 +302,10 @@ async function verifyOne(draft: QuestionDraft, deps: VerifyOneDeps): Promise<Ver
     headOk = true;
   } else {
     try {
-      const response = await deps.fetch(draft.source_url, { method: 'HEAD', signal: AbortSignal.timeout(5000) });
+      const response = await deps.fetch(draft.source_url, {
+        method: 'HEAD',
+        signal: AbortSignal.timeout(5000),
+      });
       headOk = response.ok;
     } catch (err) {
       deps.logger.warn({
@@ -305,6 +339,19 @@ async function verifyOne(draft: QuestionDraft, deps: VerifyOneDeps): Promise<Ver
       maxTokens: 1024,
     });
     const verdict = result.output as z.infer<typeof VerifyResultSchema>;
+    // Log every verdict's actual reason text + length. A re-run can grep
+    // `reasonLength` to confirm reasons now flow past the old 500-char cap,
+    // and `agrees: false` here marks a genuine model disagreement (distinct
+    // from the schema/transport failures logged in the catch below).
+    deps.logger.info({
+      event: 'trivia.gen.verifier_verdict',
+      url: draft.source_url,
+      prompt: draft.prompt,
+      agrees: verdict.agrees,
+      confidence: verdict.confidence,
+      reasonLength: verdict.reason.length,
+      reason: verdict.reason,
+    });
     if (!verdict.agrees) {
       return { outcome: 'rejected', reason: 'ai_disagree' };
     }
@@ -313,10 +360,16 @@ async function verifyOne(draft: QuestionDraft, deps: VerifyOneDeps): Promise<Ver
     }
     return { outcome: 'verified', reason: 'ai_consensus' };
   } catch (err) {
+    // failureKind splits our-schema-rejected-a-valid-answer (`schema_mismatch`)
+    // from a real provider/transport failure (`provider_error`). After the
+    // reason-cap removal, `schema_mismatch` rejections should drop to zero.
+    const failureKind = classifyVerifierFailure(err);
     deps.logger.warn({
       event: 'trivia.gen.verifier_failed',
       url: draft.source_url,
+      failureKind,
       message: err instanceof Error ? err.message : String(err),
+      detail: rootCauseMessage(err),
     });
     return { outcome: 'rejected', reason: 'verifier_error' };
   }
