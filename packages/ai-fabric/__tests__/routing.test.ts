@@ -89,6 +89,10 @@ describe('modelFor', () => {
     expect(modelFor('anthropic', 'code_gen')).toBe('claude-opus-4-7');
     expect(modelFor('openai', 'trivia_gen')).toBe('gpt-5');
     expect(modelFor('google', 'clip_gen')).toBe('gemini-2.5-pro');
+    // debate_score routes to Sonnet 4.6, not Opus 4.7 -- avoids the empty-{}
+    // forced-tool bug (Phase 3.5 finding). AI score is advisory; community
+    // AP-weighted vote is decisive in open debate, so Sonnet-quality is fine.
+    expect(modelFor('anthropic', 'debate_score')).toBe('claude-sonnet-4-6');
   });
 
   it('returns a sensible default when provider not in the chain', () => {
