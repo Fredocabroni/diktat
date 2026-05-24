@@ -8,7 +8,7 @@
 //   round_no 0-2 + revealed             → RevealRound
 //   round_no 3   + awaiting_final_vote  → VotePanel (observer) |
 //                                         VotingPending (participant)
-//   battle.status = 'settled'           → VerdictCard (PR 4.6 commit 5)
+//   battle.status = 'settled'           → VerdictCard
 
 'use client';
 
@@ -18,6 +18,7 @@ import { trpc } from '../../lib/trpc';
 
 import { ComposeRound } from './ComposeRound';
 import { RevealRound } from './RevealRound';
+import { VerdictCard } from './VerdictCard';
 import { VotePanel } from './VotePanel';
 import { VotingPending } from './VotingPending';
 
@@ -95,6 +96,7 @@ export function OpenDebateClient({
   const argumentsList = data.arguments as ArgumentRow[];
   const rounds = data.rounds as RoundRow[];
   const votes = (data.votes ?? []) as VoteRow[];
+  const verdictRound = rounds.find((r) => r.round_no === 3) ?? null;
 
   switch (currentState.kind) {
     case 'waiting_for_first_round':
@@ -148,9 +150,16 @@ export function OpenDebateClient({
         />
       );
     case 'scored':
-      return <Placeholder label="Verdict" note="VerdictCard lands in commit 5." />;
     case 'settled_without_verdict_round':
-      return <Placeholder label="Settled" note="VerdictCard lands in commit 5." />;
+      return (
+        <VerdictCard
+          verdictRound={verdictRound}
+          rounds={rounds}
+          participants={participants}
+          argumentsList={argumentsList}
+          currentUserId={currentUserId}
+        />
+      );
   }
 }
 
@@ -255,22 +264,6 @@ function StatusPanel({
       className={`rounded-2xl border border-ink-300 bg-surface-card p-6 text-center ${toneClass}`}
     >
       {text}
-    </div>
-  );
-}
-
-// Throwaway placeholder for the verdict card; removed when commit 5 lands.
-function Placeholder({
-  label,
-  note,
-}: {
-  readonly label: string;
-  readonly note: string;
-}): React.JSX.Element {
-  return (
-    <div className="rounded-2xl border border-ink-300 bg-surface-card p-6 text-center">
-      <p className="font-display text-lg font-semibold text-text-primary">{label}</p>
-      <p className="mt-2 text-xs text-text-secondary">{note}</p>
     </div>
   );
 }
