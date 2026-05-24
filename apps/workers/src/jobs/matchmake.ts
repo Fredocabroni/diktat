@@ -38,7 +38,9 @@ export interface UpstashLike {
   del(...keys: string[]): Promise<number>;
 }
 
-export type MatchMode = 'trivia';
+export type MatchMode = 'trivia' | 'open_debate';
+/** Modes the matchmaker scans on each tick. */
+export const MATCH_MODES: ReadonlyArray<MatchMode> = ['trivia', 'open_debate'];
 
 export interface MatchmakingDeps {
   readonly redis: UpstashLike;
@@ -69,6 +71,8 @@ export interface QueueMeta {
   readonly ap: number;
   readonly joinedAtMs: number;
   readonly mode: MatchMode;
+  /** Required for open_debate: the news_topic to debate. Seeker's topic wins. */
+  readonly topicId?: string;
 }
 
 export interface MatchedRecord {
@@ -86,11 +90,18 @@ export async function enqueueUser(opts: {
   userId: string;
   ap: number;
   mode: MatchMode;
+  /** Required for mode='open_debate' (which news_topic to debate). */
+  topicId?: string;
   redis: UpstashLike;
   now?: () => number;
 }): Promise<void> {
   const now = opts.now ?? Date.now;
-  const meta: QueueMeta = { ap: opts.ap, joinedAtMs: now(), mode: opts.mode };
+  const meta: QueueMeta = {
+    ap: opts.ap,
+    joinedAtMs: now(),
+    mode: opts.mode,
+    ...(opts.topicId ? { topicId: opts.topicId } : {}),
+  };
   await opts.redis.zadd(queueKey(opts.mode), { score: opts.ap, member: opts.userId });
   await opts.redis.set(metaKey(opts.mode, opts.userId), JSON.stringify(meta), {
     ex: META_TTL_S,
@@ -146,6 +157,7 @@ interface QueueEntry {
   userId: string;
   ap: number;
   joinedAtMs: number;
+  topicId?: string;
 }
 
 export interface TickResult {
@@ -155,14 +167,25 @@ export interface TickResult {
   errors: number;
 }
 
+export interface TickOpts {
+  /** Match mode for this pass. Defaults to 'trivia'. */
+  readonly mode?: MatchMode;
+}
+
 /**
- * One pass through the queue. Pairs the oldest waiting human with the
- * closest human in band; if no human is in band and the user has been
- * waiting >30s, falls back to a bot.
+ * One pass through the queue for a single mode. Pairs the oldest waiting
+ * human with the closest human in band; if no human is in band and the user
+ * has been waiting >30s, falls back to a bot -- but only for mode='trivia'.
+ * Open debate is human-vs-human only in V1 (bot rhetorical arguments are a
+ * separate content pipeline, deferred). Call once per mode each tick.
  */
-export async function runMatchmakingTick(deps: MatchmakingDeps): Promise<TickResult> {
+export async function runMatchmakingTick(
+  deps: MatchmakingDeps,
+  opts: TickOpts = {},
+): Promise<TickResult> {
   const now = deps.now ?? Date.now;
-  const mode: MatchMode = 'trivia';
+  const mode: MatchMode = opts.mode ?? 'trivia';
+  const allowBotFallback = mode === 'trivia';
 
   const entries = await fetchQueue(deps, mode);
   entries.sort((a, b) => a.joinedAtMs - b.joinedAtMs);
@@ -194,6 +217,7 @@ export async function runMatchmakingTick(deps: MatchmakingDeps): Promise<TickRes
         deps.logger.error({
           event: 'matchmake.create_failed',
           message: err instanceof Error ? err.message : String(err),
+          mode,
           seeker: seeker.userId,
           partner: partner.userId,
         });
@@ -202,7 +226,7 @@ export async function runMatchmakingTick(deps: MatchmakingDeps): Promise<TickRes
       continue;
     }
 
-    if (waitMs >= BOT_ELIGIBLE_AFTER_MS) {
+    if (allowBotFallback && waitMs >= BOT_ELIGIBLE_AFTER_MS) {
       try {
         const bot = await pickBotInBand(deps, seeker.ap);
         if (bot) {
@@ -215,6 +239,7 @@ export async function runMatchmakingTick(deps: MatchmakingDeps): Promise<TickRes
         deps.logger.error({
           event: 'matchmake.bot_fallback_failed',
           message: err instanceof Error ? err.message : String(err),
+          mode,
           seeker: seeker.userId,
         });
         errors += 1;
@@ -225,6 +250,7 @@ export async function runMatchmakingTick(deps: MatchmakingDeps): Promise<TickRes
   if (matchesCreated > 0 || entries.length > 0) {
     deps.logger.info({
       event: 'matchmake.tick',
+      mode,
       scanned: entries.length,
       matchesCreated,
       botFallbacks,
@@ -256,6 +282,7 @@ async function fetchQueue(deps: MatchmakingDeps, mode: MatchMode): Promise<Queue
       userId: member,
       ap: score,
       joinedAtMs: meta?.joinedAtMs ?? Date.now(),
+      ...(meta?.topicId ? { topicId: meta.topicId } : {}),
     });
   }
   return entries;
@@ -287,8 +314,8 @@ async function pickBotInBand(
 async function createBattle(
   deps: MatchmakingDeps,
   mode: MatchMode,
-  seatA: { userId: string; ap: number },
-  seatB: { userId: string; ap: number },
+  seatA: { userId: string; ap: number; topicId?: string },
+  seatB: { userId: string; ap: number; topicId?: string },
   isBotFallback: boolean,
 ): Promise<void> {
   // Atomic claim: ZREM both before any DB write. If either ZREM
@@ -314,6 +341,11 @@ async function createBattle(
     }
   }
 
+  // For open_debate the seeker (seatA) carries the topic; assign it to the
+  // battle so the runner + UI can resolve the news_topic. Partner's topicId
+  // is intentionally ignored -- they agreed to "any open debate" by queueing.
+  const topicId = mode === 'open_debate' ? (seatA.topicId ?? null) : null;
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const battlesTable = (deps.supabase as any).from('battles');
   const startedAt = new Date().toISOString();
@@ -323,6 +355,7 @@ async function createBattle(
       status: 'live',
       ap_pot: 0,
       started_at: startedAt,
+      ...(topicId ? { topic_id: topicId } : {}),
     })
     .select('id')
     .maybeSingle()) as { data: { id: string } | null; error: { message: string } | null };

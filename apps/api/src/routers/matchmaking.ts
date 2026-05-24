@@ -15,23 +15,26 @@ import { z } from 'zod';
 
 import { protectedProcedure, router } from '../trpc.js';
 
-const TRIVIA = 'trivia' as const;
+const modeSchema = z.enum(['trivia', 'open_debate']);
+type Mode = z.infer<typeof modeSchema>;
 const META_TTL_S = 600;
 
-function queueKey(): string {
-  return `mm:${TRIVIA}:queue`;
+function queueKey(mode: Mode): string {
+  return `mm:${mode}:queue`;
 }
-function metaKey(userId: string): string {
-  return `mm:${TRIVIA}:meta:${userId}`;
+function metaKey(mode: Mode, userId: string): string {
+  return `mm:${mode}:meta:${userId}`;
 }
-function matchedKey(userId: string): string {
-  return `mm:${TRIVIA}:matched:${userId}`;
+function matchedKey(mode: Mode, userId: string): string {
+  return `mm:${mode}:matched:${userId}`;
 }
 
 interface QueueMeta {
   ap: number;
   joinedAtMs: number;
-  mode: typeof TRIVIA;
+  mode: Mode;
+  /** Required when mode='open_debate'. Seeker's topic wins on match. */
+  topicId?: string;
 }
 
 interface MatchedRecord {
@@ -53,8 +56,19 @@ function parseJson<T>(raw: unknown): T | null {
 
 export const matchmakingRouter = router({
   enqueue: protectedProcedure
-    .input(z.object({ mode: z.literal('trivia') }))
-    .mutation(async ({ ctx }) => {
+    .input(
+      z
+        .object({
+          mode: modeSchema,
+          /** Required for mode='open_debate': the news_topic to debate. */
+          topicId: z.string().uuid().optional(),
+        })
+        .refine((v) => v.mode !== 'open_debate' || Boolean(v.topicId), {
+          message: 'topicId is required for open_debate',
+          path: ['topicId'],
+        }),
+    )
+    .mutation(async ({ ctx, input }) => {
       // Read the user's current AP — score for the sorted set.
       const { data: userRow, error } = await ctx.db
         .from('users')
@@ -80,10 +94,16 @@ export const matchmakingRouter = router({
 
       const ap = userRow.current_ap;
       const joinedAtMs = Date.now();
+      const mode: Mode = input.mode;
 
-      const meta: QueueMeta = { ap, joinedAtMs, mode: TRIVIA };
-      await ctx.redis.zadd(queueKey(), { score: ap, member: ctx.userId! });
-      await ctx.redis.set(metaKey(ctx.userId!), JSON.stringify(meta), {
+      const meta: QueueMeta = {
+        ap,
+        joinedAtMs,
+        mode,
+        ...(input.topicId ? { topicId: input.topicId } : {}),
+      };
+      await ctx.redis.zadd(queueKey(mode), { score: ap, member: ctx.userId! });
+      await ctx.redis.set(metaKey(mode, ctx.userId!), JSON.stringify(meta), {
         ex: META_TTL_S,
       });
 
@@ -96,21 +116,21 @@ export const matchmakingRouter = router({
         .update({ last_active_at: new Date(joinedAtMs).toISOString() })
         .eq('id', ctx.userId);
 
-      return { status: 'waiting' as const, joinedAtMs, ap };
+      return { status: 'waiting' as const, joinedAtMs, ap, mode };
     }),
 
   cancel: protectedProcedure
-    .input(z.object({ mode: z.literal('trivia') }))
-    .mutation(async ({ ctx }) => {
-      const removed = await ctx.redis.zrem(queueKey(), ctx.userId!);
-      await ctx.redis.del(metaKey(ctx.userId!));
+    .input(z.object({ mode: modeSchema }))
+    .mutation(async ({ ctx, input }) => {
+      const removed = await ctx.redis.zrem(queueKey(input.mode), ctx.userId!);
+      await ctx.redis.del(metaKey(input.mode, ctx.userId!));
       return { ok: true, wasQueued: removed > 0 };
     }),
 
   getStatus: protectedProcedure
-    .input(z.object({ mode: z.literal('trivia') }))
-    .query(async ({ ctx }) => {
-      const matchedRaw = await ctx.redis.get(matchedKey(ctx.userId!));
+    .input(z.object({ mode: modeSchema }))
+    .query(async ({ ctx, input }) => {
+      const matchedRaw = await ctx.redis.get(matchedKey(input.mode, ctx.userId!));
       if (matchedRaw !== null && matchedRaw !== undefined) {
         const matched = parseJson<MatchedRecord>(matchedRaw);
         if (matched) {
@@ -121,9 +141,9 @@ export const matchmakingRouter = router({
           };
         }
       }
-      const score = await ctx.redis.zscore(queueKey(), ctx.userId!);
+      const score = await ctx.redis.zscore(queueKey(input.mode), ctx.userId!);
       if (score !== null && score !== undefined) {
-        const metaRaw = await ctx.redis.get(metaKey(ctx.userId!));
+        const metaRaw = await ctx.redis.get(metaKey(input.mode, ctx.userId!));
         const meta = parseJson<QueueMeta>(metaRaw);
         return {
           status: 'waiting' as const,

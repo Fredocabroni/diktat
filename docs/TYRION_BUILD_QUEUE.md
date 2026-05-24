@@ -14,16 +14,16 @@ New thinking: **Claude Code is its own orchestration layer.** We define the rule
 
 Mapping:
 
-| Old concept | New primitive |
-|---|---|
-| 6 tmux panes with manual prompts | **1 tmux attach** with **agent teams** spawning parallel teammates + **git worktrees** for isolation |
-| Paste prompt, hope it reads the docs | **CLAUDE.md** rules + **skills** Claude auto-invokes |
-| "Don't use sed" written in every prompt | **PreToolUse hook** blocks sed/heredoc at the tool level |
-| Check session logs in the morning | `/recap` on return + **scheduled tasks** auto-summarize progress nightly |
-| Panes that collide on files | **git worktrees** — each feature stream in its own physical directory |
-| "Target 15+ commits" in each prompt | **PostToolUse hook** runs lint + tests after every edit; bad code auto-reverts |
-| MCP servers for Supabase/GitHub/etc | Wired in once in `.mcp.json`, available to every session |
-| Overnight marathons via headless mode | `claude -p --resume` with defer hooks for any step needing your ok |
+| Old concept                             | New primitive                                                                                        |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| 6 tmux panes with manual prompts        | **1 tmux attach** with **agent teams** spawning parallel teammates + **git worktrees** for isolation |
+| Paste prompt, hope it reads the docs    | **CLAUDE.md** rules + **skills** Claude auto-invokes                                                 |
+| "Don't use sed" written in every prompt | **PreToolUse hook** blocks sed/heredoc at the tool level                                             |
+| Check session logs in the morning       | `/recap` on return + **scheduled tasks** auto-summarize progress nightly                             |
+| Panes that collide on files             | **git worktrees** — each feature stream in its own physical directory                                |
+| "Target 15+ commits" in each prompt     | **PostToolUse hook** runs lint + tests after every edit; bad code auto-reverts                       |
+| MCP servers for Supabase/GitHub/etc     | Wired in once in `.mcp.json`, available to every session                                             |
+| Overnight marathons via headless mode   | `claude -p --resume` with defer hooks for any step needing your ok                                   |
 
 ---
 
@@ -32,32 +32,16 @@ Mapping:
 Don't confuse length with importance. These are ordered. Do them in order. Tell me when stuck.
 
 **A. Identity (do first):**
+
 1. Grab `@Diktat` on X. Take whatever variant works (`@DiktatHQ`, `@tryDiktat`) if original is gone.
 2. Reserve same handle on TikTok, Instagram, Threads.
 3. Buy `diktat.com` on Namecheap. If parked/expensive, buy `diktat.app`.
 
-**B. Accounts (open these tabs, grab keys, paste into a notes file):**
-4. Supabase — create `diktat-dev` and `diktat-prod` projects.
-5. Vercel — create project, link new GitHub repo `Fredocabroni/diktat`.
-6. Upstash — create Redis instance.
-7. Axiom — create account, copy API token.
-8. LiveKit Cloud — create project, copy keys.
-9. API keys: Anthropic, OpenAI, xAI, Google AI Studio, Perplexity.
-10. GitHub repo `Fredocabroni/diktat` — create, private.
+**B. Accounts (open these tabs, grab keys, paste into a notes file):** 4. Supabase — create `diktat-dev` and `diktat-prod` projects. 5. Vercel — create project, link new GitHub repo `Fredocabroni/diktat`. 6. Upstash — create Redis instance. 7. Axiom — create account, copy API token. 8. LiveKit Cloud — create project, copy keys. 9. API keys: Anthropic, OpenAI, xAI, Google AI Studio, Perplexity. 10. GitHub repo `Fredocabroni/diktat` — create, private.
 
-**C. Tyrion setup:**
-11. Update Claude Code to latest: `npm i -g @anthropic-ai/claude-code` (or run `/powerup` once you're in to discover any new features).
-12. Install Claude Code VS Code extension.
-13. Install Claude for Chrome extension.
-14. In claude.ai, create a **Project called "Diktat"**. Upload the 4 docs I've given you (Master Plan, Addiction Architecture, X Launch Plan, this file). All Diktat chats with me happen inside this project.
-15. `git clone git@github.com:Fredocabroni/diktat.git ~/diktat`
-16. `cd ~/diktat`
-17. Create `.env.local` with every key from step 9, and: SUPABASE_PROJECT_REF_DEV, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_ANON_KEY, REDIS_URL, AXIOM_TOKEN, LIVEKIT_API_KEY, LIVEKIT_API_SECRET, LIVEKIT_URL, VERCEL_URL, X_API_KEY, X_API_SECRET, X_ACCESS_TOKEN, X_ACCESS_TOKEN_SECRET, X_BEARER_TOKEN. Add `.env.local` to `.gitignore`.
-18. Copy the 4 docs into `~/diktat/docs/`.
+**C. Tyrion setup:** 11. Update Claude Code to latest: `npm i -g @anthropic-ai/claude-code` (or run `/powerup` once you're in to discover any new features). 12. Install Claude Code VS Code extension. 13. Install Claude for Chrome extension. 14. In claude.ai, create a **Project called "Diktat"**. Upload the 4 docs I've given you (Master Plan, Addiction Architecture, X Launch Plan, this file). All Diktat chats with me happen inside this project. 15. `git clone git@github.com:Fredocabroni/diktat.git ~/diktat` 16. `cd ~/diktat` 17. Create `.env.local` with every key from step 9, and: SUPABASE_PROJECT_REF_DEV, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_ANON_KEY, REDIS_URL, AXIOM_TOKEN, LIVEKIT_API_KEY, LIVEKIT_API_SECRET, LIVEKIT_URL, VERCEL_URL, X_API_KEY, X_API_SECRET, X_ACCESS_TOKEN, X_ACCESS_TOKEN_SECRET, X_BEARER_TOKEN. Add `.env.local` to `.gitignore`. 18. Copy the 4 docs into `~/diktat/docs/`.
 
-**D. Hand the wheel to Claude Code:**
-19. `cd ~/diktat && claude`
-20. Paste this single message into Claude Code:
+**D. Hand the wheel to Claude Code:** 19. `cd ~/diktat && claude` 20. Paste this single message into Claude Code:
 
 ```
 You are the engineering lead for Diktat. Codename/repo: diktat. You have access to all project docs in ~/diktat/docs/ (MASTER_PLAN.md, ADDICTION_ARCHITECTURE.md, X_LAUNCH_PLAN.md, TYRION_BUILD_QUEUE.md).
@@ -77,11 +61,7 @@ Output the plan as a checklist of tool calls you intend to make. Do not execute 
 21. Review the plan. If it looks right, respond "Approved. Execute Phase 0."
 22. Claude builds the whole foundation end-to-end while you walk away.
 
-**E. After Phase 0 completes:**
-23. Run `/recap` — Claude summarizes what shipped.
-24. Respond in chat: "Execute Phase 1 per TYRION_BUILD_QUEUE.md §7."
-25. Phase 1 builds the AP engine, tier badges, design system, database schema, AI fabric core. Claude uses agent teams to parallelize inside one session.
-26. Repeat for Phase 2, 3, 4, 5.
+**E. After Phase 0 completes:** 23. Run `/recap` — Claude summarizes what shipped. 24. Respond in chat: "Execute Phase 1 per TYRION_BUILD_QUEUE.md §7." 25. Phase 1 builds the AP engine, tier badges, design system, database schema, AI fabric core. Claude uses agent teams to parallelize inside one session. 26. Repeat for Phase 2, 3, 4, 5.
 
 That's it. Your remaining involvement is approving plans, reviewing PRs in VS Code (the extension shows inline diffs), and posting on @Diktat as content is ready.
 
@@ -138,6 +118,7 @@ That's it. Your remaining involvement is approving plans, reviewing PRs in VS Co
 A Gen Z political news + debate PWA. "TikTok meets Duolingo meets Reuters raised by Clash Royale."
 
 ## Non-negotiables
+
 - Mobile-first PWA, Next.js 15 App Router, TypeScript strict everywhere.
 - Custodial wallets hide crypto. Users see USD.
 - AP-only prediction markets (Polymarket odds as data feed only).
@@ -146,11 +127,13 @@ A Gen Z political news + debate PWA. "TikTok meets Duolingo meets Reuters raised
 - Ethical guardrails from ADDICTION_ARCHITECTURE.md are absolute.
 
 ## Architecture
+
 - Monorepo via Turborepo + pnpm.
 - apps: web, api, workers, bots
 - packages: ui, db, ap-engine, shared, ai-fabric
 
 ## Rules for Claude
+
 - Default model: Opus 4.7 xhigh.
 - Enter plan mode for any multi-file change. Get my approval before execution unless the scope is clearly a single bounded fix.
 - Use the `explore` subagent for any unknown area of the repo.
@@ -162,19 +145,23 @@ A Gen Z political news + debate PWA. "TikTok meets Duolingo meets Reuters raised
 - When designing mechanics, run `addiction-auditor` subagent.
 
 ## Deployment
+
 - web → Vercel (auto from main via GitHub)
 - api → Railway
 - workers → Railway (separate service)
 - bots → Railway (separate service)
 
 ## Source-of-truth docs
+
 Pin these in context. Do not re-invent what these already decide:
+
 - docs/MASTER_PLAN.md
 - docs/ADDICTION_ARCHITECTURE.md
 - docs/X_LAUNCH_PLAN.md
 - docs/TYRION_BUILD_QUEUE.md
 
 ## Taboo
+
 - Never mention bitcoin, ethereum, or general crypto terminology in user-facing copy. Wallet = "Wallet", currency = "USDC" shown as USD, stakes = "AP".
 - Never reference mainstream media as a fact source in generated content.
 - Never add gambling-tier real-money mechanics. AP only.
@@ -188,34 +175,42 @@ Pin these in context. Do not re-invent what these already decide:
 Each skill is a directory under `.claude/skills/` with a SKILL.md. Claude reads descriptions at session start and invokes the right skill automatically based on your intent.
 
 **Skill: `new-feature`**
+
 - **Description:** Scaffolds a new feature end-to-end across affected packages. Triggers on "build a feature for [X]" or "add [Y]".
 - **What it does:** Asks which packages it'll touch, creates a worktree, writes failing tests first, implements minimum to pass, opens a PR.
 
 **Skill: `db-migration`**
+
 - **Description:** Creates a new Supabase migration with correct numbering, RLS, indexes, rollback.
 - **What it does:** Generates `supabase/migrations/NNNN_description.sql`, validates against existing schema, runs `supabase db lint`, triggers `schema-reviewer` subagent for review.
 
 **Skill: `trpc-router`**
+
 - **Description:** Adds a typed tRPC router with Zod input/output, auth middleware wiring, integration test scaffold.
 - **What it does:** Creates the router file, wires into `app.ts`, generates a Vitest file with happy path + error cases.
 
 **Skill: `ui-primitive`**
+
 - **Description:** Adds a new UI component to `packages/ui/` with Storybook story, types, tests, and token usage.
 - **What it does:** Creates `packages/ui/src/components/[Name]/`, Storybook CSF3 story, component, types, snapshot test.
 
 **Skill: `trivia-seed`**
+
 - **Description:** Runs the trivia generation pipeline with the verify gate and populates the DB.
 - **What it does:** Invokes the workers trivia-gen job via headless mode (`claude -p "run trivia-gen with category=X count=N"`), reports counts.
 
 **Skill: `x-draft`**
+
 - **Description:** Drafts a tweet for @Diktat matching the content pillar and voice guide.
 - **What it does:** Reads X_LAUNCH_PLAN.md §2 (voice) and §3 (pillars), asks which pillar, generates 3 drafts for you to pick from, saves chosen draft to `x_posts` table with status `pending`.
 
 **Skill: `session-recap`**
+
 - **Description:** Writes a structured session log at the end of a work session.
 - **What it does:** Lists commits, files touched, tests added, blockers, next-session recommendations. Saves to `SESSION_LOGS/YYYY-MM-DD-HH-MM.md`.
 
 **Skill: `deploy`**
+
 - **Description:** Deploys web/api/workers/bots to their targets.
 - **What it does:** Confirms which app, checks main is clean, pushes, triggers deploy, verifies health endpoint.
 
@@ -240,20 +235,24 @@ Each skill is a directory under `.claude/skills/` with a SKILL.md. Claude reads 
 Hooks run automatically at lifecycle events — no prompting, no forgetting.
 
 **`pre-tool-use.sh`** — before any tool call:
+
 - Block `sed -i`, `>` redirects, and heredoc patching on any file. Hard deny.
 - Block edits to files outside the current feature branch's worktree scope.
 - Block commits to main. Force branch.
 
 **`post-edit.sh`** — after any file edit:
+
 - If TypeScript: run `pnpm turbo typecheck --filter=[affected]` — fail the hook if typecheck fails (forces Claude to fix before moving on).
 - If TS or JS: run `pnpm turbo lint --filter=[affected] --fix`.
 - Run prettier on the changed file.
 - If tests exist in the same package: `pnpm turbo test --filter=[affected]` — surface failure but don't block.
 
 **`pre-compact.sh`** — before context compaction:
+
 - Dump current subagent states + active worktree to `.claude/state/pre-compact-<ts>.json` so nothing gets lost.
 
 **`session-start.sh`** — when a session starts:
+
 - `git pull origin main --rebase`
 - Print: current branch, active issue (from `gh issue list --assignee @me`), open PRs.
 - Remind which docs are source-of-truth.
@@ -265,6 +264,7 @@ Hooks run automatically at lifecycle events — no prompting, no forgetting.
 Each phase is a coherent slice of product. Claude owns the granularity inside each phase. You approve the plan, then approve the PR.
 
 **Phase 0: Operating System**
+
 - Monorepo scaffold
 - All `.claude/` config (CLAUDE.md, skills, subagents, hooks, scheduled)
 - MCP servers wired (Supabase, GitHub, Axiom, LiveKit)
@@ -273,6 +273,7 @@ Each phase is a coherent slice of product. Claude owns the granularity inside ea
 - Vercel + Railway wired but no app code yet
 
 **Phase 1: Core Domain**
+
 - Full Postgres schema (all tables from MASTER_PLAN §5)
 - AP engine package (pure logic + Supabase integration)
 - AI fabric package (Anthropic + OpenAI + Grok + Gemini + Perplexity adapters, router, caching, cost caps, structured output, extended thinking)
@@ -280,6 +281,7 @@ Each phase is a coherent slice of product. Claude owns the granularity inside ea
 - 12 tier badges as React components
 
 **Phase 2: Auth + Shell**
+
 - Supabase Auth (email OTP + X OAuth)
 - Auto-wallet creation trigger
 - tRPC gateway with auth + user + wallet routers
@@ -287,6 +289,7 @@ Each phase is a coherent slice of product. Claude owns the granularity inside ea
 - Profile page, Wallet page
 
 **Phase 3: Feed + Trivia Battle**
+
 - News feed v1 (swipe cards, opinion shifts, "Battle This" CTA)
 - Trivia question generation pipeline (seed 200 questions with verify gate)
 - Matchmaking service (±200 AP band, bot fallback)
@@ -294,24 +297,29 @@ Each phase is a coherent slice of product. Claude owns the granularity inside ea
 - First real battles playable
 
 **Phase 4: Drop + Streaks + Open Debate**
+
 - The Drop (daily synchronized headline ritual)
 - Streak engine + push notifications
 - Open Debate mode (written, 3 rounds, AI-scored + community vote)
 - Fact-check orchestrator (Grok live + Perplexity sourced)
+- **Pre-launch decision — Open Debate zero-vote AI tiebreaker:** the Phase 4 backend (PR #26) treats community AP-weighted vote as decisive and uses the `debate_score` AI only when community AP is exactly tied. At launch traffic that tie is rare; at low traffic it isn't — a debate with zero community votes falls entirely to the AI, which makes the AI the de facto arbiter and partly re-introduces the AI-as-arbiter trust concern (§2 fairness) the design was meant to avoid. Decide handling before public launch — minimum-vote threshold (e.g. require ≥N AP-weighted votes before settling; extend the vote window otherwise), seeded votes (synthetic neutral voters), or transparent UI framing in PR 4.6 that says "decided by AI — no community votes were cast." Choose one consciously; don't silently ship the current behaviour.
 
 **Phase 5: Prediction Markets + Voice + Theater + Tribes**
+
 - AP prediction markets (Polymarket odds feed)
 - Voice Debate (LiveKit room, turn-based mic, recording, transcript)
 - Theater drama feed (clip ingestion, wagers, swipe UI)
 - Tribes (5 starter, weekly reset, leaderboards, Fingerprint)
 
 **Phase 6: Growth Infra**
+
 - @Diktat X bot (pillars, scheduling, auto-post from approvals)
 - Friend invites + referrals + AP rewards
 - Ideological Fingerprint
 - Clip-to-X auto-pipeline
 
 **Phase 7: Polish + Launch Prep**
+
 - Landing page
 - Onboarding flow
 - Moderation + reporting
@@ -343,22 +351,26 @@ Agent teams cost ~3-4x tokens of sequential work but cut wall time massively. Us
 Set once, forget. Run in the desktop app:
 
 **`nightly-status`** — daily at 11:45 PM local:
+
 - Count today's commits on all open feature branches
 - Count open PRs + review status
 - Summarize session logs from today
 - Email summary to you (via Gmail MCP)
 
 **`trivia-topup`** — daily at 3:00 AM local:
+
 - Count trivia questions per category where `difficulty <= 5`
 - If any category < 50: invoke `trivia-seed` skill for that category, count 25
 - Log results
 
 **`x-draft-queue`** — daily at 8:00 PM local:
+
 - Generate drafts for next day per pillar ratio from X_LAUNCH_PLAN.md §3
 - Save to `x_posts` with status `pending`
 - Email list of drafts for you to approve in the morning
 
 **`cost-audit`** — weekly Sunday 10:00 AM:
+
 - Pull AI fabric cost breakdown by task from Axiom
 - Pull LiveKit, Vercel, Railway, Supabase usage
 - Email report
@@ -378,6 +390,7 @@ Pre-configured, available in every session:
 - **railway-mcp** — deploy status for api/workers/bots
 
 And the ones you already have in Claude:
+
 - **Google Drive MCP** — sync docs, session logs, weekly reports
 - **Gmail MCP** — transactional emails (verification, approvals, scheduled task output)
 - **Calendar MCP** — block time for review sessions, launch countdown
@@ -400,6 +413,7 @@ claude -p "Read PR #47. Run security-reviewer subagent. Post review to the PR."
 ```
 
 Headless runs in CI/CD too. Add to `.github/workflows/`:
+
 - `claude-review.yml` — runs `security-reviewer` + `copy-linter` + `addiction-auditor` on every PR.
 - `claude-migrate-review.yml` — runs `schema-reviewer` on any PR that touches `supabase/migrations/`.
 
@@ -418,16 +432,16 @@ Headless runs in CI/CD too. Add to `.github/workflows/`:
 
 When you come back to me:
 
-| You say | I do |
-|---|---|
-| "Phase 0 done. Start Phase 1" | Read session recap if synced, write Phase 1 kickoff message you paste into Claude Code |
-| "[error output]" | Diagnose, write surgical fix prompt |
-| "Scope change: [X]" | Update affected docs + propagate to the in-flight phase's plan |
-| "Need a new skill for [Y]" | Write the SKILL.md |
-| "Need a subagent that does [Z]" | Write the agent md file |
-| "Add a scheduled task for [W]" | Write the scheduled task md |
-| "Review the state of the project" | Read session logs via Drive MCP, summarize |
-| "I want to ship X by [date]" | Reorder phases, mark deferrable items |
+| You say                           | I do                                                                                   |
+| --------------------------------- | -------------------------------------------------------------------------------------- |
+| "Phase 0 done. Start Phase 1"     | Read session recap if synced, write Phase 1 kickoff message you paste into Claude Code |
+| "[error output]"                  | Diagnose, write surgical fix prompt                                                    |
+| "Scope change: [X]"               | Update affected docs + propagate to the in-flight phase's plan                         |
+| "Need a new skill for [Y]"        | Write the SKILL.md                                                                     |
+| "Need a subagent that does [Z]"   | Write the agent md file                                                                |
+| "Add a scheduled task for [W]"    | Write the scheduled task md                                                            |
+| "Review the state of the project" | Read session logs via Drive MCP, summarize                                             |
+| "I want to ship X by [date]"      | Reorder phases, mark deferrable items                                                  |
 
 ---
 

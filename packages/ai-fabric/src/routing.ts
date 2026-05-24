@@ -86,7 +86,14 @@ const TABLE: Record<Task, RawDecision> = {
     },
   },
   debate_score: {
-    primary: { provider: 'anthropic', model: MODELS.anthropic_opus_47 },
+    // Sonnet 4.6 — same forced-tool path the generator uses reliably. Opus 4.7
+    // returns an empty `{}` tool input on ~35% of forced-`tool_choice` calls
+    // (see 2026-05-22 seed diagnostics, mirrored by the sourced_factcheck fix
+    // in 5018f1f). Quality tradeoff named in the PR: Opus is the better
+    // reasoner, but a 35% empty-verdict rate makes scoring quality moot. The
+    // AI score is advisory anyway — community AP-weighted vote is decisive.
+    // Revisit if the Opus forced-tool path is fixed or we land safeParse+retry.
+    primary: { provider: 'anthropic', model: MODELS.anthropic_sonnet_46 },
     fallbacks: [{ provider: 'google', model: MODELS.google_gemini_25_pro }],
   },
   news_rank: {

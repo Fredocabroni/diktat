@@ -98,6 +98,7 @@ export type Database = {
         Row: {
           battle_id: string;
           created_at: string;
+          deadline_at: string | null;
           id: string;
           payload: Json;
           round_no: number;
@@ -106,6 +107,7 @@ export type Database = {
         Insert: {
           battle_id: string;
           created_at?: string;
+          deadline_at?: string | null;
           id?: string;
           payload?: Json;
           round_no: number;
@@ -114,6 +116,7 @@ export type Database = {
         Update: {
           battle_id?: string;
           created_at?: string;
+          deadline_at?: string | null;
           id?: string;
           payload?: Json;
           round_no?: number;
@@ -224,6 +227,104 @@ export type Database = {
             columns: ['battle_id'];
             isOneToOne: false;
             referencedRelation: 'battles';
+            referencedColumns: ['id'];
+          },
+        ];
+      };
+      debate_arguments: {
+        Row: {
+          battle_id: string;
+          id: string;
+          round_id: string;
+          submitted_at: string;
+          text: string;
+          user_id: string;
+        };
+        Insert: {
+          battle_id: string;
+          id?: string;
+          round_id: string;
+          submitted_at?: string;
+          text: string;
+          user_id: string;
+        };
+        Update: {
+          battle_id?: string;
+          id?: string;
+          round_id?: string;
+          submitted_at?: string;
+          text?: string;
+          user_id?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: 'debate_arguments_battle_id_fkey';
+            columns: ['battle_id'];
+            isOneToOne: false;
+            referencedRelation: 'battles';
+            referencedColumns: ['id'];
+          },
+          {
+            foreignKeyName: 'debate_arguments_round_id_fkey';
+            columns: ['round_id'];
+            isOneToOne: false;
+            referencedRelation: 'battle_rounds';
+            referencedColumns: ['id'];
+          },
+          {
+            foreignKeyName: 'debate_arguments_user_id_fkey';
+            columns: ['user_id'];
+            isOneToOne: false;
+            referencedRelation: 'users';
+            referencedColumns: ['id'];
+          },
+        ];
+      };
+      debate_votes: {
+        Row: {
+          ap_at_vote_time: number;
+          battle_id: string;
+          id: string;
+          vote_for_user_id: string;
+          voted_at: string;
+          voter_user_id: string;
+        };
+        Insert: {
+          ap_at_vote_time: number;
+          battle_id: string;
+          id?: string;
+          vote_for_user_id: string;
+          voted_at?: string;
+          voter_user_id: string;
+        };
+        Update: {
+          ap_at_vote_time?: number;
+          battle_id?: string;
+          id?: string;
+          vote_for_user_id?: string;
+          voted_at?: string;
+          voter_user_id?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: 'debate_votes_battle_id_fkey';
+            columns: ['battle_id'];
+            isOneToOne: false;
+            referencedRelation: 'battles';
+            referencedColumns: ['id'];
+          },
+          {
+            foreignKeyName: 'debate_votes_vote_for_user_id_fkey';
+            columns: ['vote_for_user_id'];
+            isOneToOne: false;
+            referencedRelation: 'users';
+            referencedColumns: ['id'];
+          },
+          {
+            foreignKeyName: 'debate_votes_voter_user_id_fkey';
+            columns: ['voter_user_id'];
+            isOneToOne: false;
+            referencedRelation: 'users';
             referencedColumns: ['id'];
           },
         ];
