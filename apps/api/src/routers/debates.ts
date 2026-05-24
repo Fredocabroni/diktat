@@ -58,7 +58,7 @@ export const debatesRouter = router({
           .maybeSingle(),
         ctx.db
           .from('battle_participants')
-          .select('user_id, seat, entry_ap, result')
+          .select('user_id, seat, entry_ap, result, users(handle)')
           .eq('battle_id', input.battleId),
         ctx.db
           .from('battle_rounds')

@@ -5,7 +5,7 @@
 //
 //   round_no 0-2 + awaiting_arguments  → ComposeRound (handles its own
 //                                         submitted-waiting branch)
-//   round_no 0-2 + revealed             → RevealRound  (PR 4.6 commit 3)
+//   round_no 0-2 + revealed             → RevealRound
 //   round_no 3   + awaiting_final_vote  → VotePanel | VotingPending
 //                                         (PR 4.6 commit 4)
 //   battle.status = 'settled'           → VerdictCard (PR 4.6 commit 5)
@@ -21,6 +21,7 @@ import { useMemo } from 'react';
 import { trpc } from '../../lib/trpc';
 
 import { ComposeRound } from './ComposeRound';
+import { RevealRound } from './RevealRound';
 
 interface OpenDebateClientProps {
   readonly battleId: string;
@@ -47,6 +48,7 @@ interface ParticipantRow {
   readonly seat: number;
   readonly entry_ap: number;
   readonly result: string | null;
+  readonly users?: { handle: string | null } | null;
 }
 
 export function OpenDebateClient({
@@ -85,6 +87,9 @@ export function OpenDebateClient({
     void battleQuery.refetch();
   };
 
+  const participants = data.participants as ParticipantRow[];
+  const argumentsList = data.arguments as ArgumentRow[];
+
   switch (currentState.kind) {
     case 'waiting_for_first_round':
       return <StatusPanel text="Waiting for the first round." />;
@@ -104,9 +109,13 @@ export function OpenDebateClient({
       );
     case 'revealed':
       return (
-        <Placeholder
-          label={`Round ${currentState.roundNo + 1} revealed`}
-          note="RevealRound lands in commit 3."
+        <RevealRound
+          roundNo={currentState.roundNo}
+          roundId={currentState.roundId}
+          payload={currentState.payload}
+          participants={participants}
+          argumentsList={argumentsList}
+          currentUserId={currentUserId}
         />
       );
     case 'awaiting_final_vote_participant':
@@ -135,7 +144,12 @@ type CurrentState =
       existingText: string | null;
     }
   | { kind: 'observer_awaiting_arguments' }
-  | { kind: 'revealed'; roundNo: number }
+  | {
+      kind: 'revealed';
+      roundNo: number;
+      roundId: string;
+      payload: Record<string, unknown> | null;
+    }
   | { kind: 'awaiting_final_vote_participant' }
   | { kind: 'awaiting_final_vote_observer' }
   | { kind: 'scored' }
@@ -177,7 +191,12 @@ function computeCurrentState(input: {
 
   // Argument rounds 0/1/2.
   if (state === 'revealed') {
-    return { kind: 'revealed', roundNo: current.round_no };
+    return {
+      kind: 'revealed',
+      roundNo: current.round_no,
+      roundId: current.id,
+      payload: current.payload,
+    };
   }
 
   if (state === 'awaiting_arguments') {
