@@ -6,13 +6,9 @@
 //   round_no 0-2 + awaiting_arguments  → ComposeRound (handles its own
 //                                         submitted-waiting branch)
 //   round_no 0-2 + revealed             → RevealRound
-//   round_no 3   + awaiting_final_vote  → VotePanel | VotingPending
-//                                         (PR 4.6 commit 4)
+//   round_no 3   + awaiting_final_vote  → VotePanel (observer) |
+//                                         VotingPending (participant)
 //   battle.status = 'settled'           → VerdictCard (PR 4.6 commit 5)
-//
-// Non-participant observers see read-only renders of the same screens.
-// During the live debate window, observer access to the battle row is
-// unlocked by an additive RLS policy that lands with PR 4.6 commit 4.
 
 'use client';
 
@@ -22,6 +18,8 @@ import { trpc } from '../../lib/trpc';
 
 import { ComposeRound } from './ComposeRound';
 import { RevealRound } from './RevealRound';
+import { VotePanel } from './VotePanel';
+import { VotingPending } from './VotingPending';
 
 interface OpenDebateClientProps {
   readonly battleId: string;
@@ -51,6 +49,13 @@ interface ParticipantRow {
   readonly users?: { handle: string | null } | null;
 }
 
+interface VoteRow {
+  readonly voter_user_id: string;
+  readonly vote_for_user_id: string;
+  readonly ap_at_vote_time: number;
+  readonly voted_at: string;
+}
+
 export function OpenDebateClient({
   battleId,
   currentUserId,
@@ -59,7 +64,6 @@ export function OpenDebateClient({
     { battleId },
     {
       refetchInterval: 2_000,
-      // Stop polling once settled — verdict is static.
       refetchIntervalInBackground: false,
     },
   );
@@ -89,6 +93,8 @@ export function OpenDebateClient({
 
   const participants = data.participants as ParticipantRow[];
   const argumentsList = data.arguments as ArgumentRow[];
+  const rounds = data.rounds as RoundRow[];
+  const votes = (data.votes ?? []) as VoteRow[];
 
   switch (currentState.kind) {
     case 'waiting_for_first_round':
@@ -119,12 +125,26 @@ export function OpenDebateClient({
         />
       );
     case 'awaiting_final_vote_participant':
-      return <Placeholder label="Voting open" note="VotingPending lands in commit 4." />;
+      return (
+        <VotingPending
+          verdictDeadline={currentState.verdictDeadline}
+          rounds={rounds}
+          participants={participants}
+          argumentsList={argumentsList}
+          currentUserId={currentUserId}
+        />
+      );
     case 'awaiting_final_vote_observer':
       return (
-        <Placeholder
-          label="Vote — which argument was stronger?"
-          note="VotePanel lands in commit 4."
+        <VotePanel
+          battleId={battleId}
+          verdictDeadline={currentState.verdictDeadline}
+          rounds={rounds}
+          participants={participants}
+          argumentsList={argumentsList}
+          votes={votes}
+          currentUserId={currentUserId}
+          onMutationSettled={refetch}
         />
       );
     case 'scored':
@@ -150,8 +170,8 @@ type CurrentState =
       roundId: string;
       payload: Record<string, unknown> | null;
     }
-  | { kind: 'awaiting_final_vote_participant' }
-  | { kind: 'awaiting_final_vote_observer' }
+  | { kind: 'awaiting_final_vote_participant'; verdictDeadline: string | null }
+  | { kind: 'awaiting_final_vote_observer'; verdictDeadline: string | null }
   | { kind: 'scored' }
   | { kind: 'settled_without_verdict_round' };
 
@@ -183,8 +203,8 @@ function computeCurrentState(input: {
   if (current.round_no === 3) {
     if (state === 'awaiting_final_vote') {
       return isParticipant
-        ? { kind: 'awaiting_final_vote_participant' }
-        : { kind: 'awaiting_final_vote_observer' };
+        ? { kind: 'awaiting_final_vote_participant', verdictDeadline: current.deadline_at }
+        : { kind: 'awaiting_final_vote_observer', verdictDeadline: current.deadline_at };
     }
     return { kind: 'scored' };
   }
@@ -239,8 +259,7 @@ function StatusPanel({
   );
 }
 
-// Throwaway placeholder rendered for states that ship in later 4.6 commits.
-// Removed once the corresponding component lands.
+// Throwaway placeholder for the verdict card; removed when commit 5 lands.
 function Placeholder({
   label,
   note,

@@ -50,26 +50,37 @@ export const debatesRouter = router({
   getBattle: protectedProcedure
     .input(z.object({ battleId: z.string().uuid() }))
     .query(async ({ ctx, input }) => {
-      const [battleResult, participantsResult, roundsResult, argsResult] = await Promise.all([
-        ctx.db
-          .from('battles')
-          .select('id, mode, status, topic_id, started_at, ended_at, ap_pot, winner_user_id')
-          .eq('id', input.battleId)
-          .maybeSingle(),
-        ctx.db
-          .from('battle_participants')
-          .select('user_id, seat, entry_ap, result, users(handle)')
-          .eq('battle_id', input.battleId),
-        ctx.db
-          .from('battle_rounds')
-          .select('id, round_no, payload, deadline_at, winner_user_id')
-          .eq('battle_id', input.battleId)
-          .order('round_no'),
-        ctx.db
-          .from('debate_arguments')
-          .select('round_id, user_id, text, submitted_at')
-          .eq('battle_id', input.battleId),
-      ]);
+      const [battleResult, participantsResult, roundsResult, argsResult, votesResult] =
+        await Promise.all([
+          ctx.db
+            .from('battles')
+            .select('id, mode, status, topic_id, started_at, ended_at, ap_pot, winner_user_id')
+            .eq('id', input.battleId)
+            .maybeSingle(),
+          ctx.db
+            .from('battle_participants')
+            .select('user_id, seat, entry_ap, result, users(handle)')
+            .eq('battle_id', input.battleId),
+          ctx.db
+            .from('battle_rounds')
+            .select('id, round_no, payload, deadline_at, winner_user_id')
+            .eq('battle_id', input.battleId)
+            .order('round_no'),
+          ctx.db
+            .from('debate_arguments')
+            .select('round_id, user_id, text, submitted_at')
+            .eq('battle_id', input.battleId),
+          // RLS filters this to the caller's own vote during the live window
+          // (debate_votes_select_own); after settlement everyone sees all
+          // votes (debate_votes_select_settled). The verdict round's
+          // payload.community holds the canonical aggregate post-settle, so
+          // this surface is just used by the live vote-panel UI to detect
+          // "you already voted" after a refresh.
+          ctx.db
+            .from('debate_votes')
+            .select('voter_user_id, vote_for_user_id, ap_at_vote_time, voted_at')
+            .eq('battle_id', input.battleId),
+        ]);
 
       if (battleResult.error) {
         throw new TRPCError({
@@ -93,6 +104,7 @@ export const debatesRouter = router({
         participants: participantsResult.data ?? [],
         rounds: roundsResult.data ?? [],
         arguments: argsResult.data ?? [],
+        votes: votesResult.data ?? [],
       };
     }),
 
