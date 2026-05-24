@@ -9,12 +9,18 @@
 // listener uses pg LISTEN/NOTIFY directly and the cost sink uses
 // Upstash REST — both Redis-light, no broker required.
 
-import { buildUpstashCostSink, hydrateLedgerFromSink, setCostSink } from '@diktat/ai-fabric';
+import {
+  buildUpstashCostSink,
+  hydrateLedgerFromSink,
+  invoke as fabricInvoke,
+  setCostSink,
+  type ProviderEnv,
+} from '@diktat/ai-fabric';
 import { Client as PgClient } from 'pg';
 
 import { loadEnv, privyReady } from './env.js';
 import { buildBattlePoller } from './jobs/battle-poller.js';
-import { runMatchmakingTick } from './jobs/matchmake.js';
+import { MATCH_MODES, runMatchmakingTick } from './jobs/matchmake.js';
 import { startPrivyProvisionListener, type PrivyWalletProvider } from './jobs/privy-provision.js';
 import { defaultHandlers, runSchedulerTick } from './jobs/scheduler.js';
 import { buildLogger } from './logger.js';
@@ -59,27 +65,42 @@ async function main(): Promise<void> {
 
   // Matchmaking polling loop — single-instance assumption keeps races
   // out of scope. Phase 3.5 BullMQ migration adds distributed locks.
+  // Tick once per mode (trivia + open_debate). Open debate disables bot
+  // fallback internally (V1 is human-vs-human).
   let matchmakingBusy = false;
   const matchmakingInterval = setInterval(() => {
     if (matchmakingBusy) return;
     matchmakingBusy = true;
-    runMatchmakingTick({ redis, supabase, logger })
-      .catch((err) => {
-        logger.error({
-          event: 'matchmake.tick_failed',
-          message: err instanceof Error ? err.message : String(err),
-        });
-      })
-      .finally(() => {
-        matchmakingBusy = false;
-      });
+    Promise.all(
+      MATCH_MODES.map((mode) =>
+        runMatchmakingTick({ redis, supabase, logger }, { mode }).catch((err) => {
+          logger.error({
+            event: 'matchmake.tick_failed',
+            mode,
+            message: err instanceof Error ? err.message : String(err),
+          });
+        }),
+      ),
+    ).finally(() => {
+      matchmakingBusy = false;
+    });
   }, MATCHMAKE_TICK_MS);
 
   // Battle poller — discovers status='live' battle rows (created by
-  // the matchmaking tick above) and spawns the in-process runner for
-  // each. Single-instance ownership; Phase 3.5 BullMQ migration adds
-  // distributed locks.
-  const battlePoller = buildBattlePoller({ supabase, logger });
+  // the matchmaking tick above) and spawns the right in-process runner for
+  // each by `battle.mode`. The open-debate runner calls `debate_score` via
+  // the ai-fabric `invoke`. Single-instance ownership; Phase 3.5 BullMQ
+  // migration adds distributed locks.
+  const debateProviderEnv: ProviderEnv = {
+    xaiAvailable: Boolean(process.env.XAI_API_KEY),
+    perplexityAvailable: Boolean(process.env.PERPLEXITY_API_KEY),
+  };
+  const battlePoller = buildBattlePoller({
+    supabase,
+    logger,
+    invoke: fabricInvoke,
+    providerEnv: debateProviderEnv,
+  });
   let battlePollerBusy = false;
   const battlePollerInterval = setInterval(() => {
     if (battlePollerBusy) return;
