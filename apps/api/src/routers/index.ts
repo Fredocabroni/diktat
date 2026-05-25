@@ -2,6 +2,7 @@ import { router } from '../trpc.js';
 import { authRouter } from './auth.js';
 import { battlesRouter } from './battles.js';
 import { debatesRouter } from './debates.js';
+import { factCheckRouter } from './fact-check.js';
 import { feedRouter } from './feed.js';
 import { matchmakingRouter } from './matchmaking.js';
 import { tribesRouter } from './tribes.js';
@@ -16,6 +17,7 @@ export const appRouter = router({
   matchmaking: matchmakingRouter,
   battles: battlesRouter,
   debates: debatesRouter,
+  factCheck: factCheckRouter,
   feed: feedRouter,
 });
 
