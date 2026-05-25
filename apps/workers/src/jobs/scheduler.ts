@@ -20,6 +20,9 @@
 // liveness proof). Feature PRs (4.2 Drop, 4.4 streak push, etc.) register
 // their own job_types.
 
+import type { invoke as fabricInvoke, ProviderEnv } from '@diktat/ai-fabric';
+
+import { factCheckOrchestratorHandler } from './fact-check-orchestrator.js';
 import { localBoundarySweepHandler } from './local-boundary-sweep.js';
 import { riskPushHandler } from './risk-push.js';
 import type { ServiceClient } from '../supabase.js';
@@ -51,6 +54,14 @@ export type JobHandler = (row: ScheduledJobRow, deps: HandlerDeps) => Promise<vo
 export interface HandlerDeps {
   readonly supabase: ServiceClient;
   readonly logger: Logger;
+  /** ai-fabric invoke — required by handlers that call AI models
+   *  (PR 4.7 fact_check). Optional so existing handlers (heartbeat,
+   *  local_boundary_sweep, risk_push) don't have to supply it. */
+  readonly invoke?: typeof fabricInvoke;
+  /** Provider availability snapshot — required when invoke is. */
+  readonly providerEnv?: ProviderEnv;
+  /** fetch impl — required by handlers that probe URLs. */
+  readonly fetch?: typeof globalThis.fetch;
 }
 
 export interface SchedulerDeps {
@@ -60,6 +71,11 @@ export interface SchedulerDeps {
   readonly workerId: string;
   readonly handlers: Readonly<Record<string, JobHandler>>;
   readonly now?: () => Date;
+  /** Optional ai-fabric / fetch deps forwarded to handlers that need
+   *  them (PR 4.7 fact_check). */
+  readonly invoke?: typeof fabricInvoke;
+  readonly providerEnv?: ProviderEnv;
+  readonly fetch?: typeof globalThis.fetch;
 }
 
 /** Tunables. Conservative defaults; not env-driven for now. */
@@ -137,7 +153,13 @@ export async function runSchedulerTick(deps: SchedulerDeps): Promise<TickResult>
     }
 
     try {
-      await handler(row, { supabase: deps.supabase, logger: deps.logger });
+      await handler(row, {
+        supabase: deps.supabase,
+        logger: deps.logger,
+        ...(deps.invoke ? { invoke: deps.invoke } : {}),
+        ...(deps.providerEnv ? { providerEnv: deps.providerEnv } : {}),
+        ...(deps.fetch ? { fetch: deps.fetch } : {}),
+      });
       await markRowDone(deps, row);
       result.succeeded += 1;
     } catch (err) {
@@ -329,6 +351,7 @@ export const defaultHandlers: Readonly<Record<string, JobHandler>> = Object.free
   heartbeat: heartbeatHandler,
   local_boundary_sweep: localBoundarySweepHandler,
   risk_push: riskPushHandler,
+  fact_check: factCheckOrchestratorHandler,
 });
 
 export const __testing = { backoffMsFor, CLAIM_BATCH, STALE_LOCK_MS };
