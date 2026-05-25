@@ -234,6 +234,38 @@ async function main(): Promise<void> {
     assert('last_action_date=yesterday', post1.last_action_date === yesterday);
 
     // ---------------------------------------------------------------------
+    console.log('\n--- TEST 4b: re-fire idempotency on ADVANCED ---');
+    // ---------------------------------------------------------------------
+    // The handler retries on backoff and the cron fires across a 4-tick
+    // window — this sweep WILL be re-called with the same p_yesterday in
+    // production. Double-advance is the AP-corruption vector. Assert:
+    //   second call returns already_swept
+    //   current_length unchanged (NOT bumped to 5)
+    //   longest_length unchanged (NOT bumped)
+    //   freeze_tokens unchanged (no second milestone grant)
+    const sw1b = await callRpc<SweepResult>(supabase, 'apply_local_boundary_sweep', {
+      p_user_id: u.id,
+      p_yesterday: yesterday,
+    });
+    assert(
+      `re-call outcome='already_swept'`,
+      sw1b.outcome === 'already_swept',
+      `got ${sw1b.outcome}`,
+    );
+    const post1b = await readStreak(supabase, u.id);
+    assert(
+      're-call did NOT double-advance current_length',
+      post1b.current_length === post1.current_length,
+      `was ${post1.current_length}, now ${post1b.current_length}`,
+    );
+    assert('re-call did NOT bump longest_length', post1b.longest_length === post1.longest_length);
+    assert(
+      're-call did NOT grant a second freeze',
+      post1b.freeze_tokens === post1.freeze_tokens,
+      `was ${post1.freeze_tokens}, now ${post1b.freeze_tokens}`,
+    );
+
+    // ---------------------------------------------------------------------
     console.log('\n--- TEST 5: apply_local_boundary_sweep — FROZEN ---');
     // ---------------------------------------------------------------------
     await setStreak(supabase, u.id, {
@@ -258,6 +290,35 @@ async function main(): Promise<void> {
     assert(
       'last_freeze_used_local_date=yesterday',
       post2.last_freeze_used_local_date === yesterday,
+    );
+
+    // ---------------------------------------------------------------------
+    console.log('\n--- TEST 5b: re-fire idempotency on FROZEN ---');
+    // ---------------------------------------------------------------------
+    // Double-spend of a freeze is the second AP-corruption vector. Assert:
+    //   second call returns already_swept
+    //   freeze_tokens unchanged (NOT decremented to -1 or wrapped)
+    //   current_length unchanged
+    //   last_freeze_used_local_date unchanged
+    const sw2b = await callRpc<SweepResult>(supabase, 'apply_local_boundary_sweep', {
+      p_user_id: u.id,
+      p_yesterday: yesterday,
+    });
+    assert(
+      `re-call outcome='already_swept'`,
+      sw2b.outcome === 'already_swept',
+      `got ${sw2b.outcome}`,
+    );
+    const post2b = await readStreak(supabase, u.id);
+    assert(
+      're-call did NOT double-spend freeze',
+      post2b.freeze_tokens === post2.freeze_tokens,
+      `was ${post2.freeze_tokens}, now ${post2b.freeze_tokens}`,
+    );
+    assert('re-call did NOT change current_length', post2b.current_length === post2.current_length);
+    assert(
+      're-call did NOT change last_freeze_used_local_date',
+      post2b.last_freeze_used_local_date === post2.last_freeze_used_local_date,
     );
 
     // ---------------------------------------------------------------------
@@ -286,14 +347,24 @@ async function main(): Promise<void> {
     );
 
     // ---------------------------------------------------------------------
-    console.log('\n--- TEST 7: apply_local_boundary_sweep — ALREADY_SWEPT ---');
+    console.log('\n--- TEST 6b: re-fire idempotency on BROKEN ---');
     // ---------------------------------------------------------------------
-    // post3 already has last_action_date=yesterday from TEST 6
+    // The third AP-adjacent corruption vector: re-call on a broken state
+    // must NOT re-break (no-op already, but assert state stays exactly 0).
+    // post3 already has last_action_date=yesterday from TEST 6.
     const sw4 = await callRpc<SweepResult>(supabase, 'apply_local_boundary_sweep', {
       p_user_id: u.id,
       p_yesterday: yesterday,
     });
-    assert(`outcome='already_swept'`, sw4.outcome === 'already_swept');
+    assert(
+      `re-call outcome='already_swept'`,
+      sw4.outcome === 'already_swept',
+      `got ${sw4.outcome}`,
+    );
+    const post3b = await readStreak(supabase, u.id);
+    assert('re-call left current_length=0', post3b.current_length === post3.current_length);
+    assert('re-call did NOT touch longest_length', post3b.longest_length === post3.longest_length);
+    assert('re-call did NOT touch freeze_tokens', post3b.freeze_tokens === post3.freeze_tokens);
 
     // ---------------------------------------------------------------------
     console.log('\n--- TEST 8: milestone freeze grant at length%7=0 ---');
