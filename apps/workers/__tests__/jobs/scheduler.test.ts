@@ -132,7 +132,7 @@ describe('runSchedulerTick', () => {
     expect(supabase.rpcCalls).toHaveLength(1);
     expect(supabase.rpcCalls[0]!).toMatchObject({
       fn: 'claim_scheduled_jobs',
-      args: { p_handler_types: ['heartbeat'], p_worker_id: 'w1' },
+      args: { p_handler_types: ['heartbeat', 'local_boundary_sweep'], p_worker_id: 'w1' },
     });
     expect(supabase.updates).toHaveLength(1);
     expect(supabase.updates[0]!).toMatchObject({ id: 'hb-1', patch: { status: 'done' } });
