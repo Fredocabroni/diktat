@@ -21,6 +21,7 @@
 // their own job_types.
 
 import { localBoundarySweepHandler } from './local-boundary-sweep.js';
+import { riskPushHandler } from './risk-push.js';
 import type { ServiceClient } from '../supabase.js';
 import type { Logger } from '../logger.js';
 
@@ -327,6 +328,7 @@ export const heartbeatHandler: JobHandler = async (row, deps) => {
 export const defaultHandlers: Readonly<Record<string, JobHandler>> = Object.freeze({
   heartbeat: heartbeatHandler,
   local_boundary_sweep: localBoundarySweepHandler,
+  risk_push: riskPushHandler,
 });
 
 export const __testing = { backoffMsFor, CLAIM_BATCH, STALE_LOCK_MS };
