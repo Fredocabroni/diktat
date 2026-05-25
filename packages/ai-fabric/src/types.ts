@@ -96,3 +96,50 @@ export interface CostRecord {
   byTask: Record<Task, number>;
   total: number;
 }
+
+/**
+ * Structured output schema for the fact-check orchestrator (PR 4.7).
+ *
+ * The verdict enum is the §2 neutrality contract:
+ *   contested = value-laden / normative; primary sources cannot settle
+ *   mixed     = sources partly support / partly contradict, OR credible
+ *               primary sources or expert analyses genuinely disagree
+ *               on the empirical/causal question
+ *
+ * `retrieval_mode` is intentionally NOT in this schema — it is set by
+ * the orchestrator handler based on which provider answered (Perplexity
+ * vs Sonnet-from-memory), not by the model itself.
+ */
+export const FactCheckVerdictSchema = z.enum([
+  'supported',
+  'refuted',
+  'mixed',
+  'unverifiable',
+  'contested',
+]);
+export type FactCheckVerdict = z.infer<typeof FactCheckVerdictSchema>;
+
+export const FactCheckSourceSchema = z.object({
+  url: z.string().url(),
+  label: z.string().min(1).max(200),
+  snippet: z.string().max(2000).nullable(),
+});
+export type FactCheckSource = z.infer<typeof FactCheckSourceSchema>;
+
+export const FactCheckResultSchema = z
+  .object({
+    verdict: FactCheckVerdictSchema,
+    confidence: z.number().min(0).max(1),
+    reason: z.string().min(1).max(4000),
+    contested_reason: z.string().min(1).max(2000).nullable(),
+    sources: z.array(FactCheckSourceSchema).max(10),
+  })
+  .refine(
+    (v) =>
+      v.verdict !== 'contested' || (v.contested_reason !== null && v.contested_reason.length > 0),
+    {
+      message: "verdict='contested' requires contested_reason",
+      path: ['contested_reason'],
+    },
+  );
+export type FactCheckResult = z.infer<typeof FactCheckResultSchema>;
