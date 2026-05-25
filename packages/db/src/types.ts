@@ -15,6 +15,7 @@ export type Database = {
           delta: number;
           id: string;
           idempotency_key: string;
+          is_practice: boolean;
           reason: string;
           ref_id: string | null;
           ref_type: string | null;
@@ -26,6 +27,7 @@ export type Database = {
           delta: number;
           id?: string;
           idempotency_key: string;
+          is_practice?: boolean;
           reason: string;
           ref_id?: string | null;
           ref_type?: string | null;
@@ -37,6 +39,7 @@ export type Database = {
           delta?: number;
           id?: string;
           idempotency_key?: string;
+          is_practice?: boolean;
           reason?: string;
           ref_id?: string | null;
           ref_type?: string | null;
@@ -629,8 +632,12 @@ export type Database = {
           created_at: string;
           current_length: number;
           freeze_tokens: number;
+          freeze_tokens_max: number;
           last_action_date: string | null;
+          last_freeze_used_local_date: string | null;
           longest_length: number;
+          take5_local_date: string | null;
+          take5_progress: number;
           updated_at: string;
           user_id: string;
         };
@@ -638,8 +645,12 @@ export type Database = {
           created_at?: string;
           current_length?: number;
           freeze_tokens?: number;
+          freeze_tokens_max?: number;
           last_action_date?: string | null;
+          last_freeze_used_local_date?: string | null;
           longest_length?: number;
+          take5_local_date?: string | null;
+          take5_progress?: number;
           updated_at?: string;
           user_id: string;
         };
@@ -647,8 +658,12 @@ export type Database = {
           created_at?: string;
           current_length?: number;
           freeze_tokens?: number;
+          freeze_tokens_max?: number;
           last_action_date?: string | null;
+          last_freeze_used_local_date?: string | null;
           longest_length?: number;
+          take5_local_date?: string | null;
+          take5_progress?: number;
           updated_at?: string;
           user_id?: string;
         };
@@ -891,6 +906,8 @@ export type Database = {
           fingerprint: Json;
           handle: string;
           id: string;
+          is_bot: boolean;
+          last_active_at: string | null;
           onboarded_at: string | null;
           tier_id: number;
           timezone: string;
@@ -904,6 +921,8 @@ export type Database = {
           fingerprint?: Json;
           handle: string;
           id: string;
+          is_bot?: boolean;
+          last_active_at?: string | null;
           onboarded_at?: string | null;
           tier_id?: number;
           timezone?: string;
@@ -917,6 +936,8 @@ export type Database = {
           fingerprint?: Json;
           handle?: string;
           id?: string;
+          is_bot?: boolean;
+          last_active_at?: string | null;
           onboarded_at?: string | null;
           tier_id?: number;
           timezone?: string;
@@ -936,9 +957,12 @@ export type Database = {
         Row: {
           created_at: string;
           display_currency: string;
+          evm_address: string | null;
           external_wallet_id: string | null;
           id: string;
+          privy_user_id: string | null;
           provider: string;
+          solana_address: string | null;
           status: string;
           updated_at: string;
           usdc_balance_micro: number;
@@ -947,9 +971,12 @@ export type Database = {
         Insert: {
           created_at?: string;
           display_currency?: string;
+          evm_address?: string | null;
           external_wallet_id?: string | null;
           id?: string;
+          privy_user_id?: string | null;
           provider?: string;
+          solana_address?: string | null;
           status?: string;
           updated_at?: string;
           usdc_balance_micro?: number;
@@ -958,9 +985,12 @@ export type Database = {
         Update: {
           created_at?: string;
           display_currency?: string;
+          evm_address?: string | null;
           external_wallet_id?: string | null;
           id?: string;
+          privy_user_id?: string | null;
           provider?: string;
+          solana_address?: string | null;
           status?: string;
           updated_at?: string;
           usdc_balance_micro?: number;
@@ -1028,6 +1058,11 @@ export type Database = {
       [_ in never]: never;
     };
     Functions: {
+      apply_ap_drafts: { Args: { p_drafts: Json }; Returns: Json };
+      apply_local_boundary_sweep: {
+        Args: { p_user_id: string; p_yesterday: string };
+        Returns: Json;
+      };
       claim_scheduled_jobs: {
         Args: {
           p_handler_types: string[];
@@ -1058,6 +1093,11 @@ export type Database = {
           isSetofReturn: true;
         };
       };
+      evaluate_risk_push: {
+        Args: { p_local_date: string; p_user_id: string };
+        Returns: Json;
+      };
+      increment_take5_progress: { Args: { p_user_id: string }; Returns: Json };
       is_self: { Args: { target_user_id: string }; Returns: boolean };
     };
     Enums: {

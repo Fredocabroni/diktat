@@ -20,6 +20,8 @@
 // liveness proof). Feature PRs (4.2 Drop, 4.4 streak push, etc.) register
 // their own job_types.
 
+import { localBoundarySweepHandler } from './local-boundary-sweep.js';
+import { riskPushHandler } from './risk-push.js';
 import type { ServiceClient } from '../supabase.js';
 import type { Logger } from '../logger.js';
 
@@ -325,6 +327,8 @@ export const heartbeatHandler: JobHandler = async (row, deps) => {
  *  job_types (drop_publish in PR 4.2, risk_push in PR 4.4, etc.). */
 export const defaultHandlers: Readonly<Record<string, JobHandler>> = Object.freeze({
   heartbeat: heartbeatHandler,
+  local_boundary_sweep: localBoundarySweepHandler,
+  risk_push: riskPushHandler,
 });
 
 export const __testing = { backoffMsFor, CLAIM_BATCH, STALE_LOCK_MS };
