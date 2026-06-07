@@ -25,6 +25,7 @@
 import type { ServiceClient } from '../supabase.js';
 import type { Logger } from '../logger.js';
 import type { invoke as fabricInvoke, ProviderEnv } from '@diktat/ai-fabric';
+import { runHeadCheck as runSharedHeadCheck } from '@diktat/ai-fabric';
 import { z } from 'zod';
 
 const QuestionDraftSchema = z.object({
@@ -213,114 +214,11 @@ interface VerifyVerdict {
     | 'verifier_error';
 }
 
-// MASTER_PLAN.md §8 primary sources whose hosts are known to block automated
-// HEAD probes (Akamai/CDN WAF rejects bare-fetch User-Agents) but are stable
-// enough to skip the liveness gate. A wrong URL on these hosts will still get
-// caught by the substance check (verifier model reads the URL).
-// See CLAUDE.md "Phase 3.5 — HEAD-check whitelist".
-const HEAD_CHECK_WHITELIST: ReadonlyArray<string> = [
-  // §8 primary sources where Node fetch HEAD is unreliable from this network
-  // (CDN-WAF blocks, IPv6 routing, slow handshake). The substance verifier
-  // (Opus reads the URL) is the real correctness gate; HEAD is just a
-  // liveness probe and these hosts are stable enough to skip it.
-  'congress.gov',
-  'www.congress.gov',
-  'fred.stlouisfed.org',
-  'www.federalreserve.gov',
-  'federalreserve.gov',
-  'www.bls.gov',
-  'bls.gov',
-  'www.fbi.gov',
-  'fbi.gov',
-  'www.cdc.gov',
-  'cdc.gov',
-  'www.sec.gov',
-  'sec.gov',
-  'www.dol.gov',
-  'dol.gov',
-  'www.defense.gov',
-  'defense.gov',
-  'home.treasury.gov',
-  'www.supremecourt.gov',
-  'supremecourt.gov',
-  'www.census.gov',
-  'census.gov',
-  'www.cbo.gov',
-  'cbo.gov',
-  'www.justice.gov',
-  'justice.gov',
-];
-
-function shouldSkipHeadCheck(url: string): boolean {
-  try {
-    const host = new URL(url).hostname.toLowerCase();
-    return HEAD_CHECK_WHITELIST.includes(host);
-  } catch {
-    return false;
-  }
-}
-
-function hostOf(url: string): string {
-  try {
-    return new URL(url).hostname.toLowerCase();
-  } catch {
-    return '(invalid-url)';
-  }
-}
-
-// HTTP statuses that mean the cited page is genuinely gone — a real dead
-// link. Every other status means the host answered: 2xx is healthy, and
-// bot-blocks (403/405/429) or transient 5xx still prove the host is live.
-// Curl-probe evidence: ucr.fbi.gov, supreme.justia.com and
-// constitution.congress.gov 403 every HTTP shape yet are live primary
-// sources — the liveness gate must not reject those.
-const HEAD_DEAD_STATUSES: ReadonlySet<number> = new Set([404, 410]);
-
-/**
- * Probe the source URL with a HEAD request and decide whether it clears the
- * liveness gate. Returns `true` to proceed to the verifier, `false` to reject
- * as `source_unreachable`. Every outcome is logged with host + status.
- *
- *   2xx                              -> pass
- *   404 / 410                        -> reject (dead link)
- *   403 / 405 / 429 + other non-2xx  -> advisory pass (host answered, not dead)
- *   thrown (DNS / refused / timeout) -> reject (genuinely unreachable)
- */
-async function runHeadCheck(url: string, deps: VerifyOneDeps): Promise<boolean> {
-  const host = hostOf(url);
-  let status: number;
-  try {
-    const response = await deps.fetch(url, {
-      method: 'HEAD',
-      signal: AbortSignal.timeout(5000),
-    });
-    status = response.status;
-  } catch (err) {
-    deps.logger.warn({
-      event: 'trivia.gen.head_check',
-      url,
-      host,
-      status: null,
-      outcome: 'reject',
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return false;
-  }
-
-  if (HEAD_DEAD_STATUSES.has(status)) {
-    deps.logger.warn({ event: 'trivia.gen.head_check', url, host, status, outcome: 'reject' });
-    return false;
-  }
-  if (status >= 200 && status < 300) {
-    deps.logger.info({ event: 'trivia.gen.head_check', url, host, status, outcome: 'pass' });
-    return true;
-  }
-  // Non-2xx, non-dead: 403/405/429 CDN bot-blocks and transient 5xx. The host
-  // answered, so the citation is not a dead link — proceed to the verifier,
-  // but log loudly so a run can be audited.
-  deps.logger.warn({ event: 'trivia.gen.head_check', url, host, status, outcome: 'advisory_pass' });
-  return true;
-}
+// HEAD-gate logic + the §8 primary-source whitelist live in
+// @diktat/ai-fabric/head-gate so the fact-check orchestrator (PR 4.7)
+// shares one implementation with this verifier. trivia-gen retains its
+// own log-event names (trivia.gen.head_check / head_skipped_whitelist)
+// by surfacing them inside verifyOne.
 
 /**
  * Walk an error's `cause` chain (Diktat errors forward `cause` to the native
@@ -357,19 +255,32 @@ async function verifyOne(draft: QuestionDraft, deps: VerifyOneDeps): Promise<Ver
   //    genuinely-dead signal (404/410, DNS failure, refused, timeout) rejects;
   //    a bot-block on a host that answered is advisory-pass. Whitelisted hosts
   //    skip the probe entirely.
-  let headOk: boolean;
-  if (shouldSkipHeadCheck(draft.source_url)) {
+  const headResult = await runSharedHeadCheck(draft.source_url, deps.fetch);
+  if (headResult.outcome === 'skipped') {
     deps.logger.info({
       event: 'trivia.gen.head_skipped_whitelist',
-      url: draft.source_url,
-      host: hostOf(draft.source_url),
+      url: headResult.url,
+      host: headResult.host,
     });
-    headOk = true;
+  } else if (headResult.outcome === 'pass') {
+    deps.logger.info({
+      event: 'trivia.gen.head_check',
+      url: headResult.url,
+      host: headResult.host,
+      status: headResult.status,
+      outcome: 'pass',
+    });
   } else {
-    headOk = await runHeadCheck(draft.source_url, deps);
+    deps.logger.warn({
+      event: 'trivia.gen.head_check',
+      url: headResult.url,
+      host: headResult.host,
+      status: headResult.status,
+      outcome: headResult.outcome,
+      ...(headResult.error ? { error: headResult.error } : {}),
+    });
   }
-
-  if (!headOk) {
+  if (headResult.outcome === 'reject') {
     return { outcome: 'rejected', reason: 'source_unreachable' };
   }
 

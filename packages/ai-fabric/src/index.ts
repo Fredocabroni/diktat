@@ -11,6 +11,8 @@ export * from './retry.js';
 export * from './structured.js';
 export * from './logging.js';
 export * from './fabric.js';
+export * from './head-gate.js';
+export * from './prompts/fact-check.js';
 export { anthropicAdapter } from './adapters/anthropic.js';
 export { openaiAdapter } from './adapters/openai.js';
 export { googleAdapter } from './adapters/google.js';

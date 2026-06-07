@@ -133,7 +133,7 @@ describe('runSchedulerTick', () => {
     expect(supabase.rpcCalls[0]!).toMatchObject({
       fn: 'claim_scheduled_jobs',
       args: {
-        p_handler_types: ['heartbeat', 'local_boundary_sweep', 'risk_push'],
+        p_handler_types: ['heartbeat', 'local_boundary_sweep', 'risk_push', 'fact_check'],
         p_worker_id: 'w1',
       },
     });

@@ -132,6 +132,10 @@ async function main(): Promise<void> {
       logger,
       workerId: schedulerWorkerId,
       handlers: defaultHandlers,
+      // Forwarded to handlers that need them (PR 4.7 fact_check).
+      invoke: fabricInvoke,
+      providerEnv: debateProviderEnv,
+      fetch: globalThis.fetch,
     })
       .catch((err) => {
         logger.error({
