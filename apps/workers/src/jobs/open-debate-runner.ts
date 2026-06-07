@@ -119,6 +119,7 @@ export type TickPhase =
   | 'transitioned_to_revealed'
   | 'opened_verdict_round'
   | 'scored_and_settled'
+  | 'resumed_settlement'
   | 'already_settled'
   | 'error';
 
@@ -266,6 +267,20 @@ export async function runOpenDebateTick(
   const verdictRound = rounds.find((r) => r.round_no === ROUND_COUNT);
   if (!verdictRound) return { phase: 'noop' };
   const verdictState = String(verdictRound.payload?.state ?? '');
+
+  // (3a) Re-entry guard. Verdict already 'scored' but battle still 'live' =>
+  // a previous tick wrote the verdict row but crashed before markBattleSettled
+  // (or applyApSettlement) completed. Resume without re-tallying or re-calling
+  // the AI -- crucial for AI-tiebroken debates where a second invoke could
+  // flip winnerSeat and corrupt AP via role-keyed idempotency keys (the AP
+  // drafts under the flipped roles would reuse the original write's keys and
+  // no-op, leaving the canonical winner whoever was stamped first; the
+  // verdict-row overwrite would lie about which side actually got the AP).
+  if (verdictState === 'scored') {
+    await resumeSettlement(deps, battle, verdictRound);
+    return { phase: 'resumed_settlement' };
+  }
+
   if (verdictState !== 'awaiting_final_vote') return { phase: 'noop' };
 
   const voteDeadlineMs = verdictRound.deadline_at ? Date.parse(verdictRound.deadline_at) : Infinity;
@@ -304,6 +319,21 @@ async function scoreAndSettle(
   const decision = decide(aiVerdict, tally, inputs.participants);
 
   const settledAt = new Date(deps.now ? deps.now() : Date.now()).toISOString();
+
+  // Snapshot the AP settlement inputs (apBefore/tier/consecutiveLosses/
+  // reductionsUsed for each side) into the verdict payload. This is the
+  // determinism guarantee for the resume path: if the worker crashes between
+  // the verdict write and markBattleSettled, the resume branch (next tick)
+  // reads these frozen values from the persisted payload -- it never queries
+  // `users` live. Without the snapshot, a participant who gained AP in a
+  // different battle between original scoring and resume would shift the
+  // draft computation. Built from `inputs.participants`, which today still
+  // joins `users` live for current_ap/tier_id (a separate pre-existing
+  // concern about first-pass freshness, out of scope for this fix).
+  const settlementInputs = decision.winnerUserId
+    ? buildSettlementInputs(inputs.participants, decision)
+    : null;
+
   const verdictPayload = {
     state: 'scored',
     ai: aiVerdict ?? { error: 'ai_unavailable' },
@@ -313,14 +343,17 @@ async function scoreAndSettle(
     winner_seat: decision.winnerSeat,
     winner_user_id: decision.winnerUserId,
     settled_at: settledAt,
+    _settlement_inputs: settlementInputs,
   };
 
   // Write the verdict row first (transparent record, even if settlement fails).
   await updateRoundPayload(deps.supabase, verdictRound.id, verdictPayload, decision.winnerUserId);
 
   // Compute AP drafts and apply atomically via apply_ap_drafts (mig 0013).
-  if (decision.winnerUserId && decision.loserUserId) {
-    await applyApSettlement(deps, battle, inputs.participants, decision);
+  // Reads the same snapshot just stamped above so first-pass and resume use
+  // identical inputs to settleBattle.
+  if (settlementInputs) {
+    await applyApSettlementFromSnapshot(deps, battle, settlementInputs);
   }
 
   // Mark battle settled.
@@ -333,6 +366,54 @@ async function scoreAndSettle(
     disagreement: decision.disagreement,
     winnerSeat: decision.winnerSeat,
   });
+}
+
+/**
+ * Resume an in-flight settlement whose verdict row was already written
+ * (`state='scored'`) but whose battle is still `status='live'` -- meaning a
+ * prior tick crashed between updateRoundPayload and markBattleSettled.
+ *
+ * Reads winner/loser + their pre-settlement AP/tier/streak from the verdict
+ * payload's `_settlement_inputs` snapshot (stamped by the first pass). NEVER
+ * re-calls the AI, NEVER re-tallies votes, NEVER overwrites the verdict row.
+ * AP application is safe to re-attempt: `apply_ap_drafts` is idempotent on
+ * the (battle, user, reason) idempotency key.
+ */
+async function resumeSettlement(
+  deps: OpenDebateRunnerDeps,
+  battle: BattleRow,
+  verdictRound: RoundRow,
+): Promise<void> {
+  const payload = verdictRound.payload ?? {};
+  const winnerUserId = (payload.winner_user_id as string | null | undefined) ?? null;
+  const settledAt =
+    (payload.settled_at as string | undefined) ??
+    new Date(deps.now ? deps.now() : Date.now()).toISOString();
+  const snapshot = payload._settlement_inputs as SettlementInputsSnapshot | null | undefined;
+
+  const verdictStampMs = payload.settled_at ? Date.parse(payload.settled_at as string) : Number.NaN;
+  const sinceVerdictMs = Number.isFinite(verdictStampMs)
+    ? (deps.now ? deps.now() : Date.now()) - verdictStampMs
+    : null;
+
+  deps.logger.info({
+    event: 'open_debate.resumed_settlement',
+    battle_id: battle.id,
+    settled_at: payload.settled_at ?? null,
+    since_verdict_ms: sinceVerdictMs,
+    winner_user_id: winnerUserId,
+    has_snapshot: snapshot != null,
+  });
+
+  // Idempotent re-attempt of step 6. Skipped when there's no winner
+  // (unresolved tie + null AI) or no snapshot (verdict written by an older
+  // code path before _settlement_inputs existed -- battles in that state
+  // still flip to settled; AP just won't auto-recover).
+  if (winnerUserId && snapshot) {
+    await applyApSettlementFromSnapshot(deps, battle, snapshot);
+  }
+
+  await markBattleSettled(deps.supabase, battle.id, winnerUserId, settledAt);
 }
 
 async function callAi(
@@ -445,37 +526,78 @@ export function decide(
   return { winnerSeat, winnerUserId, loserUserId, decidedBy, disagreement };
 }
 
-async function applyApSettlement(
-  deps: OpenDebateRunnerDeps,
-  battle: BattleRow,
+/**
+ * Per-side AP settlement snapshot. Stamped into the verdict payload at
+ * first-pass settlement so the resume path replays IDENTICAL inputs to
+ * settleBattle without re-querying live `users`.
+ */
+interface SettlementInputsSnapshot {
+  winner: {
+    user_id: string;
+    ap_before: number;
+    tier: number;
+  };
+  loser: {
+    user_id: string;
+    ap_before: number;
+    tier: number;
+    consecutive_losses: number;
+    reductions_used: number;
+  };
+}
+
+function buildSettlementInputs(
   participants: ParticipantRow[],
   decision: Decision,
-): Promise<void> {
-  if (!decision.winnerUserId || !decision.loserUserId) return;
+): SettlementInputsSnapshot | null {
+  if (!decision.winnerUserId || !decision.loserUserId) return null;
   const winner = participants.find((p) => p.user_id === decision.winnerUserId);
   const loser = participants.find((p) => p.user_id === decision.loserUserId);
-  if (!winner || !loser) return;
+  if (!winner || !loser) return null;
+  return {
+    winner: {
+      user_id: winner.user_id,
+      ap_before: winner.current_ap,
+      tier: winner.tier_id,
+    },
+    loser: {
+      user_id: loser.user_id,
+      ap_before: loser.current_ap,
+      tier: loser.tier_id,
+      consecutive_losses: loser.consecutive_losses,
+      reductions_used: loser.reductions_used,
+    },
+  };
+}
 
+async function applyApSettlementFromSnapshot(
+  deps: OpenDebateRunnerDeps,
+  battle: BattleRow,
+  snapshot: SettlementInputsSnapshot,
+): Promise<void> {
   // Use the ap-engine's settleBattle helper -- handles loss-streak protection
   // and tier floor in one shot and emits properly-shaped drafts. Open debate
   // is never a practice match (bot fallback is OFF for open_debate), so
-  // isPractice = false.
+  // isPractice = false. Inputs come from the verdict payload's frozen
+  // snapshot -- never from a fresh users-live join -- so first-pass and
+  // resume produce byte-identical drafts (same idempotency keys, same
+  // deltas), and apply_ap_drafts safely no-ops on re-attempt.
   const drafts = settleBattle({
     battleId: toBattleId(battle.id),
     mode: battle.mode,
     status: 'settled',
     isPractice: false,
     winner: {
-      userId: toUserId(winner.user_id),
-      apBefore: winner.current_ap,
-      tier: winner.tier_id as Tier,
+      userId: toUserId(snapshot.winner.user_id),
+      apBefore: snapshot.winner.ap_before,
+      tier: snapshot.winner.tier as Tier,
     },
     loser: {
-      userId: toUserId(loser.user_id),
-      apBefore: loser.current_ap,
-      tier: loser.tier_id as Tier,
-      consecutiveLosses: loser.consecutive_losses,
-      reductionsUsed: loser.reductions_used,
+      userId: toUserId(snapshot.loser.user_id),
+      apBefore: snapshot.loser.ap_before,
+      tier: snapshot.loser.tier as Tier,
+      consecutiveLosses: snapshot.loser.consecutive_losses,
+      reductionsUsed: snapshot.loser.reductions_used,
     },
   });
 
