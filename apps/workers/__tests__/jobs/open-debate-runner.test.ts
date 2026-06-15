@@ -946,4 +946,92 @@ describe('runOpenDebateTick resume on scored verdict', () => {
       },
     });
   });
+
+  it('TEST 6 (Window B): markBattleSettled fails after AP applied; second tick completes settlement', async () => {
+    // Window B of the resume contract: applyDraftsFn already resolved on
+    // tick 1, but markBattleSettled (the battles.status='settled' flip)
+    // crashed before completion. Resume on tick 2 must re-apply AP (safe
+    // via apply_ap_drafts idempotency keys -- pinned by the snapshot
+    // replay) AND flip the battle to settled using the originally-stamped
+    // winner. Structurally distinct from TEST 4 (Window A:
+    // applyDraftsFn-transient-failure); both real recovery paths.
+    const state = resumeBaseState();
+    seedScoredVerdict(state, {
+      battleId: BID,
+      a: A,
+      b: D,
+      winnerSeat: 1,
+      decidedBy: 'community_ap',
+      settledAt: '2026-05-24T10:26:00.000Z',
+    });
+
+    // Wrap the fake supabase so the next battles.update returns an error,
+    // forcing markBattleSettled to throw. AP application is untouched and
+    // succeeds normally; only the battle-flip write fails.
+    const inner = buildFakeSupabase(state);
+    let failNextBattlesUpdate = true;
+    const supabase = {
+      from(table: string) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const inst = (inner as any).from(table);
+        if (table !== 'battles') return inst;
+        return {
+          ...inst,
+          update(patch: Record<string, unknown>) {
+            const original = inst.update(patch);
+            return {
+              eq(col: string, val: unknown) {
+                if (failNextBattlesUpdate) {
+                  failNextBattlesUpdate = false;
+                  return Promise.resolve({ error: { message: 'transient: db 503' } });
+                }
+                return original.eq(col, val);
+              },
+            };
+          },
+        };
+      },
+    } as unknown as ServiceClient;
+
+    const logger = buildLogger();
+    const invoke = vi.fn();
+    const applyDraftsFn = vi.fn().mockResolvedValue([]);
+    const now = () => Date.parse('2026-05-24T10:27:00Z');
+
+    // Tick 1: AP applies (applyDraftsFn resolves), then markBattleSettled
+    // throws on the wrapped error.
+    await expect(
+      runOpenDebateTick(BID, {
+        supabase,
+        logger,
+        invoke: invoke as never,
+        applyDraftsFn: applyDraftsFn as never,
+        now,
+      }),
+    ).rejects.toThrow(/transient: db 503/);
+    // Battle still 'live' -- the flip never happened.
+    expect(state.battle!.status).toBe('live');
+    expect(applyDraftsFn).toHaveBeenCalledTimes(1);
+    // AI not invoked on the crashed tick.
+    expect(invoke).not.toHaveBeenCalled();
+
+    // Tick 2: clean run, battle flips to settled with the originally-
+    // stamped winner.
+    const outcome = await runOpenDebateTick(BID, {
+      supabase,
+      logger,
+      invoke: invoke as never,
+      applyDraftsFn: applyDraftsFn as never,
+      now,
+    });
+    expect(outcome.phase).toBe('resumed_settlement');
+    expect(state.battle!.status).toBe('settled');
+    expect(state.battle!.winner_user_id).toBe(D);
+    // Pins the no-skip-on-resume property: AP draft application runs every
+    // resume tick (the apply_ap_drafts idempotency key is what keeps the
+    // re-attempt safe, validated structurally by the snapshot replay).
+    expect(applyDraftsFn).toHaveBeenCalledTimes(2);
+    // AI never invoked across either tick.
+    expect(invoke).not.toHaveBeenCalled();
+  });
 });

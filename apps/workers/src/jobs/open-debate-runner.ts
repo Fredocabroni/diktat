@@ -271,11 +271,18 @@ export async function runOpenDebateTick(
   // (3a) Re-entry guard. Verdict already 'scored' but battle still 'live' =>
   // a previous tick wrote the verdict row but crashed before markBattleSettled
   // (or applyApSettlement) completed. Resume without re-tallying or re-calling
-  // the AI -- crucial for AI-tiebroken debates where a second invoke could
-  // flip winnerSeat and corrupt AP via role-keyed idempotency keys (the AP
-  // drafts under the flipped roles would reuse the original write's keys and
-  // no-op, leaving the canonical winner whoever was stamped first; the
-  // verdict-row overwrite would lie about which side actually got the AP).
+  // the AI -- crucial for AI-tiebroken debates, where re-invoking the scorer
+  // could pick a different winnerSeat. SQL idempotency on its own does NOT
+  // catch a flip: the per-user role-keyed keys (battle:<id>:user:<U>:reason:
+  // battle_win vs :reason:battle_loss) DIFFER between (A-win, B-loss) and
+  // (A-loss, B-win), so flipped roles miss both originals' keys and BOTH
+  // users land a win-credit AND a loss-debit -- real double-credit corruption.
+  // The fix is structural: the _settlement_inputs snapshot is stamped into
+  // the verdict payload at first-pass time and replayed verbatim from that
+  // persisted payload on resume (never queried live), so first-pass and
+  // resume feed byte-identical inputs to settleBattle -- byte-identical
+  // drafts, byte-identical idempotency keys, byte-identical deltas. A flip
+  // is architecturally impossible by construction, not "caught downstream."
   if (verdictState === 'scored') {
     await resumeSettlement(deps, battle, verdictRound);
     return { phase: 'resumed_settlement' };
