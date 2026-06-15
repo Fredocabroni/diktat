@@ -124,7 +124,14 @@ describe('decide', () => {
 // ---------------------------------------------------------------------------
 
 interface FakeState {
-  battle: { id: string; mode: string; status: string; topic_id: string | null } | null;
+  battle: {
+    id: string;
+    mode: string;
+    status: string;
+    topic_id: string | null;
+    winner_user_id?: string | null;
+    ended_at?: string | null;
+  } | null;
   participants: {
     user_id: string;
     seat: number;
@@ -217,6 +224,10 @@ function buildFakeSupabase(state: FakeState): ServiceClient {
           }
           if (table === 'battles' && col === 'id' && state.battle && state.battle.id === val) {
             if (patch.status !== undefined) state.battle.status = patch.status as string;
+            if (patch.winner_user_id !== undefined)
+              state.battle.winner_user_id = patch.winner_user_id as string | null;
+            if (patch.ended_at !== undefined)
+              state.battle.ended_at = patch.ended_at as string | null;
           }
           return Promise.resolve({ error: null });
         },
@@ -531,5 +542,496 @@ describe('runOpenDebateTick state machine', () => {
     expect(outcome.phase).toBe('already_settled');
     expect(state.inserts).toHaveLength(0);
     expect(state.updates).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Re-entry guard: resume an in-flight settlement
+// ---------------------------------------------------------------------------
+
+/**
+ * Seed a verdict round in `state='scored'` with the canonical winner already
+ * stamped + the _settlement_inputs snapshot the resume branch reads from.
+ * Simulates a crash between updateRoundPayload (verdict written) and
+ * markBattleSettled (battle marked settled).
+ */
+function seedScoredVerdict(
+  state: FakeState,
+  args: {
+    battleId: string;
+    a: string;
+    b: string;
+    winnerSeat: 0 | 1 | null;
+    decidedBy: 'community_ap' | 'ai_tiebreaker' | 'unresolved';
+    settledAt: string;
+  },
+): void {
+  const winnerUserId = args.winnerSeat === 0 ? args.a : args.winnerSeat === 1 ? args.b : null;
+  const loserUserId = args.winnerSeat === 0 ? args.b : args.winnerSeat === 1 ? args.a : null;
+
+  const settlementInputs =
+    winnerUserId && loserUserId
+      ? {
+          winner: { user_id: winnerUserId, ap_before: 1000, tier: 4 },
+          loser: {
+            user_id: loserUserId,
+            ap_before: 1100,
+            tier: 4,
+            consecutive_losses: 0,
+            reductions_used: 0,
+          },
+        }
+      : null;
+
+  state.rounds.push({
+    id: 'r3',
+    round_no: 3,
+    payload: {
+      state: 'scored',
+      ai: { winnerSeat: args.winnerSeat, scoreA: 70, scoreB: 60, reason: 'orig' },
+      community: { ap_for_seat_0: 100, ap_for_seat_1: 100, voter_count: 2 },
+      disagreement: false,
+      decided_by: args.decidedBy,
+      winner_seat: args.winnerSeat,
+      winner_user_id: winnerUserId,
+      settled_at: args.settledAt,
+      _settlement_inputs: settlementInputs,
+    },
+    deadline_at: '2026-05-24T10:25:00.000Z',
+    winner_user_id: winnerUserId,
+    battle_id: args.battleId,
+  } as never);
+}
+
+describe('runOpenDebateTick resume on scored verdict', () => {
+  const BID = '22222222-2222-4222-8222-222222222222';
+  const A = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+  const D = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+
+  function resumeBaseState(): FakeState {
+    const state = baseState();
+    state.battle = { id: BID, mode: 'open_debate', status: 'live', topic_id: 't1' };
+    state.participants = [
+      {
+        user_id: A,
+        seat: 0,
+        users: { current_ap: 1000, tier_id: 4 },
+        battle_id: BID,
+      } as unknown as FakeState['participants'][number],
+      {
+        user_id: D,
+        seat: 1,
+        users: { current_ap: 1100, tier_id: 4 },
+        battle_id: BID,
+      } as unknown as FakeState['participants'][number],
+    ];
+    // Rounds 0-2 already revealed.
+    seedRound(state, {
+      id: 'r0',
+      round_no: 0,
+      payload: { state: 'revealed' },
+      deadline_at: null,
+      winner_user_id: null,
+    });
+    seedRound(state, {
+      id: 'r1',
+      round_no: 1,
+      payload: { state: 'revealed' },
+      deadline_at: null,
+      winner_user_id: null,
+    });
+    seedRound(state, {
+      id: 'r2',
+      round_no: 2,
+      payload: { state: 'revealed' },
+      deadline_at: null,
+      winner_user_id: null,
+    });
+    return state;
+  }
+
+  it('TEST 1: resume completes settlement without re-tally, re-AI, or verdict overwrite', async () => {
+    const state = resumeBaseState();
+    seedScoredVerdict(state, {
+      battleId: BID,
+      a: A,
+      b: D,
+      winnerSeat: 1, // D wins
+      decidedBy: 'community_ap',
+      settledAt: '2026-05-24T10:26:00.000Z',
+    });
+    const verdictRowBefore = state.rounds.find((r) => r.round_no === 3)!;
+    const payloadBefore = { ...verdictRowBefore.payload };
+
+    const supabase = buildFakeSupabase(state);
+    const logger = buildLogger();
+    const invoke = vi.fn();
+    const applyDraftsFn = vi.fn().mockResolvedValue([]);
+    const now = () => Date.parse('2026-05-24T10:27:30Z');
+
+    const outcome = await runOpenDebateTick(BID, {
+      supabase,
+      logger,
+      invoke: invoke as never,
+      applyDraftsFn: applyDraftsFn as never,
+      now,
+    });
+
+    expect(outcome.phase).toBe('resumed_settlement');
+    // No AI invocation on re-entry.
+    expect(invoke).not.toHaveBeenCalled();
+    // No battle_rounds update -- verdict row untouched.
+    const roundUpdates = state.updates.filter((u) => u.table === 'battle_rounds');
+    expect(roundUpdates).toHaveLength(0);
+    expect(verdictRowBefore.payload).toEqual(payloadBefore);
+    // Battle flipped to settled with the originally-stamped winner.
+    const battleUpdates = state.updates.filter((u) => u.table === 'battles');
+    expect(battleUpdates).toHaveLength(1);
+    expect(battleUpdates[0]!.patch).toMatchObject({
+      status: 'settled',
+      winner_user_id: D,
+      ended_at: '2026-05-24T10:26:00.000Z',
+    });
+    expect(state.battle!.status).toBe('settled');
+    // AP settlement re-attempted (idempotent at SQL layer).
+    expect(applyDraftsFn).toHaveBeenCalledTimes(1);
+    // Structured log emitted for prod monitoring.
+    const resumeLog = logger.calls.find(
+      (c) =>
+        c.level === 'info' &&
+        (c.obj as { event?: string }).event === 'open_debate.resumed_settlement',
+    );
+    expect(resumeLog).toBeDefined();
+    expect(resumeLog!.obj).toMatchObject({
+      battle_id: BID,
+      settled_at: '2026-05-24T10:26:00.000Z',
+      since_verdict_ms: 90_000, // 1m30s between stamp + resume
+      winner_user_id: D,
+      has_snapshot: true,
+    });
+  });
+
+  it("TEST 2: AI-tiebreaker re-entry doesn't flip the winner even if AI would now disagree", async () => {
+    const state = resumeBaseState();
+    // Original tiebreaker picked A; the resume must NOT re-call AI and must
+    // NOT let a flipped second opinion bleed into the canonical record.
+    seedScoredVerdict(state, {
+      battleId: BID,
+      a: A,
+      b: D,
+      winnerSeat: 0, // A wins by AI tiebreaker
+      decidedBy: 'ai_tiebreaker',
+      settledAt: '2026-05-24T10:26:00.000Z',
+    });
+
+    const supabase = buildFakeSupabase(state);
+    const logger = buildLogger();
+    // Rig the AI to pick the OPPOSITE seat -- if the resume branch is buggy
+    // and re-invokes, the assertions below catch it.
+    const invoke = vi.fn().mockResolvedValueOnce({
+      output: { winnerSeat: 1, scoreA: 40, scoreB: 90, reason: 'AI now likes D' },
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-6',
+      task: 'debate_score',
+      usd: 0.01,
+      latencyMs: 500,
+    });
+    const applyDraftsFn = vi.fn().mockResolvedValue([]);
+    const now = () => Date.parse('2026-05-24T10:27:00Z');
+
+    const outcome = await runOpenDebateTick(BID, {
+      supabase,
+      logger,
+      invoke: invoke as never,
+      applyDraftsFn: applyDraftsFn as never,
+      now,
+    });
+
+    expect(outcome.phase).toBe('resumed_settlement');
+    // Hard guarantee: AI never called on resume.
+    expect(invoke).not.toHaveBeenCalled();
+    // Canonical winner unchanged -- still A, not the flipped D.
+    expect(state.battle!.winner_user_id).toBe(A);
+    // Verdict row's winner_seat unchanged.
+    const verdict = state.rounds.find((r) => r.round_no === 3)!;
+    expect(verdict.payload).toMatchObject({
+      winner_seat: 0,
+      winner_user_id: A,
+      decided_by: 'ai_tiebreaker',
+    });
+    // AP drafts were built from the snapshot pinned to A as winner.
+    expect(applyDraftsFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('TEST 3: unresolved-tie resume flips battle to settled with null winner; no AP drafts', async () => {
+    const state = resumeBaseState();
+    seedScoredVerdict(state, {
+      battleId: BID,
+      a: A,
+      b: D,
+      winnerSeat: null, // unresolved
+      decidedBy: 'unresolved',
+      settledAt: '2026-05-24T10:26:00.000Z',
+    });
+
+    const supabase = buildFakeSupabase(state);
+    const logger = buildLogger();
+    const invoke = vi.fn();
+    const applyDraftsFn = vi.fn().mockResolvedValue([]);
+    const now = () => Date.parse('2026-05-24T10:27:00Z');
+
+    const outcome = await runOpenDebateTick(BID, {
+      supabase,
+      logger,
+      invoke: invoke as never,
+      applyDraftsFn: applyDraftsFn as never,
+      now,
+    });
+
+    expect(outcome.phase).toBe('resumed_settlement');
+    expect(invoke).not.toHaveBeenCalled();
+    // AP drafts NOT attempted -- no winner means no settleBattle call.
+    expect(applyDraftsFn).not.toHaveBeenCalled();
+    // Battle still flipped to settled with null winner.
+    expect(state.battle!.status).toBe('settled');
+    expect(state.battle!.winner_user_id).toBeNull();
+  });
+
+  it('TEST 4: transient AP failure recovers across two ticks; battle reaches settled', async () => {
+    const state = resumeBaseState();
+    seedScoredVerdict(state, {
+      battleId: BID,
+      a: A,
+      b: D,
+      winnerSeat: 1,
+      decidedBy: 'community_ap',
+      settledAt: '2026-05-24T10:26:00.000Z',
+    });
+
+    const supabase = buildFakeSupabase(state);
+    const logger = buildLogger();
+    const invoke = vi.fn();
+    // First call throws (transient -- e.g. RPC blip), second succeeds.
+    const applyDraftsFn = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('transient: rpc 503'))
+      .mockResolvedValueOnce([]);
+    const now = () => Date.parse('2026-05-24T10:27:00Z');
+
+    // Tick 1: throws inside resumeSettlement -> caller (real runOpenDebate
+    // wrapper) catches; here we call runOpenDebateTick directly so we
+    // assert via try/catch.
+    await expect(
+      runOpenDebateTick(BID, {
+        supabase,
+        logger,
+        invoke: invoke as never,
+        applyDraftsFn: applyDraftsFn as never,
+        now,
+      }),
+    ).rejects.toThrow(/transient: rpc 503/);
+    // Battle still 'live' -- not corrupted by partial settlement.
+    expect(state.battle!.status).toBe('live');
+
+    // Tick 2: same state, second apply succeeds, settlement completes.
+    const outcome = await runOpenDebateTick(BID, {
+      supabase,
+      logger,
+      invoke: invoke as never,
+      applyDraftsFn: applyDraftsFn as never,
+      now,
+    });
+    expect(outcome.phase).toBe('resumed_settlement');
+    expect(state.battle!.status).toBe('settled');
+    expect(state.battle!.winner_user_id).toBe(D);
+    // AI still never called across both ticks.
+    expect(invoke).not.toHaveBeenCalled();
+    // applyDraftsFn called once per tick = twice total.
+    expect(applyDraftsFn).toHaveBeenCalledTimes(2);
+  });
+
+  it('TEST 5 (non-regression): first-pass settlement stamps _settlement_inputs into the verdict payload', async () => {
+    // Mirrors the existing "scores + settles" test but additionally asserts
+    // the snapshot field that the resume branch depends on.
+    const BID2 = '33333333-3333-4333-8333-333333333333';
+    const A2 = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+    const B2 = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
+    const state = baseState();
+    state.battle = { id: BID2, mode: 'open_debate', status: 'live', topic_id: 't1' };
+    state.participants = [
+      {
+        user_id: A2,
+        seat: 0,
+        users: { current_ap: 1000, tier_id: 4 },
+        battle_id: BID2,
+      } as unknown as FakeState['participants'][number],
+      {
+        user_id: B2,
+        seat: 1,
+        users: { current_ap: 1100, tier_id: 4 },
+        battle_id: BID2,
+      } as unknown as FakeState['participants'][number],
+    ];
+    seedRound(state, {
+      id: 'r0',
+      round_no: 0,
+      payload: { state: 'revealed' },
+      deadline_at: null,
+      winner_user_id: null,
+    });
+    seedRound(state, {
+      id: 'r1',
+      round_no: 1,
+      payload: { state: 'revealed' },
+      deadline_at: null,
+      winner_user_id: null,
+    });
+    seedRound(state, {
+      id: 'r2',
+      round_no: 2,
+      payload: { state: 'revealed' },
+      deadline_at: null,
+      winner_user_id: null,
+    });
+    seedRound(state, {
+      id: 'r3',
+      round_no: 3,
+      payload: { state: 'awaiting_final_vote' },
+      deadline_at: '2026-05-24T10:25:00.000Z',
+      winner_user_id: null,
+    });
+    seedArg(state, { round_id: 'r0', user_id: A2, text: 'a opening' });
+    seedArg(state, { round_id: 'r0', user_id: B2, text: 'b opening' });
+    seedVote(state, { voter_user_id: 'v1', vote_for_user_id: B2, ap_at_vote_time: 500 });
+
+    const supabase = buildFakeSupabase(state);
+    const logger = buildLogger();
+    const invoke = vi.fn().mockResolvedValueOnce({
+      output: { winnerSeat: 1, scoreA: 50, scoreB: 80, reason: 'AI agrees with community' },
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-6',
+      task: 'debate_score',
+      usd: 0.01,
+      latencyMs: 500,
+    });
+    const applyDraftsFn = vi.fn().mockResolvedValue([]);
+    const now = () => Date.parse('2026-05-24T10:26:00Z');
+
+    const outcome = await runOpenDebateTick(BID2, {
+      supabase,
+      logger,
+      invoke: invoke as never,
+      applyDraftsFn: applyDraftsFn as never,
+      now,
+    });
+
+    expect(outcome.phase).toBe('scored_and_settled');
+    const verdict = state.rounds.find((r) => r.round_no === 3)!;
+    // Existing fields preserved (non-regression on the original payload shape).
+    expect(verdict.payload).toMatchObject({
+      state: 'scored',
+      winner_seat: 1,
+      winner_user_id: B2,
+      decided_by: 'community_ap',
+    });
+    // New: snapshot stamped so the resume path can replay deterministically.
+    expect(verdict.payload._settlement_inputs).toMatchObject({
+      winner: { user_id: B2, ap_before: 1100, tier: 4 },
+      loser: {
+        user_id: A2,
+        ap_before: 1000,
+        tier: 4,
+        consecutive_losses: 0,
+        reductions_used: 0,
+      },
+    });
+  });
+
+  it('TEST 6 (Window B): markBattleSettled fails after AP applied; second tick completes settlement', async () => {
+    // Window B of the resume contract: applyDraftsFn already resolved on
+    // tick 1, but markBattleSettled (the battles.status='settled' flip)
+    // crashed before completion. Resume on tick 2 must re-apply AP (safe
+    // via apply_ap_drafts idempotency keys -- pinned by the snapshot
+    // replay) AND flip the battle to settled using the originally-stamped
+    // winner. Structurally distinct from TEST 4 (Window A:
+    // applyDraftsFn-transient-failure); both real recovery paths.
+    const state = resumeBaseState();
+    seedScoredVerdict(state, {
+      battleId: BID,
+      a: A,
+      b: D,
+      winnerSeat: 1,
+      decidedBy: 'community_ap',
+      settledAt: '2026-05-24T10:26:00.000Z',
+    });
+
+    // Wrap the fake supabase so the next battles.update returns an error,
+    // forcing markBattleSettled to throw. AP application is untouched and
+    // succeeds normally; only the battle-flip write fails.
+    const inner = buildFakeSupabase(state);
+    let failNextBattlesUpdate = true;
+    const supabase = {
+      from(table: string) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const inst = (inner as any).from(table);
+        if (table !== 'battles') return inst;
+        return {
+          ...inst,
+          update(patch: Record<string, unknown>) {
+            const original = inst.update(patch);
+            return {
+              eq(col: string, val: unknown) {
+                if (failNextBattlesUpdate) {
+                  failNextBattlesUpdate = false;
+                  return Promise.resolve({ error: { message: 'transient: db 503' } });
+                }
+                return original.eq(col, val);
+              },
+            };
+          },
+        };
+      },
+    } as unknown as ServiceClient;
+
+    const logger = buildLogger();
+    const invoke = vi.fn();
+    const applyDraftsFn = vi.fn().mockResolvedValue([]);
+    const now = () => Date.parse('2026-05-24T10:27:00Z');
+
+    // Tick 1: AP applies (applyDraftsFn resolves), then markBattleSettled
+    // throws on the wrapped error.
+    await expect(
+      runOpenDebateTick(BID, {
+        supabase,
+        logger,
+        invoke: invoke as never,
+        applyDraftsFn: applyDraftsFn as never,
+        now,
+      }),
+    ).rejects.toThrow(/transient: db 503/);
+    // Battle still 'live' -- the flip never happened.
+    expect(state.battle!.status).toBe('live');
+    expect(applyDraftsFn).toHaveBeenCalledTimes(1);
+    // AI not invoked on the crashed tick.
+    expect(invoke).not.toHaveBeenCalled();
+
+    // Tick 2: clean run, battle flips to settled with the originally-
+    // stamped winner.
+    const outcome = await runOpenDebateTick(BID, {
+      supabase,
+      logger,
+      invoke: invoke as never,
+      applyDraftsFn: applyDraftsFn as never,
+      now,
+    });
+    expect(outcome.phase).toBe('resumed_settlement');
+    expect(state.battle!.status).toBe('settled');
+    expect(state.battle!.winner_user_id).toBe(D);
+    // Pins the no-skip-on-resume property: AP draft application runs every
+    // resume tick (the apply_ap_drafts idempotency key is what keeps the
+    // re-attempt safe, validated structurally by the snapshot replay).
+    expect(applyDraftsFn).toHaveBeenCalledTimes(2);
+    // AI never invoked across either tick.
+    expect(invoke).not.toHaveBeenCalled();
   });
 });
