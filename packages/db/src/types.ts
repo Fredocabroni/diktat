@@ -526,8 +526,11 @@ export type Database = {
       }
       news_topics: {
         Row: {
+          additional_sources: Json
           category: string | null
           created_at: string
+          curation_mode: string | null
+          dedup_cluster_id: string | null
           drop_at: string | null
           headline: string
           id: string
@@ -535,12 +538,16 @@ export type Database = {
           primary_source_url: string | null
           published_at: string | null
           slug: string
+          source_title: string | null
           summary: string | null
           updated_at: string
         }
         Insert: {
+          additional_sources?: Json
           category?: string | null
           created_at?: string
+          curation_mode?: string | null
+          dedup_cluster_id?: string | null
           drop_at?: string | null
           headline: string
           id?: string
@@ -548,12 +555,16 @@ export type Database = {
           primary_source_url?: string | null
           published_at?: string | null
           slug: string
+          source_title?: string | null
           summary?: string | null
           updated_at?: string
         }
         Update: {
+          additional_sources?: Json
           category?: string | null
           created_at?: string
+          curation_mode?: string | null
+          dedup_cluster_id?: string | null
           drop_at?: string | null
           headline?: string
           id?: string
@@ -561,6 +572,61 @@ export type Database = {
           primary_source_url?: string | null
           published_at?: string | null
           slug?: string
+          source_title?: string | null
+          summary?: string | null
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      news_topics_candidates: {
+        Row: {
+          created_at: string
+          dedup_cluster_id: string | null
+          dedup_url_canon: string
+          id: string
+          rank_score: number | null
+          rejected_reason: string | null
+          selected_at: string | null
+          source_category: string
+          source_host: string
+          source_provider: string
+          source_published_at: string | null
+          source_title: string
+          source_url: string
+          summary: string | null
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          dedup_cluster_id?: string | null
+          dedup_url_canon: string
+          id?: string
+          rank_score?: number | null
+          rejected_reason?: string | null
+          selected_at?: string | null
+          source_category: string
+          source_host: string
+          source_provider: string
+          source_published_at?: string | null
+          source_title: string
+          source_url: string
+          summary?: string | null
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          dedup_cluster_id?: string | null
+          dedup_url_canon?: string
+          id?: string
+          rank_score?: number | null
+          rejected_reason?: string | null
+          selected_at?: string | null
+          source_category?: string
+          source_host?: string
+          source_provider?: string
+          source_published_at?: string | null
+          source_title?: string
+          source_url?: string
           summary?: string | null
           updated_at?: string
         }
