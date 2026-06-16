@@ -97,7 +97,9 @@ export default function NotificationsSettingsPage() {
       await utils.user.me.invalidate();
       setState({ kind: 'enabled', prefOn: true });
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Something went wrong.');
+      setError(
+        err instanceof Error ? err.message : 'That didn’t work. Try again or reload the page.',
+      );
     } finally {
       setBusy(false);
     }
@@ -111,7 +113,9 @@ export default function NotificationsSettingsPage() {
       await utils.user.me.invalidate();
       setState((prev) => (prev.kind === 'enabled' ? { ...prev, prefOn: nextOn } : prev));
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Something went wrong.');
+      setError(
+        err instanceof Error ? err.message : 'That didn’t work. Try again or reload the page.',
+      );
     } finally {
       setBusy(false);
     }
@@ -127,7 +131,9 @@ export default function NotificationsSettingsPage() {
       }
       setState({ kind: 'idle' });
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Something went wrong.');
+      setError(
+        err instanceof Error ? err.message : 'That didn’t work. Try again or reload the page.',
+      );
     } finally {
       setBusy(false);
     }
@@ -147,7 +153,7 @@ export default function NotificationsSettingsPage() {
               Streak reminders
             </h2>
             <p className="mt-1 text-sm text-text-secondary">
-              Quiet, once a day at 9 PM if your streak is still going.
+              Only fires if you haven&rsquo;t finished Take 5 yet. One push, at 9 PM.
             </p>
           </div>
 
@@ -172,8 +178,8 @@ export default function NotificationsSettingsPage() {
 
         {state.kind === 'permission_denied' && (
           <p className="mt-3 text-xs text-text-tertiary">
-            Notifications are blocked at the browser level. Enable them in your browser&rsquo;s site
-            settings, then come back here.
+            Your browser is blocking notifications for this site. If you change your mind, update
+            site permissions in your browser settings.
           </p>
         )}
 
@@ -181,7 +187,7 @@ export default function NotificationsSettingsPage() {
           <p className="mt-3 text-xs text-text-tertiary">
             {state.reason === 'no_vapid_key'
               ? 'Push delivery is not configured for this environment.'
-              : 'This browser doesn’t support web push.'}
+              : 'Push notifications aren’t available here.'}
           </p>
         )}
       </div>

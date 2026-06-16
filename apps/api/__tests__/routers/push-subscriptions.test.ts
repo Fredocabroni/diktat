@@ -89,8 +89,16 @@ describe('pushSubscriptionsRouter.register — input validation', () => {
       'https://wns2-bl2p.notify.windows.com/?token=abc',
       'https://db5.notify.windows.com/?token=abc',
     ];
+    // Valid base64url-shaped keys so the post-SSRF keySchema validates.
+    const validP256dh =
+      'BNcRdreALRFXTkOOUHK1EtK2wtaz5Ry4YfYCA_0QTpQtUbVlUls0VJXg7A8u-Ts1XbjhazAkj7I99e8QcYP7DkM';
+    const validAuth = 'tBHItJI5svbpez7KI4CCXg';
     for (const ep of okEndpoints) {
-      await caller.pushSubscriptions.register({ endpoint: ep, p256dh: 'p', auth: 'a' });
+      await caller.pushSubscriptions.register({
+        endpoint: ep,
+        p256dh: validP256dh,
+        auth: validAuth,
+      });
     }
     spy.mockRestore();
   });

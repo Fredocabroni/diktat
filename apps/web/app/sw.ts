@@ -69,8 +69,14 @@ self.addEventListener('push', (event) => {
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
 
-  const data = event.notification.data as { click_action?: string } | undefined;
-  const target = data?.click_action ?? '/';
+  // Validate click_action before using it: must be a same-origin relative
+  // path (starts with '/' but not '//' — '//host/...' is a protocol-relative
+  // URL that openWindow would resolve to a foreign origin). Anything else
+  // collapses to the safe default. Defends against a malicious push payload
+  // ever steering openWindow to an attacker-controlled URL.
+  const data = event.notification.data as { click_action?: unknown } | undefined;
+  const raw = typeof data?.click_action === 'string' ? data.click_action : null;
+  const target = raw && raw.startsWith('/') && !raw.startsWith('//') ? raw : '/';
 
   event.waitUntil(
     (async () => {

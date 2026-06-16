@@ -85,8 +85,19 @@ const endpointSchema = z
   );
 
 // p256dh + auth are base64url-encoded byte strings from the browser's
-// PushSubscription.getKey() — bounded length, no other constraints.
-const keySchema = z.string().min(1).max(256);
+// PushSubscription.getKey(). RFC 8291 specifies fixed byte sizes:
+//   - p256dh: 65 bytes (uncompressed P-256 point) → 88 chars base64url
+//   - auth:   16 bytes (per-subscription secret)  → ~22-24 chars base64url
+// Bound the regex to base64url-safe characters and a reasonable max so
+// garbage keys are rejected at register-time rather than silently wasting
+// the workers' send budget on guaranteed-transient failures (security-
+// reviewer follow-up, 2026-06-15).
+const BASE64URL_RE = /^[A-Za-z0-9_-]+=*$/;
+const keySchema = z
+  .string()
+  .min(1)
+  .max(100)
+  .regex(BASE64URL_RE, 'Push subscription key must be base64url.');
 
 const registerInput = z.object({
   endpoint: endpointSchema,
