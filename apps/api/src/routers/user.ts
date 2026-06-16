@@ -5,7 +5,11 @@
 import { TRPCError } from '@trpc/server';
 import { z } from 'zod';
 
+import type { Database } from '@diktat/db';
+
 import { protectedProcedure, router } from '../trpc.js';
+
+type Json = Database['public']['Tables']['users']['Row']['notification_preferences'];
 
 // Handles are stored citext UNIQUE in public.users. Lowercase, alphanumeric
 // + underscore, 3–24 chars. Reserve room for civic-themed prefixes without
@@ -57,6 +61,7 @@ export const userRouter = router({
           current_ap,
           tier_id,
           onboarded_at,
+          notification_preferences,
           tiers ( id, name, payout_eligible, floor_protected ),
           streaks ( current_length, longest_length, last_action_date, freeze_tokens )
         `,
@@ -129,6 +134,60 @@ export const userRouter = router({
     }
     return data;
   }),
+
+  // Update notification preferences. Per-notification-type granularity —
+  // V1 ships exactly one key (`streak_risk_push`); future types add their
+  // own keys without schema churn. Default-on policy: absent key = enabled,
+  // explicit `false` opts out. Read-modify-write preserves any keys this
+  // caller didn't pass (race-tolerant: last-write-wins for settings-toggle
+  // traffic is acceptable; the window is microseconds).
+  updateNotificationPreferences: protectedProcedure
+    .input(
+      z.object({
+        streakRiskPush: z.boolean().optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const { data: existing, error: readErr } = await ctx.db
+        .from('users')
+        .select('notification_preferences')
+        .eq('id', ctx.userId)
+        .maybeSingle();
+      if (readErr) {
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message: 'Failed to read notification preferences.',
+          cause: readErr,
+        });
+      }
+      if (!existing) {
+        throw new TRPCError({ code: 'NOT_FOUND', message: 'Profile not found.' });
+      }
+      const current = (existing.notification_preferences ?? {}) as Record<string, unknown>;
+      const next: Record<string, unknown> = { ...current };
+      if (input.streakRiskPush !== undefined) {
+        next.streak_risk_push = input.streakRiskPush;
+      }
+
+      const { data, error } = await ctx.db
+        .from('users')
+        .update({ notification_preferences: next as Json })
+        .eq('id', ctx.userId)
+        .select('id, notification_preferences')
+        .maybeSingle();
+
+      if (error) {
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message: 'Failed to update notification preferences.',
+          cause: error,
+        });
+      }
+      if (!data) {
+        throw new TRPCError({ code: 'NOT_FOUND', message: 'Profile not found.' });
+      }
+      return data;
+    }),
 
   // Store the caller's IANA timezone. The Phase 4 scheduler's per-user-local
   // sweeps (streak lock at local midnight, evening risk-push window) compute

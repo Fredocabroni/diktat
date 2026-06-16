@@ -5,6 +5,7 @@ import { debatesRouter } from './debates.js';
 import { factCheckRouter } from './fact-check.js';
 import { feedRouter } from './feed.js';
 import { matchmakingRouter } from './matchmaking.js';
+import { pushSubscriptionsRouter } from './push-subscriptions.js';
 import { tribesRouter } from './tribes.js';
 import { userRouter } from './user.js';
 import { walletRouter } from './wallet.js';
@@ -19,6 +20,7 @@ export const appRouter = router({
   debates: debatesRouter,
   factCheck: factCheckRouter,
   feed: feedRouter,
+  pushSubscriptions: pushSubscriptionsRouter,
 });
 
 export type AppRouter = typeof appRouter;

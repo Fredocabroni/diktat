@@ -18,11 +18,12 @@ import {
 } from '@diktat/ai-fabric';
 import { Client as PgClient } from 'pg';
 
-import { loadEnv, privyReady } from './env.js';
+import { loadEnv, privyReady, webPushReady, type Env } from './env.js';
 import { buildBattlePoller } from './jobs/battle-poller.js';
 import { MATCH_MODES, runMatchmakingTick } from './jobs/matchmake.js';
 import { startPrivyProvisionListener, type PrivyWalletProvider } from './jobs/privy-provision.js';
-import { defaultHandlers, runSchedulerTick } from './jobs/scheduler.js';
+import type { SendOutcome, WebPushSender } from './jobs/push-deliver.js';
+import { buildDefaultHandlers, runSchedulerTick } from './jobs/scheduler.js';
 import { buildLogger } from './logger.js';
 import { buildRedis } from './redis.js';
 import { buildServiceClient } from './supabase.js';
@@ -118,10 +119,19 @@ async function main(): Promise<void> {
       });
   }, BATTLE_POLLER_TICK_MS);
 
+  // Web-push sender. Lazily import the web-push library so dev envs
+  // without VAPID keys don't have to resolve it at boot. When VAPID env
+  // is unset the sender stays null and the push_deliver handler stamps
+  // skipped_no_vapid on claimed rows (rather than letting them dead-letter
+  // on missing credentials).
+  const webPushSender = await buildVapidSender(env, logger);
+
   // Scheduler poll — drains public.scheduled_jobs rows emitted by pg_cron
-  // and dispatches by job_type to the handler registry. This PR registers
-  // 'heartbeat' only; feature PRs extend defaultHandlers with their own
-  // job types (drop_publish in 4.2, risk_push in 4.4, etc.).
+  // and dispatches by job_type to the handler registry. push_deliver is
+  // attached at boot via buildDefaultHandlers because its handler closes
+  // over the VAPID sender; all other handlers are static module-level
+  // exports off scheduler.ts.
+  const schedulerHandlers = buildDefaultHandlers({ webPushSender });
   const schedulerWorkerId = `workers-${process.pid}-${Date.now()}`;
   let schedulerBusy = false;
   const schedulerInterval = setInterval(() => {
@@ -131,7 +141,7 @@ async function main(): Promise<void> {
       supabase,
       logger,
       workerId: schedulerWorkerId,
-      handlers: defaultHandlers,
+      handlers: schedulerHandlers,
       // Forwarded to handlers that need them (PR 4.7 fact_check).
       invoke: fabricInvoke,
       providerEnv: debateProviderEnv,
@@ -192,6 +202,52 @@ async function buildPrivyProvider(
         solanaAddress: wallet.address,
         evmAddress: null,
       };
+    },
+  };
+}
+
+async function buildVapidSender(
+  env: Env,
+  logger: ReturnType<typeof buildLogger>,
+): Promise<WebPushSender | null> {
+  if (!webPushReady(env)) {
+    logger.warn({
+      event: 'push.deliver.disabled',
+      reason: 'missing_vapid_env',
+    });
+    return null;
+  }
+
+  // Lazy import so a workers dev install without VAPID keys doesn't have
+  // to resolve the web-push library at boot.
+  const webpush = (await import('web-push')).default;
+  webpush.setVapidDetails(env.VAPID_SUBJECT, env.VAPID_PUBLIC_KEY, env.VAPID_PRIVATE_KEY);
+
+  return {
+    async send(sub, payload): Promise<SendOutcome> {
+      try {
+        await webpush.sendNotification(
+          { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
+          payload,
+        );
+        return { kind: 'sent' };
+      } catch (err) {
+        const e = err as { statusCode?: number; body?: string; message?: string };
+        const status = typeof e.statusCode === 'number' ? e.statusCode : 0;
+        // 404/410 are the spec-mandated "endpoint is permanently gone" codes.
+        if (status === 404 || status === 410) return { kind: 'gone' };
+        // 401/403 are signature/permission rejections. After a VAPID rotation,
+        // existing endpoints fail with these and need re-subscription.
+        if (status === 401 || status === 403) return { kind: 'unauthorized' };
+        if (status === 413) return { kind: 'payload_too_large' };
+        // Everything else (including network-level errors with status=0) is
+        // treated as transient and lets the scheduler retry with backoff.
+        return {
+          kind: 'transient',
+          statusCode: status,
+          message: e.body ?? e.message ?? 'unknown',
+        };
+      }
     },
   };
 }

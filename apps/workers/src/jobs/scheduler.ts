@@ -24,6 +24,7 @@ import type { invoke as fabricInvoke, ProviderEnv } from '@diktat/ai-fabric';
 
 import { factCheckOrchestratorHandler } from './fact-check-orchestrator.js';
 import { localBoundarySweepHandler } from './local-boundary-sweep.js';
+import { buildPushDeliverHandler, type WebPushSender } from './push-deliver.js';
 import { riskPushHandler } from './risk-push.js';
 import type { ServiceClient } from '../supabase.js';
 import type { Logger } from '../logger.js';
@@ -345,13 +346,31 @@ export const heartbeatHandler: JobHandler = async (row, deps) => {
   });
 };
 
-/** Default registry shipped in this PR. Feature PRs extend it with their own
- *  job_types (drop_publish in PR 4.2, risk_push in PR 4.4, etc.). */
+/** Default registry of statically-constructed handlers. Use this in tests
+ *  that don't exercise push delivery; the boot path uses
+ *  buildDefaultHandlers() below to attach the runtime-configured
+ *  push_deliver handler. Feature PRs extend it with their own job_types
+ *  (drop_publish in PR 4.2, risk_push in PR 4.4, etc.). */
 export const defaultHandlers: Readonly<Record<string, JobHandler>> = Object.freeze({
   heartbeat: heartbeatHandler,
   local_boundary_sweep: localBoundarySweepHandler,
   risk_push: riskPushHandler,
   fact_check: factCheckOrchestratorHandler,
 });
+
+/** Build the runtime registry. The push_deliver handler is a factory because
+ *  it closes over a WebPushSender configured with VAPID keys at boot — those
+ *  keys must never leave the workers process. When sender is null (VAPID env
+ *  not configured), the handler still claims push_deliver rows but stamps
+ *  them as skipped_no_vapid and returns done — keeps the queue draining
+ *  cleanly on dev envs without keys. */
+export function buildDefaultHandlers(opts: {
+  webPushSender: WebPushSender | null;
+}): Readonly<Record<string, JobHandler>> {
+  return Object.freeze({
+    ...defaultHandlers,
+    push_deliver: buildPushDeliverHandler(opts.webPushSender),
+  });
+}
 
 export const __testing = { backoffMsFor, CLAIM_BATCH, STALE_LOCK_MS };

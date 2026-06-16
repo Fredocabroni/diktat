@@ -30,6 +30,18 @@ const envSchema = z.object({
   PRIVY_ENABLED: boolFromString.default(false),
   PRIVY_APP_ID: z.string().default(''),
   PRIVY_APP_SECRET: z.string().default(''),
+
+  // VAPID — Web Push signing. All three vars must be non-empty before the
+  // push_deliver handler actually dispatches; otherwise it logs a skip and
+  // marks the row done with delivery_status='skipped_no_vapid'. Lets a dev
+  // env without keys boot cleanly without dropping rows. Generated once via
+  // `npx web-push generate-vapid-keys` and stored in env (NOT Postgres —
+  // the private key never enters the database). Rotation: replace the pair,
+  // redeploy workers; existing subscriptions fail next send with 401 and
+  // soft-delete via the handler's disabled_reason='unauthorized' path.
+  VAPID_PUBLIC_KEY: z.string().default(''),
+  VAPID_PRIVATE_KEY: z.string().default(''),
+  VAPID_SUBJECT: z.string().default(''),
 });
 
 export type Env = z.infer<typeof envSchema>;
@@ -47,4 +59,12 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
 
 export function privyReady(env: Env): boolean {
   return env.PRIVY_ENABLED && env.PRIVY_APP_ID.length > 0 && env.PRIVY_APP_SECRET.length > 0;
+}
+
+export function webPushReady(env: Env): boolean {
+  return (
+    env.VAPID_PUBLIC_KEY.length > 0 &&
+    env.VAPID_PRIVATE_KEY.length > 0 &&
+    env.VAPID_SUBJECT.length > 0
+  );
 }
