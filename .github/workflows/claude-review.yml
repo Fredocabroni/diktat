@@ -28,11 +28,11 @@ jobs:
       matrix:
         reviewer:
           - name: security-reviewer
-            prompt: "Run the security-reviewer subagent on this PR's diff. After producing the report, post it as a single PR comment by invoking the Bash tool with: gh pr comment \"$PR_NUMBER\" --body \"$REPORT\". The GITHUB_TOKEN with pull-requests+issues:write is already exported as GH_TOKEN in the shell, so gh authenticates automatically. Do NOT use any MCP tool — the GitHub MCP server is not granted permission in this CI environment and silently no-ops."
+            prompt: "Run the security-reviewer subagent on this PR's diff. Output ONLY the review report in markdown — no preamble, no commentary, no closing remarks. Do not attempt to post it or run any shell command."
           - name: copy-linter
-            prompt: "Run the copy-linter subagent on apps/web/**/*.tsx, apps/bots/**/templates/**, and any packages/ai-fabric/src/prompts/* files changed in this PR. After producing the report, post it as a PR comment by invoking the Bash tool with: gh pr comment \"$PR_NUMBER\" --body \"$REPORT\". The GITHUB_TOKEN is already exported as GH_TOKEN. Do NOT use any MCP tool."
+            prompt: "Run the copy-linter subagent on apps/web/**/*.tsx, apps/bots/**/templates/**, and any packages/ai-fabric/src/prompts/* files changed in this PR. Output ONLY the review report in markdown — no preamble, no commentary, no closing remarks. Do not attempt to post it or run any shell command."
           - name: addiction-auditor
-            prompt: "Run the addiction-auditor subagent on engagement-mechanic changes in this PR. After producing the report, post it as a PR comment by invoking the Bash tool with: gh pr comment \"$PR_NUMBER\" --body \"$REPORT\". The GITHUB_TOKEN is already exported as GH_TOKEN. Do NOT use any MCP tool."
+            prompt: "Run the addiction-auditor subagent on engagement-mechanic changes in this PR. Output ONLY the review report in markdown — no preamble, no commentary, no closing remarks. Do not attempt to post it or run any shell command."
     steps:
       - uses: actions/checkout@v4
         with:
@@ -59,22 +59,24 @@ jobs:
       - name: Install Claude Code
         run: npm i -g @anthropic-ai/claude-code
 
-      # GH_TOKEN + PR_NUMBER are exported so the agent can post via
-      # `gh pr comment` (the canonical shell path). The default
-      # GITHUB_TOKEN inherits the workflow's `pull-requests: write` +
-      # `issues: write` permissions (above), and PR comments are issue
-      # comments per the GitHub API — so `gh pr comment` works without
-      # any additional scope. The prior workflow expected the agent to
-      # post via the GitHub MCP server, which has no permission grant
-      # in this CI environment; the agent's stdout in past runs of #38
-      # literally surfaced "The MCP GitHub tools need explicit
-      # permission grants in this environment." With this shell path
-      # the agent has a working post route that doesn't need MCP grants.
+      # The reviewer step CAPTURES agent stdout to a file and does NOT
+      # have GH_TOKEN in its env. The Post step (next) reads the file
+      # and runs `gh pr comment` from the workflow shell — the agent
+      # never touches the shell invocation. This shape closes three
+      # problems at once that the prior single-step shape had:
+      #   - claude -p's bash-permission gate blocked the agent's own
+      #     `gh pr comment` call in headless mode (no interactive
+      #     approver in CI). Now the agent does not shell out.
+      #   - Prompt-to-shell injection — PR-sourced content reaching a
+      #     constructed shell command. Now the agent only writes
+      #     markdown to stdout; `gh pr comment --body-file` reads the
+      #     captured file with no shell interpolation.
+      #   - GH_TOKEN in the agent's environment, where the Bash tool
+      #     could exfiltrate it via any subcommand. Now the token lives
+      #     only in the Post step.
       - name: Run ${{ matrix.reviewer.name }}
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
           REVIEW_PROMPT: ${{ matrix.reviewer.prompt }}
         # `|| true` kept on purpose: these reviewers are advisory-but-
         # visible. A real blocking gate (parseable verdict → exit code
@@ -83,4 +85,18 @@ jobs:
         run: |
           claude -p "$REVIEW_PROMPT" \
             --model claude-sonnet-4-6 \
-            --output-format text || true
+            --output-format text > review_output.md || true
+
+      # Post the captured report as a PR comment. Empty / missing
+      # outputs are logged but don't fail the step — same advisory
+      # posture as the reviewer step.
+      - name: Post review
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          if [ -s review_output.md ]; then
+            gh pr comment "$PR_NUMBER" --body-file review_output.md
+          else
+            echo "reviewer produced no output"
+          fi
