@@ -22,6 +22,7 @@
 
 import type { invoke as fabricInvoke, ProviderEnv } from '@diktat/ai-fabric';
 
+import { dropPublishHandler } from './drop-publish.js';
 import { factCheckOrchestratorHandler } from './fact-check-orchestrator.js';
 import { localBoundarySweepHandler } from './local-boundary-sweep.js';
 import { newsDedupRankHandler } from './news-dedup-rank.js';
@@ -360,6 +361,7 @@ export const defaultHandlers: Readonly<Record<string, JobHandler>> = Object.free
   fact_check: factCheckOrchestratorHandler,
   news_ingest: buildNewsIngestHandler(),
   news_dedup_rank: newsDedupRankHandler,
+  drop_publish: dropPublishHandler,
 });
 
 /** Build the runtime registry. The push_deliver handler is a factory because
