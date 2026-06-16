@@ -64,6 +64,23 @@ export interface NewsIngestAdapter {
  *  primary-source feed size (real feeds are tens-to-hundreds of KB). */
 const MAX_FEED_BYTES = 10 * 1024 * 1024;
 
+/** Per-HOP timeout, not per-CHAIN. AbortSignal.timeout(FETCH_TIMEOUT_MS)
+ *  is re-created inside fetchWithSafeRedirects on every recursive call,
+ *  so each redirect hop gets its own fresh 10s budget. Worst-case wall-
+ *  clock for a full redirect chain is therefore (MAX_REDIRECTS + 1) ×
+ *  FETCH_TIMEOUT_MS = 60s with the current values. The chain-deadline
+ *  shape (one AbortSignal threaded through the whole chain) is logged
+ *  in TYRION_BUILD_QUEUE as a follow-up; for V1 the per-hop budget is
+ *  acceptable because legit primary-source CDNs reach 2xx on the first
+ *  fetch and the recursive case is reserved for misbehaving servers
+ *  that we'd rather kill quickly anyway. */
+const FETCH_TIMEOUT_MS = 10_000;
+
+/** Max redirects to follow per feed fetch. Five is generous for legit
+ *  primary-source CDNs (typically 0–1 redirects); anything more is
+ *  either a misconfigured server or an attacker-driven loop. */
+const MAX_REDIRECTS = 5;
+
 // ---------------------------------------------------------------------------
 // URL canonicalization — the cheap first-pass dedup key.
 // ---------------------------------------------------------------------------
@@ -92,6 +109,54 @@ export function canonicalizeUrl(rawUrl: string): string {
 // RSS adapter — three V1 instances
 // ---------------------------------------------------------------------------
 
+/** Fetch a URL with hostname-validated redirect chasing. Defends against
+ *  the security-reviewer's HIGH SSRF finding (2026-06-16): the original
+ *  implementation used `redirect: 'follow'`, which let a primary-source
+ *  CDN respond `302 Location: https://evil.com/...` and the workers
+ *  process would dutifully fetch evil.com.
+ *
+ *  Behavior:
+ *    - Pre-fetch: classifyUrl() on the URL. Non-primary host throws.
+ *      This catches mis-configured adapters (a feed URL hardcoded as
+ *      e.g. https://news.example.com/rss is rejected at the workers
+ *      boundary, never makes a network request).
+ *    - During fetch: redirect='manual' + AbortSignal.timeout. We see
+ *      the 3xx ourselves rather than auto-following.
+ *    - On 3xx: read Location, parse against the current URL (handles
+ *      relative redirects), recurse with the same classification gate.
+ *      Up to MAX_REDIRECTS deep.
+ *    - On 2xx: return the Response for the caller to body-parse. */
+async function fetchWithSafeRedirects(
+  fetchImpl: typeof globalThis.fetch,
+  url: string,
+  redirectCount = 0,
+): Promise<Response> {
+  if (redirectCount > MAX_REDIRECTS) {
+    throw new Error(`news_ingest: redirect chain too long (>${MAX_REDIRECTS}) starting at ${url}`);
+  }
+  const classification = classifyUrl(url);
+  if (!classification.allowed || classification.role !== 'primary') {
+    throw new Error(`news_ingest: refusing to fetch non-primary host: ${url}`);
+  }
+
+  const response = await fetchImpl(url, {
+    redirect: 'manual',
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  });
+
+  if (response.status >= 300 && response.status < 400) {
+    const location = response.headers.get('location');
+    if (!location) {
+      throw new Error(`news_ingest: ${response.status} from ${url} carried no Location header`);
+    }
+    // Resolve relative URLs against the current URL.
+    const nextUrl = new URL(location, url).toString();
+    return fetchWithSafeRedirects(fetchImpl, nextUrl, redirectCount + 1);
+  }
+
+  return response;
+}
+
 /** Standard RSS parsing using rss-parser. Each adapter passes its feed
  *  URLs through this normalizer. */
 async function fetchAndParseRss(
@@ -105,7 +170,7 @@ async function fetchAndParseRss(
     contentSnippet: string | null;
   }>
 > {
-  const response = await fetchImpl(feedUrl, { redirect: 'follow' });
+  const response = await fetchWithSafeRedirects(fetchImpl, feedUrl);
   if (!response.ok) {
     throw new Error(`news_ingest: feed ${feedUrl} returned ${response.status}`);
   }

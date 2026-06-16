@@ -10,7 +10,7 @@ import type { ScheduledJobRow } from '../../src/jobs/scheduler.js';
 import type { Logger } from '../../src/logger.js';
 import type { ServiceClient } from '../../src/supabase.js';
 
-const { canonicalizeUrl } = __testing;
+const { canonicalizeUrl, fetchAndParseRss } = __testing;
 
 // ---------------------------------------------------------------------------
 // canonicalizeUrl — the cheap first-pass dedup key
@@ -47,6 +47,116 @@ describe('canonicalizeUrl', () => {
     const a = canonicalizeUrl('https://www.bls.gov/news.release/?utm_source=x&utm_medium=y');
     const b = canonicalizeUrl('https://bls.gov/news.release');
     expect(a).toBe(b);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// fetchAndParseRss — redirect host validation (SSRF defense)
+// ---------------------------------------------------------------------------
+
+describe('fetchAndParseRss — redirect host validation', () => {
+  // Minimal RSS body, returned on 200 to satisfy the parser when a test
+  // exercises a happy redirect-followed-to-an-allow-list-host case.
+  const RSS_OK = `<?xml version="1.0"?><rss version="2.0"><channel><title>ok</title><item><title>x</title><link>https://www.congress.gov/bill/1</link></item></channel></rss>`;
+
+  it('rejects a 302 redirect to a non-allow-list host (the SSRF case)', async () => {
+    // Hardcoded primary-source feed URL respondes with 302 to evil.com.
+    // The workers process must NOT issue the follow-up fetch.
+    const fetchImpl = vi.fn(async (url: string | URL) => {
+      const u = typeof url === 'string' ? url : url.toString();
+      if (u === 'https://www.congress.gov/rss/feed.xml') {
+        return new Response(null, {
+          status: 302,
+          headers: { location: 'https://evil.com/feed.xml' },
+        });
+      }
+      // If this branch fires, the SSRF defense failed.
+      throw new Error(`unexpected follow-up fetch to ${u}`);
+    });
+
+    await expect(
+      fetchAndParseRss(fetchImpl as never, 'https://www.congress.gov/rss/feed.xml'),
+    ).rejects.toThrow(/refusing to fetch non-primary host: https:\/\/evil\.com/);
+
+    // Hard assertion: only ONE fetch was made — the original. The
+    // redirect was never followed.
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects a 301 redirect to a ban-listed host (CNN as framing-only)', async () => {
+    const fetchImpl = vi.fn(async (url: string | URL) => {
+      const u = typeof url === 'string' ? url : url.toString();
+      if (u === 'https://www.bls.gov/feed/news_release.rss') {
+        return new Response(null, {
+          status: 301,
+          headers: { location: 'https://www.cnn.com/politics/rss' },
+        });
+      }
+      throw new Error(`unexpected follow-up fetch to ${u}`);
+    });
+
+    await expect(
+      fetchAndParseRss(fetchImpl as never, 'https://www.bls.gov/feed/news_release.rss'),
+    ).rejects.toThrow(/refusing to fetch non-primary host: https:\/\/www\.cnn\.com/);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('follows a 301 redirect WITHIN the allow-list (e.g. www.bls.gov → bls.gov)', async () => {
+    const fetchImpl = vi.fn(async (url: string | URL) => {
+      const u = typeof url === 'string' ? url : url.toString();
+      if (u === 'https://www.bls.gov/feed/news_release.rss') {
+        return new Response(null, {
+          status: 301,
+          headers: { location: 'https://bls.gov/feed/news_release.rss' },
+        });
+      }
+      if (u === 'https://bls.gov/feed/news_release.rss') {
+        return new Response(RSS_OK, { status: 200 });
+      }
+      throw new Error(`unexpected fetch to ${u}`);
+    });
+
+    const items = await fetchAndParseRss(
+      fetchImpl as never,
+      'https://www.bls.gov/feed/news_release.rss',
+    );
+    expect(items.length).toBeGreaterThan(0);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects an infinite redirect loop (>MAX_REDIRECTS)', async () => {
+    let count = 0;
+    const fetchImpl = vi.fn(async () => {
+      count += 1;
+      return new Response(null, {
+        status: 302,
+        // Same-host redirect chain; allow-list passes each time but
+        // the depth cap kills the loop.
+        headers: { location: `https://www.congress.gov/rss/feed-${count}.xml` },
+      });
+    });
+
+    await expect(
+      fetchAndParseRss(fetchImpl as never, 'https://www.congress.gov/rss/feed-0.xml'),
+    ).rejects.toThrow(/redirect chain too long/);
+  });
+
+  it('rejects 3xx with no Location header (malformed redirect)', async () => {
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 302, headers: {} }));
+
+    await expect(
+      fetchAndParseRss(fetchImpl as never, 'https://www.sec.gov/news/pressreleases.rss'),
+    ).rejects.toThrow(/302 from .* carried no Location header/);
+  });
+
+  it('refuses to fetch a non-allow-list feed URL at all (pre-fetch host gate)', async () => {
+    // Defense in depth — if a future adapter is misconfigured with a
+    // non-primary feed URL, the host gate blocks the request entirely.
+    const fetchImpl = vi.fn();
+    await expect(
+      fetchAndParseRss(fetchImpl as never, 'https://news.example.com/rss'),
+    ).rejects.toThrow(/refusing to fetch non-primary host: https:\/\/news\.example\.com/);
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 });
 
