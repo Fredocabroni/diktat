@@ -24,6 +24,7 @@ import type { invoke as fabricInvoke, ProviderEnv } from '@diktat/ai-fabric';
 
 import { factCheckOrchestratorHandler } from './fact-check-orchestrator.js';
 import { localBoundarySweepHandler } from './local-boundary-sweep.js';
+import { buildNewsIngestHandler } from './news-ingest.js';
 import { buildPushDeliverHandler, type WebPushSender } from './push-deliver.js';
 import { riskPushHandler } from './risk-push.js';
 import type { ServiceClient } from '../supabase.js';
@@ -356,6 +357,7 @@ export const defaultHandlers: Readonly<Record<string, JobHandler>> = Object.free
   local_boundary_sweep: localBoundarySweepHandler,
   risk_push: riskPushHandler,
   fact_check: factCheckOrchestratorHandler,
+  news_ingest: buildNewsIngestHandler(),
 });
 
 /** Build the runtime registry. The push_deliver handler is a factory because
