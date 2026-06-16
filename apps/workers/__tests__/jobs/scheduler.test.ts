@@ -139,6 +139,7 @@ describe('runSchedulerTick', () => {
           'risk_push',
           'fact_check',
           'news_ingest',
+          'news_dedup_rank',
         ],
         p_worker_id: 'w1',
       },
