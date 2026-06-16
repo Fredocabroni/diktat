@@ -456,3 +456,5 @@ New plan: **you orchestrate Claude once** (set up the OS), then Claude orchestra
 Go do Part A-C of the checklist in section 1. When you hit Part D step 20, paste the bootstrap message. The rest unfolds.
 
 Diktat.
+
+- **Ship monochrome badge-96 asset** — `apps/workers/src/jobs/push-deliver.ts:buildNotificationPayload` currently reuses `/icons/icon-192.png` for both `icon` and `badge` (intentional V1 deviation from PR #35 scope to avoid shipping a fourth static asset). Android browsers downsample the icon when no proper monochrome badge is supplied — cosmetic limitation, not functional. Polish: add `apps/web/public/icons/badge-96.png` (96×96 monochrome glyph) and update the `badge` field on the notification payload. One-line code change + the static asset.
