@@ -58,6 +58,12 @@ export interface NewsIngestAdapter {
   fetch(fetchImpl: typeof globalThis.fetch): Promise<CandidateInput[]>;
 }
 
+/** Hard cap on RSS feed body size — guards against a hostile or
+ *  compromised primary-source feed shipping a multi-MB payload that
+ *  would OOM the workers process. 10MB is well above any legitimate
+ *  primary-source feed size (real feeds are tens-to-hundreds of KB). */
+const MAX_FEED_BYTES = 10 * 1024 * 1024;
+
 // ---------------------------------------------------------------------------
 // URL canonicalization — the cheap first-pass dedup key.
 // ---------------------------------------------------------------------------
@@ -104,6 +110,14 @@ async function fetchAndParseRss(
     throw new Error(`news_ingest: feed ${feedUrl} returned ${response.status}`);
   }
   const xml = await response.text();
+  // Bound the feed body. Primary-source RSS feeds are tens-to-hundreds
+  // of KB; >10MB is either compromised or a billion-laughs probe.
+  // security-reviewer ask, 2026-06-16.
+  if (xml.length > MAX_FEED_BYTES) {
+    throw new Error(
+      `news_ingest: feed ${feedUrl} body ${xml.length} exceeds ${MAX_FEED_BYTES}B cap`,
+    );
+  }
   // rss-parser accepts a raw XML string via parseString.
   const parser = new Parser();
   const feed = await parser.parseString(xml);
@@ -308,6 +322,26 @@ async function ingestOne(
   let rejectedInvalid = 0;
 
   for (const c of candidates) {
+    // Reject URLs carrying userinfo (https://evil.com@congress.gov/...)
+    // before classification. The URL's hostname IS congress.gov by spec
+    // — classifyUrl would (correctly) classify it as primary — but when
+    // rendered in the UI most browsers navigate following the userinfo
+    // path, sending the user to evil.com's server. Cheap defense in
+    // depth (security-reviewer ask, 2026-06-16). Legit primary-source
+    // feeds never embed userinfo.
+    let hasUserinfo = false;
+    try {
+      const u = new URL(c.source_url);
+      hasUserinfo = u.username.length > 0 || u.password.length > 0;
+    } catch {
+      // URL parse failure flows through classifyUrl's invalid branch.
+    }
+    if (hasUserinfo) {
+      rejectedInvalid += 1;
+      await insertCandidate(deps, c, 'invalid_payload');
+      continue;
+    }
+
     const classification = classifyUrl(c.source_url);
 
     if (classification.allowed) {

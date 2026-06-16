@@ -90,10 +90,25 @@ interface DropOutcome {
 /** Structured-output contract for the LLM rewrite. Empty strings are
  *  ALLOWED per the drop-headline.ts prompt — "empty output preferred
  *  to a slanted rewrite." The handler falls back to source_title
- *  verbatim when headline is empty. */
+ *  verbatim when headline is empty.
+ *
+ *  Headline + summary regex bars angle brackets and embedded URLs at
+ *  the schema layer (defense in depth against a hostile feed prompt-
+ *  injecting URL-shaped content into the Drop headline; security-
+ *  reviewer ask, 2026-06-16). */
+const SAFE_TEXT_RE = /^[^<>]*$/;
 const DropHeadlineRewriteSchema = z.object({
-  headline: z.string().max(100, 'Headline exceeds 100-char cap.'),
-  summary: z.string().max(400, 'Summary exceeds 400 chars.'),
+  headline: z
+    .string()
+    .max(100, 'Headline exceeds 100-char cap.')
+    .regex(SAFE_TEXT_RE, 'Headline may not contain angle brackets.')
+    .refine((s) => !/https?:\/\//i.test(s), {
+      message: 'Headline may not embed a URL.',
+    }),
+  summary: z
+    .string()
+    .max(400, 'Summary exceeds 400 chars.')
+    .regex(SAFE_TEXT_RE, 'Summary may not contain angle brackets.'),
   claim: z.string().max(500, 'Claim exceeds 500 chars.'),
 });
 type DropHeadlineRewriteOutput = z.infer<typeof DropHeadlineRewriteSchema>;

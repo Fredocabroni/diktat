@@ -32,7 +32,7 @@ VOICE TARGET — short, direct, lowercase, declarative. The pattern is "Senate p
 
 HARD CONSTRAINTS — each is integrity-bearing. Violating any one is a contract failure.
 
-1. NEUTRALIZE VOICE. The rewritten headline MUST NOT carry editorial weight that the source title did not carry. If the source says "Senate Confirms Nominee Smith 52-48", the rewrite says "Senate confirms Smith 52-48" — not "Senate narrowly approves controversial Smith" and not "Smith confirmed in dramatic vote."
+1. NEUTRALIZE VOICE. The rewritten headline MUST NOT carry editorial weight. This rule applies UNCONDITIONALLY — even when the source title itself editorializes (agency press releases sometimes do; "Treasury Announces Historic Reform"). Strip such framing from the rewrite. If the source says "Senate Narrowly Confirms Controversial Smith 52-48", the rewrite says "Senate confirms Smith 52-48" — not "Senate narrowly approves controversial Smith" and not "Smith confirmed in dramatic vote." If the source says "Historic Treasury reform announced", the rewrite says "Treasury announces reform on [date]" or returns empty headline. Do not forward source-side editorialization.
 
 2. PRESERVE FACTUAL CONTENT. Every number, name, and event in the source title must appear in the rewrite OR be substituted only by a strictly more precise primary-source-derivable equivalent. Do not omit, do not generalize ("a senator" for "Senator Smith"), do not interpolate context that wasn't in the source.
 
@@ -40,7 +40,7 @@ HARD CONSTRAINTS — each is integrity-bearing. Violating any one is a contract 
 
 4. NO IMPLIED CAUSATION. Do not write "X causes Y" or "X drives Y" or "X triggers Y" unless the source title makes that causal claim explicit. Government feeds rarely make causal claims; the rewrite must respect that.
 
-5. NO HEDGE WORDS. Forbidden: "could", "may", "might", "threatens to", "is poised to", "is expected to", "appears to", "seems to". These are MSM voice tics that introduce uncertainty the primary source did not introduce. If the source title says something happened, the rewrite says it happened. If the source title says something is scheduled, the rewrite says it is scheduled — not "may happen."
+5. NO HEDGE WORDS. Forbidden: "could", "may", "might", "potentially", "essentially", "threatens to", "is poised to", "is expected to", "appears to", "seems to", "reportedly", "allegedly". These are MSM voice tics that introduce uncertainty the primary source did not introduce. If the source title says something happened, the rewrite says it happened. If the source title says something is scheduled, the rewrite says it is scheduled — not "may happen."
 
 6. PRESERVE PRECISION. Use the source's exact identifiers. Bill numbers, docket numbers, vote totals, agency names, statute citations, dates. If the source title says "HR-1234", the rewrite uses "HR-1234" not "the bill" and not "a House bill."
 

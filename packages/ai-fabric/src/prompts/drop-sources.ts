@@ -85,11 +85,12 @@ export const PRIMARY_ALLOW_LIST: ReadonlyArray<HostPattern> = [
   { hostSuffix: 'bls.gov', category: 'bls_labor' },
   { hostSuffix: 'dol.gov', category: 'bls_labor' },
 
-  // Health — CDC + parent HHS
+  // Health — CDC + parent HHS + WHO (named in fact-check.ts:30)
   { hostSuffix: 'cdc.gov', category: 'cdc_health' },
   { hostSuffix: 'hhs.gov', category: 'cdc_health' },
   { hostSuffix: 'fda.gov', category: 'cdc_health' },
   { hostSuffix: 'nih.gov', category: 'cdc_health' },
+  { hostSuffix: 'who.int', category: 'cdc_health' },
 
   // SEC + EDGAR filings
   { hostSuffix: 'sec.gov', category: 'sec_filings' },
@@ -101,6 +102,11 @@ export const PRIMARY_ALLOW_LIST: ReadonlyArray<HostPattern> = [
   // Federal courts — SCOTUS + circuits
   { hostSuffix: 'supremecourt.gov', category: 'scotus_judicial' },
   { hostSuffix: 'uscourts.gov', category: 'scotus_judicial' },
+
+  // C-SPAN archive (named in fact-check.ts:33 "C-SPAN archive and official
+  // agency video archives"). Non-government but explicitly primary-eligible
+  // per the contract.
+  { hostSuffix: 'c-span.org', category: 'congress' },
 
   // Census
   { hostSuffix: 'census.gov', category: 'census_demographic' },
