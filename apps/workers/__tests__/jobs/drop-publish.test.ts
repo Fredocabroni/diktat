@@ -193,6 +193,12 @@ interface FakeState {
   payloadUpdates: { id: string; patch: Record<string, unknown> }[];
   insertError: { message: string } | null;
   nextNewsTopicId: string;
+  // Fact-check enqueue state — populated when the rewrite produces a claim.
+  factCheckClaimUpserts: Record<string, unknown>[];
+  factCheckClaims: { id: string; dedup_hash: string }[];
+  factCheckJobInserts: Record<string, unknown>[];
+  factCheckJobInsertError: { code?: string; message: string } | null;
+  nextFactCheckClaimId: string;
 }
 
 function buildSupabase(state: FakeState): ServiceClient {
@@ -239,6 +245,8 @@ function buildSupabase(state: FakeState): ServiceClient {
             rows = state.candidates as unknown as Record<string, unknown>[];
           } else if (table === 'news_topics') {
             rows = state.recentDrops as unknown as Record<string, unknown>[];
+          } else if (table === 'fact_check_claims') {
+            rows = state.factCheckClaims as unknown as Record<string, unknown>[];
           } else {
             rows = [];
           }
@@ -278,11 +286,30 @@ function buildSupabase(state: FakeState): ServiceClient {
           }),
         };
       }
+      if (table === 'scheduled_jobs') {
+        // drop_publish enqueues fact_check rows via this path.
+        if (state.factCheckJobInsertError) {
+          return Promise.resolve({ error: state.factCheckJobInsertError });
+        }
+        state.factCheckJobInserts.push(row);
+        return Promise.resolve({ error: null });
+      }
       return {
         select: () => ({
           single: () => Promise.resolve({ data: null, error: null }),
         }),
       };
+    },
+    upsert(row: Record<string, unknown>, _opts?: unknown) {
+      if (table === 'fact_check_claims') {
+        const hash = row.dedup_hash as string;
+        if (!state.factCheckClaims.find((c) => c.dedup_hash === hash)) {
+          state.factCheckClaims.push({ id: state.nextFactCheckClaimId, dedup_hash: hash });
+        }
+        state.factCheckClaimUpserts.push(row);
+        return Promise.resolve({ error: null });
+      }
+      return Promise.resolve({ error: null });
     },
     update(patch: Record<string, unknown>) {
       const filter: Record<string, unknown> = {};
@@ -349,6 +376,11 @@ describe('dropPublishHandler', () => {
       payloadUpdates: [],
       insertError: null,
       nextNewsTopicId: 'nt-1',
+      factCheckClaimUpserts: [],
+      factCheckClaims: [],
+      factCheckJobInserts: [],
+      factCheckJobInsertError: null,
+      nextFactCheckClaimId: 'fc-1',
     };
     const supabase = buildSupabase(state);
     const logger = buildLogger();
@@ -374,6 +406,11 @@ describe('dropPublishHandler', () => {
       payloadUpdates: [],
       insertError: null,
       nextNewsTopicId: 'nt-1',
+      factCheckClaimUpserts: [],
+      factCheckClaims: [],
+      factCheckJobInserts: [],
+      factCheckJobInsertError: null,
+      nextFactCheckClaimId: 'fc-1',
     };
     const supabase = buildSupabase(state);
     const logger = buildLogger();
@@ -407,6 +444,11 @@ describe('dropPublishHandler', () => {
       payloadUpdates: [],
       insertError: null,
       nextNewsTopicId: 'nt-1',
+      factCheckClaimUpserts: [],
+      factCheckClaims: [],
+      factCheckJobInserts: [],
+      factCheckJobInsertError: null,
+      nextFactCheckClaimId: 'fc-1',
     };
     const supabase = buildSupabase(state);
     const logger = buildLogger();
@@ -429,6 +471,11 @@ describe('dropPublishHandler', () => {
       payloadUpdates: [],
       insertError: null,
       nextNewsTopicId: 'nt-1',
+      factCheckClaimUpserts: [],
+      factCheckClaims: [],
+      factCheckJobInserts: [],
+      factCheckJobInsertError: null,
+      nextFactCheckClaimId: 'fc-1',
     };
     const supabase = buildSupabase(state);
     const logger = buildLogger();
@@ -451,6 +498,11 @@ describe('dropPublishHandler', () => {
       payloadUpdates: [],
       insertError: null,
       nextNewsTopicId: 'nt-1',
+      factCheckClaimUpserts: [],
+      factCheckClaims: [],
+      factCheckJobInserts: [],
+      factCheckJobInsertError: null,
+      nextFactCheckClaimId: 'fc-1',
     };
     const supabase = buildSupabase(state);
     const logger = buildLogger();
@@ -471,6 +523,11 @@ describe('dropPublishHandler', () => {
       payloadUpdates: [],
       insertError: null,
       nextNewsTopicId: 'nt-1',
+      factCheckClaimUpserts: [],
+      factCheckClaims: [],
+      factCheckJobInserts: [],
+      factCheckJobInsertError: null,
+      nextFactCheckClaimId: 'fc-1',
     };
     const supabase = buildSupabase(state);
     const logger = buildLogger();
@@ -480,5 +537,182 @@ describe('dropPublishHandler', () => {
       (u) => u.filter.dedup_cluster_id === 'A' && u.patch.selected_at !== undefined,
     );
     expect(flip).toBeDefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// LLM rewrite + auto-fact-check enqueue
+// ---------------------------------------------------------------------------
+
+import type { invoke as fabricInvoke } from '@diktat/ai-fabric';
+
+function fakeInvoke(output: {
+  headline: string;
+  summary: string;
+  claim: string;
+}): typeof fabricInvoke {
+  return (async (_req: unknown) => ({
+    output,
+    provider: 'anthropic' as const,
+    model: 'claude-sonnet-4-6',
+    task: 'drop_headline_rewrite' as const,
+    usd: 0.002,
+    latencyMs: 250,
+    routeDecision: { primary: 'anthropic' as const, model: 'claude-sonnet-4-6', fallbacks: [] },
+  })) as unknown as typeof fabricInvoke;
+}
+
+function rewriteState(): FakeState {
+  return {
+    candidates: [cand({ id: 'a', dedup_cluster_id: 'A', rank_score: 5.0 })],
+    recentDrops: [],
+    newsTopicInserts: [],
+    candidateUpdates: [],
+    payloadUpdates: [],
+    insertError: null,
+    nextNewsTopicId: 'nt-1',
+    factCheckClaimUpserts: [],
+    factCheckClaims: [],
+    factCheckJobInserts: [],
+    factCheckJobInsertError: null,
+    nextFactCheckClaimId: 'fc-1',
+  };
+}
+
+describe('dropPublishHandler — LLM rewrite + fact-check enqueue', () => {
+  it('happy path: rewritten headline lands; verbatim source_title preserved; fact-check enqueued', async () => {
+    const state = rewriteState();
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+    const invoke = fakeInvoke({
+      headline: 'senate confirms smith 52-48',
+      summary: 'Senate voted 52 to 48 to confirm Smith to Treasury.',
+      claim: 'The Senate confirmed Smith by a vote of 52-48.',
+    });
+
+    await dropPublishHandler(row(), { supabase, logger, invoke });
+
+    const insert = state.newsTopicInserts[0]!;
+    // Headline is the LLM-rewritten Diktat-voice version.
+    expect(insert.headline).toBe('senate confirms smith 52-48');
+    // source_title preserves the verbatim source title.
+    expect(insert.source_title).toBe('Senate passes HR-1234 52-48');
+    expect(insert.summary).toBe('Senate voted 52 to 48 to confirm Smith to Treasury.');
+
+    // Fact-check claim upserted into fact_check_claims.
+    expect(state.factCheckClaimUpserts).toHaveLength(1);
+    expect(state.factCheckClaimUpserts[0]!.claim_text).toBe(
+      'The Senate confirmed Smith by a vote of 52-48.',
+    );
+    expect(state.factCheckClaimUpserts[0]!.ref_type).toBe('news_topic');
+    expect(state.factCheckClaimUpserts[0]!.ref_id).toBe('nt-1');
+    expect(state.factCheckClaimUpserts[0]!.dedup_hash).toMatch(/^[0-9a-f]{64}$/);
+
+    // scheduled_jobs row for fact_check enqueued.
+    expect(state.factCheckJobInserts).toHaveLength(1);
+    expect(state.factCheckJobInserts[0]!.job_type).toBe('fact_check');
+    expect(state.factCheckJobInserts[0]!.idempotency_key).toMatch(/^fc-1:\d{4}-\d{2}-\d{2}$/);
+
+    const outcomeLog = logger.calls.find((c) => c.obj.event === 'drop_publish.complete');
+    expect(outcomeLog?.obj.headline_rewritten).toBe(true);
+    expect(outcomeLog?.obj.fact_check_enqueued).toBe(true);
+  });
+
+  it('LLM returns empty headline → falls back to source_title verbatim; no fact-check', async () => {
+    const state = rewriteState();
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+    // Per the drop-headline.ts prompt: "Empty output preferred to a
+    // slanted rewrite." Returning empty headline is a contract-compliant
+    // way for the model to say "I cannot satisfy all constraints."
+    const invoke = fakeInvoke({ headline: '', summary: '', claim: '' });
+
+    await dropPublishHandler(row(), { supabase, logger, invoke });
+
+    expect(state.newsTopicInserts[0]!.headline).toBe('Senate passes HR-1234 52-48');
+    expect(state.newsTopicInserts[0]!.source_title).toBe('Senate passes HR-1234 52-48');
+    // No claim → no fact-check.
+    expect(state.factCheckClaimUpserts).toHaveLength(0);
+    expect(state.factCheckJobInserts).toHaveLength(0);
+
+    const outcomeLog = logger.calls.find((c) => c.obj.event === 'drop_publish.complete');
+    expect(outcomeLog?.obj.headline_rewritten).toBe(false);
+    expect(outcomeLog?.obj.fact_check_enqueued).toBe(false);
+  });
+
+  it('no deps.invoke configured → fall back to source_title; no fact-check; warn logged', async () => {
+    const state = rewriteState();
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+
+    // No `invoke` in HandlerDeps — workers boot path may not always
+    // resolve the ai-fabric (e.g., in a misconfigured env). The handler
+    // degrades gracefully.
+    await dropPublishHandler(row(), { supabase, logger });
+
+    expect(state.newsTopicInserts[0]!.headline).toBe('Senate passes HR-1234 52-48');
+    expect(state.factCheckJobInserts).toHaveLength(0);
+    expect(
+      logger.calls.find(
+        (c) => c.obj.event === 'drop_publish.rewrite_skipped' && c.obj.reason === 'no_invoke',
+      ),
+    ).toBeDefined();
+  });
+
+  it('LLM invoke throws → fall back to source_title; warn logged; news_topics still landed', async () => {
+    const state = rewriteState();
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+    const invoke = (async () => {
+      throw new Error('model 503');
+    }) as unknown as typeof fabricInvoke;
+
+    await dropPublishHandler(row(), { supabase, logger, invoke });
+
+    expect(state.newsTopicInserts).toHaveLength(1);
+    expect(state.newsTopicInserts[0]!.headline).toBe('Senate passes HR-1234 52-48');
+    expect(logger.calls.find((c) => c.obj.event === 'drop_publish.rewrite_failed')).toBeDefined();
+  });
+
+  it('rewrite OK but claim empty → headline updated; fact-check NOT enqueued', async () => {
+    const state = rewriteState();
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+    // Procedural source titles (e.g. "Senate Banking Committee hearing
+    // scheduled") have no fact-checkable claim. The prompt's rule 10
+    // tells the model to return empty claim for such cases; the handler
+    // honors that by skipping enqueue.
+    const invoke = fakeInvoke({
+      headline: 'senate banking hearing scheduled',
+      summary: 'Hearing on the Smith nomination announced for next week.',
+      claim: '',
+    });
+
+    await dropPublishHandler(row(), { supabase, logger, invoke });
+
+    expect(state.newsTopicInserts[0]!.headline).toBe('senate banking hearing scheduled');
+    expect(state.factCheckClaimUpserts).toHaveLength(0);
+    expect(state.factCheckJobInserts).toHaveLength(0);
+  });
+
+  it('fact-check enqueue 23505 (same-UTC-day dup) absorbed silently', async () => {
+    const state = rewriteState();
+    state.factCheckJobInsertError = { code: '23505', message: 'duplicate key' };
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+    const invoke = fakeInvoke({
+      headline: 'senate confirms smith 52-48',
+      summary: 'Senate confirmed Smith 52-48.',
+      claim: 'Smith confirmed by 52-48 vote.',
+    });
+
+    await dropPublishHandler(row(), { supabase, logger, invoke });
+
+    // The claim WAS upserted, but the job_insert returned 23505 — no
+    // throw, no error log, just fact_check_enqueued=false telemetry.
+    expect(state.factCheckClaimUpserts).toHaveLength(1);
+    expect(state.factCheckJobInserts).toHaveLength(0);
+    const outcomeLog = logger.calls.find((c) => c.obj.event === 'drop_publish.complete');
+    expect(outcomeLog?.obj.fact_check_enqueued).toBe(false);
   });
 });

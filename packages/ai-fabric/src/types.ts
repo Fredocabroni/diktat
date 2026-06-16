@@ -11,6 +11,7 @@ export const TaskSchema = z.enum([
   'sourced_factcheck',
   'debate_score',
   'news_rank',
+  'drop_headline_rewrite',
   'clip_gen',
   'x_post',
   'fingerprint',

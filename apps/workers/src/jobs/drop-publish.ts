@@ -29,13 +29,34 @@
 //      candidate, stamp curation_mode='auto_fallback_no_channel', and
 //      flag block_exhausted=true in the row's telemetry payload so ops
 //      sees the exception.
-//   7. Insert the chosen candidate as a news_topics row (is_drop=true,
+//   7. LLM rewrite of the source title via the ai-fabric
+//      drop_headline_rewrite task, using DROP_HEADLINE_REWRITE_SYSTEM_
+//      PROMPT from packages/ai-fabric/src/prompts/drop-headline.ts as
+//      the integrity contract. Structured output yields a Diktat-voice
+//      headline + 1-sentence summary + a single fact-checkable claim.
+//      Failure modes degrade gracefully: missing deps.invoke, model
+//      error, or empty model output all fall back to source_title
+//      verbatim (the §5 "never skip a day" contract trumps voice
+//      polish).
+//   8. Insert the chosen candidate as a news_topics row (is_drop=true,
 //      drop_at=today 20:00 ET, dedup_cluster_id stamped forward for
-//      the 3-day repeat-block scan). V1 ships the headline verbatim
-//      from source_title; the LLM rewrite + fact-check enqueue land
-//      in the next commit which extends this handler.
-//   8. Mark every candidate in the chosen cluster as selected_at=now()
-//      so subsequent ingest ticks don't re-promote them.
+//      the 3-day repeat-block scan). source_title preserved verbatim
+//      regardless of rewrite outcome.
+//   9. If the rewrite produced a non-empty claim, enqueue an auto-
+//      fact-check by upserting fact_check_claims and inserting a
+//      scheduled_jobs row of job_type='fact_check'. Mirrors the
+//      trpc.factCheck.enqueue path (PR 4.7 contract) — same dedup
+//      hash, same idempotency key shape.
+//   10. Mark every candidate in the chosen cluster as selected_at=now()
+//       so subsequent ingest ticks don't re-promote them.
+
+import { createHash } from 'crypto';
+
+import {
+  DROP_HEADLINE_REWRITE_SYSTEM_PROMPT,
+  buildDropHeadlineUserPrompt,
+} from '@diktat/ai-fabric';
+import { z } from 'zod';
 
 import type { JobHandler } from './scheduler.js';
 
@@ -62,7 +83,26 @@ interface DropOutcome {
   readonly curation_mode: 'auto_dominant' | 'auto_fallback_no_channel';
   readonly block_exhausted: boolean;
   readonly news_topic_id: string;
+  readonly headline_rewritten: boolean;
+  readonly fact_check_enqueued: boolean;
 }
+
+/** Structured-output contract for the LLM rewrite. Empty strings are
+ *  ALLOWED per the drop-headline.ts prompt — "empty output preferred
+ *  to a slanted rewrite." The handler falls back to source_title
+ *  verbatim when headline is empty. */
+const DropHeadlineRewriteSchema = z.object({
+  headline: z.string().max(100, 'Headline exceeds 100-char cap.'),
+  summary: z.string().max(400, 'Summary exceeds 400 chars.'),
+  claim: z.string().max(500, 'Claim exceeds 500 chars.'),
+});
+type DropHeadlineRewriteOutput = z.infer<typeof DropHeadlineRewriteSchema>;
+
+/** Projected USD cost for one drop_headline_rewrite call. Sonnet 4.6
+ *  pricing × short input + short output ≈ $0.002. The cost ledger
+ *  asserts under this projection before invoking; failures stamp the
+ *  real spend per the ai-fabric contract. */
+const REWRITE_PROJECTED_USD = 0.005;
 
 /** How far back the cluster-block lookup reaches. 2 days back + today
  *  = the 3-consecutive-day window from the founder spec ("today + next 2
@@ -252,20 +292,27 @@ export const dropPublishHandler: JobHandler = async (row, deps) => {
     runnerUpScore: sel.runnerUp ? sel.runnerUp.rank_score : null,
   });
 
-  // (7) Promote to news_topics. V1: headline = source_title verbatim;
-  //     the LLM rewrite + fact-check enqueue land in the next commit
-  //     which extends this handler.
+  // (7) LLM rewrite — Diktat voice + claim extraction for fact-check.
+  //     Falls back to source_title verbatim on any failure mode (no
+  //     invoke configured, model error, empty model output). §5
+  //     "never skip a day" trumps voice polish.
+  const rewrite = await rewriteHeadlineSafely(deps, sel.chosen);
+
+  // (8) Promote to news_topics. source_title preserved verbatim
+  //     regardless of rewrite outcome.
   const dropAt = todayDropAtEt(now);
   const slug = await generateSlug(deps, sel.chosen, now);
+  const finalHeadline = rewrite.headline.length > 0 ? rewrite.headline : sel.chosen.source_title;
+  const finalSummary = rewrite.summary.length > 0 ? rewrite.summary : sel.chosen.summary;
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { data: topicData, error: topicErr } = (await (deps.supabase as any)
     .from('news_topics')
     .insert({
       slug,
-      headline: sel.chosen.source_title,
+      headline: finalHeadline,
       source_title: sel.chosen.source_title,
-      summary: sel.chosen.summary,
+      summary: finalSummary,
       primary_source_url: sel.chosen.source_url,
       category: sel.chosen.source_category,
       published_at: sel.chosen.source_published_at,
@@ -281,7 +328,21 @@ export const dropPublishHandler: JobHandler = async (row, deps) => {
     throw new Error(`drop_publish: insert news_topics: ${topicErr?.message ?? 'no row'}`);
   }
 
-  // (8) Mark every candidate in the chosen cluster as selected_at=now.
+  // (9) Auto-fact-check enqueue. Only when the rewrite produced a
+  //     non-empty claim — empty means "no fact-checkable proposition"
+  //     per drop-headline.ts rule 10. Mirrors trpc.factCheck.enqueue
+  //     (PR 4.7 contract): upsert claim by dedup_hash + enqueue job.
+  let factCheckEnqueued = false;
+  if (rewrite.claim.length > 0) {
+    factCheckEnqueued = await enqueueDropFactCheck(deps, {
+      claimText: rewrite.claim,
+      claimContext: `${sel.chosen.source_title}\n${sel.chosen.source_url}`,
+      refId: topicData.id,
+      now,
+    });
+  }
+
+  // (10) Mark every candidate in the chosen cluster as selected_at=now.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { error: markErr } = (await (deps.supabase as any)
     .from('news_topics_candidates')
@@ -311,6 +372,8 @@ export const dropPublishHandler: JobHandler = async (row, deps) => {
     curation_mode: curationMode,
     block_exhausted: sel.blockExhausted,
     news_topic_id: topicData.id,
+    headline_rewritten: rewrite.headline.length > 0,
+    fact_check_enqueued: factCheckEnqueued,
   };
   await stampPayload(deps, row.id, { ...row.payload, outcome });
 
@@ -382,6 +445,121 @@ async function stampPayload(
   if (error) {
     throw new Error(`drop_publish: stamp payload: ${error.message}`);
   }
+}
+
+/** Call the ai-fabric drop_headline_rewrite task. Returns empty strings
+ *  on any failure (missing invoke, model error, empty model output).
+ *  The handler treats empty headline as "fall back to source_title
+ *  verbatim" — §5 "never skip a day" trumps voice polish. */
+async function rewriteHeadlineSafely(
+  deps: Parameters<JobHandler>[1],
+  candidate: ActiveCandidate,
+): Promise<DropHeadlineRewriteOutput> {
+  const empty: DropHeadlineRewriteOutput = { headline: '', summary: '', claim: '' };
+  if (!deps.invoke) {
+    deps.logger.warn({
+      event: 'drop_publish.rewrite_skipped',
+      reason: 'no_invoke',
+      candidateId: candidate.id,
+    });
+    return empty;
+  }
+  try {
+    const result = await deps.invoke({
+      task: 'drop_headline_rewrite',
+      system: DROP_HEADLINE_REWRITE_SYSTEM_PROMPT,
+      user: buildDropHeadlineUserPrompt({
+        sourceTitle: candidate.source_title,
+        sourceUrl: candidate.source_url,
+        sourceHost: candidate.source_host,
+        sourceCategory: candidate.source_category,
+        sourceSummary: candidate.summary,
+      }),
+      schema: DropHeadlineRewriteSchema,
+      env: deps.providerEnv ?? { xaiAvailable: false, perplexityAvailable: false },
+      projectedUsd: REWRITE_PROJECTED_USD,
+      maxTokens: 512,
+    });
+    return result.output as DropHeadlineRewriteOutput;
+  } catch (err) {
+    deps.logger.warn({
+      event: 'drop_publish.rewrite_failed',
+      candidateId: candidate.id,
+      message: err instanceof Error ? err.message : String(err),
+    });
+    return empty;
+  }
+}
+
+/** Upsert the claim into fact_check_claims and enqueue a fact_check
+ *  scheduled_jobs row. Mirrors the trpc.factCheck.enqueue path (PR
+ *  4.7 contract) — same sha256(claim_text + '\n---\n' + claim_context)
+ *  dedup hash, same {claim_id}:{UTC_day} idempotency_key shape.
+ *  Returns true if a new fact_check job row landed; false on any
+ *  silent failure (23505 same-day dup is acceptable). Failures are
+ *  logged but never throw — auto-fact-check is best-effort, the Drop
+ *  publishes regardless. */
+async function enqueueDropFactCheck(
+  deps: Parameters<JobHandler>[1],
+  opts: { claimText: string; claimContext: string; refId: string; now: Date },
+): Promise<boolean> {
+  const dedupHash = createHash('sha256')
+    .update(`${opts.claimText}\n---\n${opts.claimContext}`)
+    .digest('hex');
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { error: upsertErr } = (await (deps.supabase as any).from('fact_check_claims').upsert(
+    {
+      claim_text: opts.claimText,
+      claim_context: opts.claimContext,
+      dedup_hash: dedupHash,
+      ref_type: 'news_topic',
+      ref_id: opts.refId,
+    },
+    { onConflict: 'dedup_hash', ignoreDuplicates: true },
+  )) as { error: { message: string } | null };
+  if (upsertErr) {
+    deps.logger.warn({
+      event: 'drop_publish.fact_check_upsert_failed',
+      message: upsertErr.message,
+    });
+    return false;
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data: claimRow, error: selectErr } = (await (deps.supabase as any)
+    .from('fact_check_claims')
+    .select('id')
+    .eq('dedup_hash', dedupHash)
+    .maybeSingle()) as { data: { id: string } | null; error: { message: string } | null };
+  if (selectErr || !claimRow) {
+    deps.logger.warn({
+      event: 'drop_publish.fact_check_select_failed',
+      message: selectErr?.message ?? 'no row',
+    });
+    return false;
+  }
+
+  const utcDay = opts.now.toISOString().slice(0, 10);
+  const idempotencyKey = `${claimRow.id}:${utcDay}`;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { error: jobErr } = (await (deps.supabase as any).from('scheduled_jobs').insert({
+    job_type: 'fact_check',
+    idempotency_key: idempotencyKey,
+    payload: {
+      claim_id: claimRow.id,
+      enqueued_at: opts.now.toISOString(),
+      enqueued_by: 'drop_publish',
+    },
+  })) as { error: { code?: string; message: string } | null };
+  if (jobErr) {
+    // 23505 = unique violation on (job_type, idempotency_key) — a same-
+    // UTC-day re-enqueue is acceptable (orchestrator cache-hits anyway).
+    if (jobErr.code === '23505') return false;
+    deps.logger.warn({ event: 'drop_publish.fact_check_enqueue_failed', message: jobErr.message });
+    return false;
+  }
+  return true;
 }
 
 export const __testing = {
