@@ -23,4 +23,11 @@ export const clientEnv = {
   get X_OAUTH_ENABLED() {
     return process.env.NEXT_PUBLIC_X_OAUTH_ENABLED === 'true';
   },
+  // VAPID public key — applicationServerKey for pushManager.subscribe().
+  // Browser-visible (paired with VAPID_PRIVATE_KEY on the workers process).
+  // Empty string means "push not configured" — the settings UI surfaces a
+  // disabled state rather than throwing.
+  get VAPID_PUBLIC_KEY() {
+    return process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY ?? '';
+  },
 } as const;

@@ -1035,6 +1035,56 @@ export type Database = {
           },
         ]
       }
+      user_push_subscriptions: {
+        Row: {
+          auth: string
+          created_at: string
+          disabled_at: string | null
+          disabled_reason: string | null
+          endpoint: string
+          id: string
+          last_delivered_at: string | null
+          p256dh: string
+          updated_at: string
+          user_agent: string | null
+          user_id: string
+        }
+        Insert: {
+          auth: string
+          created_at?: string
+          disabled_at?: string | null
+          disabled_reason?: string | null
+          endpoint: string
+          id?: string
+          last_delivered_at?: string | null
+          p256dh: string
+          updated_at?: string
+          user_agent?: string | null
+          user_id: string
+        }
+        Update: {
+          auth?: string
+          created_at?: string
+          disabled_at?: string | null
+          disabled_reason?: string | null
+          endpoint?: string
+          id?: string
+          last_delivered_at?: string | null
+          p256dh?: string
+          updated_at?: string
+          user_agent?: string | null
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "user_push_subscriptions_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "users"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       users: {
         Row: {
           avatar_url: string | null
@@ -1046,6 +1096,7 @@ export type Database = {
           id: string
           is_bot: boolean
           last_active_at: string | null
+          notification_preferences: Json
           onboarded_at: string | null
           tier_id: number
           timezone: string
@@ -1061,6 +1112,7 @@ export type Database = {
           id: string
           is_bot?: boolean
           last_active_at?: string | null
+          notification_preferences?: Json
           onboarded_at?: string | null
           tier_id?: number
           timezone?: string
@@ -1076,6 +1128,7 @@ export type Database = {
           id?: string
           is_bot?: boolean
           last_active_at?: string | null
+          notification_preferences?: Json
           onboarded_at?: string | null
           tier_id?: number
           timezone?: string
