@@ -87,16 +87,22 @@ jobs:
             --model claude-sonnet-4-6 \
             --output-format text > review_output.md || true
 
-      # Post the captured report as a PR comment. Empty / missing
-      # outputs are logged but don't fail the step — same advisory
-      # posture as the reviewer step.
+      # Post the captured report as a PR comment. The guard checks
+      # for SUBSTANTIVE content (non-whitespace), not just file size:
+      # when a reviewer's watch-paths see no matching changes in the
+      # PR diff, the agent legitimately produces whitespace-only output,
+      # which `[ -s ]` alone misreads as "post this". GitHub's API
+      # then rejects the blank body with
+      # `GraphQL: Body cannot be blank (addComment)` and the Post step
+      # fails the job for no real reason. Strip whitespace before the
+      # check.
       - name: Post review
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          if [ -s review_output.md ]; then
+          if [ -s review_output.md ] && [ -n "$(tr -d '[:space:]' < review_output.md)" ]; then
             gh pr comment "$PR_NUMBER" --body-file review_output.md
           else
-            echo "reviewer produced no output"
+            echo "reviewer produced no substantive output (file empty or whitespace-only)"
           fi
