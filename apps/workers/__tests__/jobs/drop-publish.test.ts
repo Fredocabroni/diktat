@@ -424,6 +424,7 @@ describe('dropPublishHandler', () => {
     expect(insert.dedup_cluster_id).toBe('A');
     expect(insert.curation_mode).toBe('auto_dominant'); // 5.0 > 2×1.0
     expect(insert.primary_source_url).toBe('https://www.congress.gov/bill/118hr1234');
+    expect(insert.is_block_exhausted).toBe(false);
 
     const outcomeLog = logger.calls.find((c) => c.obj.event === 'drop_publish.complete');
     expect(outcomeLog?.obj.chosen_cluster_id).toBe('A');
@@ -510,6 +511,7 @@ describe('dropPublishHandler', () => {
 
     expect(state.newsTopicInserts).toHaveLength(1);
     expect(state.newsTopicInserts[0]!.dedup_cluster_id).toBe('A');
+    expect(state.newsTopicInserts[0]!.is_block_exhausted).toBe(true);
     const outcomeLog = logger.calls.find((c) => c.obj.event === 'drop_publish.complete');
     expect(outcomeLog?.obj.block_exhausted).toBe(true);
   });
