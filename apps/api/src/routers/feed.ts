@@ -1,9 +1,14 @@
-// Feed router. Phase 3 partial scope: only the `recordShift` mutation
-// that writes one row to public.opinion_shifts. RLS policy
-// `opinion_shifts_insert_self` (migration 0005) gates the user_id; the
-// write goes through `ctx.db` (user-scoped) so the bearer token is the
-// authority. The `list` query lands in the follow-up alongside the
-// approved 20-topic seed.
+// Feed router.
+//
+// `recordShift` mutation: writes one row to public.opinion_shifts. RLS policy
+// `opinion_shifts_insert_self` (migration 0005) gates the user_id; the write
+// goes through `ctx.db` (user-scoped) so the bearer token is the authority.
+//
+// `list` query: returns today's Drop (the news_topics row with is_drop=true
+// whose drop_at has passed) or the most-recent past Drop if today's hasn't
+// fired yet. Length ≤ 1 in default-input mode; forward-compatible with
+// archive pagination via { limit, cursor }. RLS read-all is in place on
+// news_topics via `news_topics_select_all` (migration 20260420090005:26).
 
 import { TRPCError } from '@trpc/server';
 import { z } from 'zod';
@@ -11,6 +16,32 @@ import { z } from 'zod';
 import { protectedProcedure, router } from '../trpc.js';
 
 const positionSchema = z.number().int().min(-2).max(2);
+
+const listInputSchema = z
+  .object({
+    limit: z.number().int().min(1).max(50).default(1),
+    // ISO timestamp; rows returned have drop_at <= cursor. Default is the
+    // current server time so the no-input call returns "the current Drop".
+    cursor: z.string().datetime().optional(),
+  })
+  .optional();
+
+const TOPIC_SELECT =
+  'id, headline, source_title, summary, primary_source_url, category, drop_at, dedup_cluster_id, curation_mode, is_block_exhausted, additional_sources';
+
+interface TopicRow {
+  id: string;
+  headline: string;
+  source_title: string | null;
+  summary: string | null;
+  primary_source_url: string | null;
+  category: string | null;
+  drop_at: string | null;
+  dedup_cluster_id: string | null;
+  curation_mode: string | null;
+  is_block_exhausted: boolean;
+  additional_sources: unknown;
+}
 
 export const feedRouter = router({
   recordShift: protectedProcedure
@@ -60,4 +91,44 @@ export const feedRouter = router({
         createdAt: data.created_at,
       };
     }),
+
+  list: protectedProcedure.input(listInputSchema).query(async ({ ctx, input }) => {
+    const cursor = input?.cursor ?? new Date().toISOString();
+    const limit = input?.limit ?? 1;
+
+    const { data, error } = (await ctx.db
+      .from('news_topics')
+      .select(TOPIC_SELECT)
+      .eq('is_drop', true)
+      .lte('drop_at', cursor)
+      .order('drop_at', { ascending: false })
+      .limit(limit)) as unknown as {
+      data: TopicRow[] | null;
+      error: { message: string } | null;
+    };
+
+    if (error) {
+      throw new TRPCError({
+        code: 'INTERNAL_SERVER_ERROR',
+        message: 'Failed to load Drop.',
+        cause: error,
+      });
+    }
+
+    const topics = (data ?? []).map((row) => ({
+      id: row.id,
+      headline: row.headline,
+      sourceTitle: row.source_title,
+      summary: row.summary,
+      primarySourceUrl: row.primary_source_url,
+      category: row.category,
+      dropAt: row.drop_at,
+      dedupClusterId: row.dedup_cluster_id,
+      curationMode: row.curation_mode,
+      isBlockExhausted: row.is_block_exhausted,
+      additionalSources: Array.isArray(row.additional_sources) ? row.additional_sources : [],
+    }));
+
+    return { topics };
+  }),
 });
