@@ -333,6 +333,7 @@ export const dropPublishHandler: JobHandler = async (row, deps) => {
       published_at: sel.chosen.source_published_at,
       drop_at: dropAt,
       is_drop: true,
+      is_block_exhausted: sel.blockExhausted,
       dedup_cluster_id: sel.chosen.dedup_cluster_id,
       curation_mode: curationMode,
       additional_sources: [],
