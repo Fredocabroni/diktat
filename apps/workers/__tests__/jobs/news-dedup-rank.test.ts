@@ -378,7 +378,13 @@ describe('newsDedupRankHandler', () => {
   });
 
   it('higher source-diversity yields higher rank_score (transparent math)', async () => {
-    const now = new Date('2026-06-16T20:00:00Z');
+    // Use real wall-clock now: the handler calls `new Date()` internally
+    // (`news-dedup-rank.ts:292`), so candidate timestamps must track
+    // system time for the recency factor to equal 1.0. Fixed-string
+    // dates worked only on the calendar day they named — future-date
+    // clamp masked it on that day, and after that day recency decays
+    // by the half-life formula and the toBeCloseTo(3) assertion breaks.
+    const now = new Date();
     const state: FakeState = {
       candidates: [
         // Cluster A: 3 distinct providers covering same story
