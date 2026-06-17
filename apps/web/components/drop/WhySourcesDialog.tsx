@@ -54,7 +54,7 @@ export function WhySourcesDialog({ className }: WhySourcesDialogProps): React.JS
         <h2 className="font-display text-lg font-semibold">Primary sources only.</h2>
         <p className="mt-3 text-sm text-text-secondary">
           Diktat reads from primary government sources — Congress, BLS, SEC, the courts. Mainstream
-          coverage may appear as framing context, never as the truth source.
+          coverage appears as framing context only — never as the truth source.
         </p>
         <p className="mt-3 text-sm text-text-secondary">
           The link on every Drop points to the original record. Read it.

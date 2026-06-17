@@ -62,7 +62,19 @@ const CATEGORY_LABELS: Record<string, string> = {
 function hostFromUrl(url: string | null): string | null {
   if (!url) return null;
   try {
-    return new URL(url).host.replace(/^www\./, '');
+    const u = new URL(url);
+    // Defense in depth: the upstream news-ingest host allow-list at
+    // packages/ai-fabric/src/prompts/drop-sources.ts restricts
+    // primary_source_url to .gov hosts, and drop-publish only writes
+    // rows whose source passes that filter. But future writers to
+    // news_topics (manual ops insert, the curator-channel path the
+    // curation_mode enum already accommodates, an unreviewed
+    // migration) bypass that filter. A row with a `javascript:`,
+    // `data:`, or `blob:` scheme here would render as a clickable
+    // XSS payload — reject any non-http(s) scheme so the render gate
+    // (`host && topic.primarySourceUrl`) cleanly hides the anchor.
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
+    return u.host.replace(/^www\./, '');
   } catch {
     return null;
   }
@@ -157,7 +169,7 @@ export function DropCard({
           data-component="BattleThisCta.disabled"
           className="cursor-not-allowed rounded-xl border border-ink-300 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-text-tertiary"
         >
-          Battle · soon
+          Battle · locked
         </button>
       </footer>
     </article>
