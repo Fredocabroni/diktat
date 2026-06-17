@@ -104,6 +104,17 @@ const TABLE: Record<Task, RawDecision> = {
     primary: { provider: 'google', model: MODELS.google_gemini_25_pro },
     fallbacks: [{ provider: 'anthropic', model: MODELS.anthropic_sonnet_46 }],
   },
+  drop_headline_rewrite: {
+    // Sonnet 4.6: reliable on the forced-tool structured-output path
+    // (same model the trivia generator + sourced_factcheck verifier
+    // use). Neutrality posture is the contract surface here — Sonnet
+    // honors the explicit "no emotion / no implied causation / no
+    // hedge words" rules from packages/ai-fabric/src/prompts/drop-
+    // headline.ts when given as system prompt. GPT-5 fallback so a
+    // 5xx blip doesn't drop the Drop.
+    primary: { provider: 'anthropic', model: MODELS.anthropic_sonnet_46 },
+    fallbacks: [{ provider: 'openai', model: MODELS.openai_gpt5 }],
+  },
   x_post: {
     primary: { provider: 'anthropic', model: MODELS.anthropic_sonnet_46 },
     fallbacks: [{ provider: 'xai', model: MODELS.xai_grok }],
