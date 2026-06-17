@@ -177,6 +177,19 @@ describe('feedRouter.list', () => {
     expect(calls.ops).toEqual([]);
   });
 
+  it('rejects a future cursor at the input schema (HIGH security-reviewer #1)', async () => {
+    // A caller passing `cursor=9999-12-31T00:00:00.000Z` could otherwise
+    // retrieve any future-dated `is_drop=true` row before its drop_at
+    // arrives. The handler also Math.min-clamps as defense in depth.
+    const { db, calls } = fakeDb('news_topics', { data: null, error: null });
+    const caller = appRouter.createCaller(makeCtx({ db }));
+
+    await expect(
+      caller.feed.list({ cursor: '9999-12-31T00:00:00.000Z' }),
+    ).rejects.toBeInstanceOf(TRPCError);
+    expect(calls.ops).toEqual([]);
+  });
+
   it('coerces a non-array additional_sources to []', async () => {
     const { db } = fakeDb('news_topics', {
       data: [{ ...DROP_ROW, additional_sources: 'unexpected' as unknown as [] }],

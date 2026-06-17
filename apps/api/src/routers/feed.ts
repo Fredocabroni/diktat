@@ -22,7 +22,20 @@ const listInputSchema = z
     limit: z.number().int().min(1).max(50).default(1),
     // ISO timestamp; rows returned have drop_at <= cursor. Default is the
     // current server time so the no-input call returns "the current Drop".
-    cursor: z.string().datetime().optional(),
+    // Rejected if it lies in the future — a `cursor=9999-…` call would
+    // otherwise return any pre-populated future-dated row the moment
+    // drop_publish lands it, before its drop_at arrives. The pipeline
+    // today stamps drop_at at INSERT time, but a future curator path
+    // (the curation_mode enum already accommodates it) is the kind of
+    // writer this guard exists for. The handler also clamps server-side
+    // (defense in depth against any future input-schema regression).
+    cursor: z
+      .string()
+      .datetime()
+      .optional()
+      .refine((v) => v === undefined || Date.parse(v) <= Date.now(), {
+        message: 'cursor must not be in the future',
+      }),
   })
   .optional();
 
@@ -93,7 +106,11 @@ export const feedRouter = router({
     }),
 
   list: protectedProcedure.input(listInputSchema).query(async ({ ctx, input }) => {
-    const cursor = input?.cursor ?? new Date().toISOString();
+    // Belt-and-suspenders future-clamp: the input schema already
+    // rejects future cursors, but a server-side Math.min closes the
+    // window against any later input-schema regression.
+    const requestedCursorMs = input?.cursor ? Date.parse(input.cursor) : Date.now();
+    const cursor = new Date(Math.min(requestedCursorMs, Date.now())).toISOString();
     const limit = input?.limit ?? 1;
 
     const { data, error } = (await ctx.db

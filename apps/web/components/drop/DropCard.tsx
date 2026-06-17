@@ -59,7 +59,12 @@ const CATEGORY_LABELS: Record<string, string> = {
   general: 'General',
 };
 
-function hostFromUrl(url: string | null): string | null {
+interface ParsedSource {
+  readonly href: string;
+  readonly host: string;
+}
+
+function parsePrimaryUrl(url: string | null): ParsedSource | null {
   if (!url) return null;
   try {
     const u = new URL(url);
@@ -71,10 +76,14 @@ function hostFromUrl(url: string | null): string | null {
     // curation_mode enum already accommodates, an unreviewed
     // migration) bypass that filter. A row with a `javascript:`,
     // `data:`, or `blob:` scheme here would render as a clickable
-    // XSS payload — reject any non-http(s) scheme so the render gate
-    // (`host && topic.primarySourceUrl`) cleanly hides the anchor.
+    // XSS payload — reject any non-http(s) scheme.
+    //
+    // Returns both the normalised href and the display host from the
+    // SAME URL object, so the rendered anchor's href and the visible
+    // label cannot drift apart in any future refactor — closes the
+    // dual-state concern from the round-1 security-reviewer LOW.
     if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
-    return u.host.replace(/^www\./, '');
+    return { href: u.href, host: u.host.replace(/^www\./, '') };
   } catch {
     return null;
   }
@@ -87,7 +96,7 @@ export function DropCard({
   disabled,
   banner,
 }: DropCardProps): React.JSX.Element {
-  const host = hostFromUrl(topic.primarySourceUrl);
+  const source = parsePrimaryUrl(topic.primarySourceUrl);
   const categoryLabel = topic.category ? (CATEGORY_LABELS[topic.category] ?? topic.category) : null;
   const ritualKicker = variant === 'live' ? "Tonight's Drop" : "Yesterday's Drop";
 
@@ -127,15 +136,15 @@ export function DropCard({
         <p className="text-sm leading-relaxed text-text-secondary">{topic.summary}</p>
       ) : null}
 
-      {host && topic.primarySourceUrl ? (
+      {source ? (
         <a
-          href={topic.primarySourceUrl}
+          href={source.href}
           target="_blank"
           rel="noreferrer noopener"
           className="inline-flex w-fit items-center gap-2 rounded-full border border-brand-accent/40 bg-brand-accent/10 px-3 py-1.5 font-mono text-xs text-brand-accent"
         >
           <span aria-hidden>↗</span>
-          {host}
+          {source.host}
         </a>
       ) : null}
 
