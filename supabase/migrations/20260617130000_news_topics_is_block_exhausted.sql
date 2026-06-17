@@ -33,6 +33,31 @@
 -- Index:
 --   * NONE. The column is row-local: read only when the row's UI
 --     renders. No filter or sort against this column is planned.
+--
+-- RLS posture (PR #40 round-2 security-reviewer MEDIUM #2 — verified):
+--   * The pre-existing `news_topics_select_all` policy
+--     (migration 20260420090005:26) declares `for select to anon,
+--     authenticated using (true)`. PR #40 confirmed this is a
+--     DECLARED policy, not the effective one. No GRANT exists for
+--     anon or authenticated on any table in `public` (verified with
+--     a forged `role: authenticated` JWT against `/rest/v1/news_topics`
+--     → `42501 permission denied`). Direct PostgREST reads with the
+--     anon key or any authenticated bearer are denied at the
+--     table-privilege layer before RLS is consulted, so the
+--     "read-all" wording in the policy does not surface data
+--     to clients.
+--   * The intended access path is `trpc.feed.list` only. That router
+--     filters to `is_drop=true AND drop_at <= now()` (server-side
+--     `Math.min` clamp + input-schema `.refine` reject future
+--     cursors), so even if the table-level GRANT is later added to
+--     close the systemic posture gap, no future-dated or unreleased
+--     row leaks through this read surface.
+--   * The systemic discovery — that ZERO public tables are reachable
+--     by client roles via PostgREST in the dev DB — is logged for
+--     pre-launch attention in `docs/TYRION_BUILD_QUEUE.md` as a
+--     separate cross-cutting follow-up. Not introduced by this PR;
+--     surfaces because the security-reviewer flagged the news_topics
+--     policy specifically.
 
 begin;
 

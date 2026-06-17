@@ -70,19 +70,25 @@ function parsePrimaryUrl(url: string | null): ParsedSource | null {
     const u = new URL(url);
     // Defense in depth: the upstream news-ingest host allow-list at
     // packages/ai-fabric/src/prompts/drop-sources.ts restricts
-    // primary_source_url to .gov hosts, and drop-publish only writes
-    // rows whose source passes that filter. But future writers to
-    // news_topics (manual ops insert, the curator-channel path the
-    // curation_mode enum already accommodates, an unreviewed
-    // migration) bypass that filter. A row with a `javascript:`,
-    // `data:`, or `blob:` scheme here would render as a clickable
-    // XSS payload — reject any non-http(s) scheme.
+    // primary_source_url to .gov hosts (all HTTPS-only), and
+    // drop-publish only writes rows whose source passes that filter.
+    // But future writers to news_topics (manual ops insert, the
+    // curator-channel path the curation_mode enum already
+    // accommodates, an unreviewed migration) bypass that filter.
+    //
+    // Reject anything but HTTPS:
+    //   - `javascript:`, `data:`, `blob:` → clickable XSS payload.
+    //   - `http:` → mixed-content link from the production HTTPS app,
+    //     trivially MITM-able on hostile networks. All .gov primary
+    //     sources serve HTTPS, so this is a no-op for legitimate
+    //     content and a clean rejection of mis-ingested rows.
+    //     (PR #40 round-2 security-reviewer LOW #3.)
     //
     // Returns both the normalised href and the display host from the
     // SAME URL object, so the rendered anchor's href and the visible
     // label cannot drift apart in any future refactor — closes the
     // dual-state concern from the round-1 security-reviewer LOW.
-    if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
+    if (u.protocol !== 'https:') return null;
     return { href: u.href, host: u.host.replace(/^www\./, '') };
   } catch {
     return null;
