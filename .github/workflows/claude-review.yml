@@ -28,11 +28,11 @@ jobs:
       matrix:
         reviewer:
           - name: security-reviewer
-            prompt: "Run the security-reviewer subagent on this PR's diff. Post the findings as a single PR comment via gh."
+            prompt: "Run the security-reviewer subagent on this PR's diff. Output ONLY the review report in markdown — no preamble, no commentary, no closing remarks. Do not attempt to post it or run any shell command."
           - name: copy-linter
-            prompt: "Run the copy-linter subagent on apps/web/**/*.tsx and apps/bots/**/templates/** changed in this PR. Post the findings as a PR comment via gh."
+            prompt: "Run the copy-linter subagent on apps/web/**/*.tsx, apps/bots/**/templates/**, and any packages/ai-fabric/src/prompts/* files changed in this PR. Output ONLY the review report in markdown — no preamble, no commentary, no closing remarks. Do not attempt to post it or run any shell command."
           - name: addiction-auditor
-            prompt: "Run the addiction-auditor subagent on engagement-mechanic changes in this PR. Post the findings as a PR comment via gh."
+            prompt: "Run the addiction-auditor subagent on engagement-mechanic changes in this PR. Output ONLY the review report in markdown — no preamble, no commentary, no closing remarks. Do not attempt to post it or run any shell command."
     steps:
       - uses: actions/checkout@v4
         with:
@@ -43,20 +43,66 @@ jobs:
         with:
           version: 9.15.9
 
+      # NOTE: `cache: pnpm` removed deliberately. None of the reviewer
+      # jobs run `pnpm install` — they only invoke `claude -p` on the
+      # checked-out diff. setup-node@v4's post-job cache-save hook then
+      # calls setFailed() because the cache target path doesn't exist,
+      # which marks the whole job FAILURE even though the review itself
+      # succeeded (see PR investigation of #38 reviewer failures).
+      # Adding a `pnpm install` purely to populate a cache the reviews
+      # don't use would be wasteful — drop the cache input instead.
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version-file: .nvmrc
-          cache: pnpm
 
       - name: Install Claude Code
         run: npm i -g @anthropic-ai/claude-code
 
+      # The reviewer step CAPTURES agent stdout to a file and does NOT
+      # have GH_TOKEN in its env. The Post step (next) reads the file
+      # and runs `gh pr comment` from the workflow shell — the agent
+      # never touches the shell invocation. This shape closes three
+      # problems at once that the prior single-step shape had:
+      #   - claude -p's bash-permission gate blocked the agent's own
+      #     `gh pr comment` call in headless mode (no interactive
+      #     approver in CI). Now the agent does not shell out.
+      #   - Prompt-to-shell injection — PR-sourced content reaching a
+      #     constructed shell command. Now the agent only writes
+      #     markdown to stdout; `gh pr comment --body-file` reads the
+      #     captured file with no shell interpolation.
+      #   - GH_TOKEN in the agent's environment, where the Bash tool
+      #     could exfiltrate it via any subcommand. Now the token lives
+      #     only in the Post step.
       - name: Run ${{ matrix.reviewer.name }}
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           REVIEW_PROMPT: ${{ matrix.reviewer.prompt }}
+        # `|| true` kept on purpose: these reviewers are advisory-but-
+        # visible. A real blocking gate (parseable verdict → exit code
+        # → fail the job on BLOCK) is logged as future work; not built
+        # tonight.
         run: |
           claude -p "$REVIEW_PROMPT" \
             --model claude-sonnet-4-6 \
-            --output-format text || true
+            --output-format text > review_output.md || true
+
+      # Post the captured report as a PR comment. The guard checks
+      # for SUBSTANTIVE content (non-whitespace), not just file size:
+      # when a reviewer's watch-paths see no matching changes in the
+      # PR diff, the agent legitimately produces whitespace-only output,
+      # which `[ -s ]` alone misreads as "post this". GitHub's API
+      # then rejects the blank body with
+      # `GraphQL: Body cannot be blank (addComment)` and the Post step
+      # fails the job for no real reason. Strip whitespace before the
+      # check.
+      - name: Post review
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          if [ -s review_output.md ] && [ -n "$(tr -d '[:space:]' < review_output.md)" ]; then
+            gh pr comment "$PR_NUMBER" --body-file review_output.md
+          else
+            echo "reviewer produced no substantive output (file empty or whitespace-only)"
+          fi

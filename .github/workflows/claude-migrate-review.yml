@@ -30,10 +30,17 @@ jobs:
       - name: Install Claude Code
         run: npm i -g @anthropic-ai/claude-code
 
+      # `|| true` normalizes this reviewer to advisory posture, matching
+      # the three reviewers in claude-review.yml. Without it, a transient
+      # claude exit (rate limit, network blip, API hiccup) hard-fails
+      # schema-reviewer and blocks the PR even though the verdict was
+      # never produced. The full posting redesign (agent writes file,
+      # workflow posts via gh pr comment) is deferred to a follow-up PR
+      # so this PR stays scoped to the advisory-posture normalization.
       - name: Run schema-reviewer
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           claude -p "Run the schema-reviewer subagent on the supabase/migrations/ files changed in this PR. Post the verdict (APPROVE or BLOCK) and full checklist as a PR comment via gh." \
             --model claude-sonnet-4-6 \
-            --output-format text
+            --output-format text || true
