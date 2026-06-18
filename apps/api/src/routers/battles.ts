@@ -159,9 +159,18 @@ export const battlesRouter = router({
           P0002: 'NOT_FOUND',
           '23505': 'CONFLICT',
         };
+        const mapped = map[code ?? ''];
+        // Mapped sqlstates carry function-authored, audit-reviewed
+        // messages — safe to forward. The fallthrough path covers
+        // any Postgres-internal sqlstate the function never raises
+        // (connection errors, planner errors, etc.); their messages
+        // can include schema object names, constraint names, or
+        // query fragments. Round-2 PR #45 security-reviewer
+        // MEDIUM-2: use a static string on the wire; keep the full
+        // Postgres error as `cause` for server-side logs only.
         throw new TRPCError({
-          code: map[code ?? ''] ?? 'INTERNAL_SERVER_ERROR',
-          message: error.message,
+          code: mapped ?? 'INTERNAL_SERVER_ERROR',
+          message: mapped ? error.message : 'Internal error.',
           cause: error,
         });
       }

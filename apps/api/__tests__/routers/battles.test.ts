@@ -151,13 +151,36 @@ describe('battlesRouter.submitAnswer', () => {
     ).rejects.toMatchObject({ code: 'UNAUTHORIZED' });
   });
 
-  it('unmapped sqlstate falls through to INTERNAL_SERVER_ERROR', async () => {
+  it('unmapped sqlstate falls through to INTERNAL_SERVER_ERROR with a generic message', async () => {
+    // Round-2 PR #45 security-reviewer MEDIUM-2: the raw Postgres
+    // error message must NOT reach the client on the fallthrough
+    // path (could leak schema/constraint names). Static message on
+    // the wire; `cause: error` preserved for server-side logs.
+    const dbError = {
+      code: 'XX000',
+      message: 'function public.foo() does not exist',
+    };
+    const db = fakeRpcDb({ rpc: { data: null, error: dbError } });
+    const caller = appRouter.createCaller(makeCtx({ db }));
+    const err = await caller.battles
+      .submitAnswer({ battleId: BATTLE_ID, roundId: ROUND_ID, chosenIndex: 0 })
+      .catch((e) => e);
+    expect(err.code).toBe('INTERNAL_SERVER_ERROR');
+    expect(err.message).toBe('Internal error.');
+    expect(err.message).not.toContain('foo()');
+  });
+
+  it('mapped sqlstates keep the function-authored message on the wire', async () => {
+    // Mapped messages are audit-reviewed function-authored strings —
+    // safe to forward to the caller (and useful for client UX).
     const db = fakeRpcDb({
-      rpc: { data: null, error: { code: 'XX000', message: 'something else' } },
+      rpc: { data: null, error: { code: '23505', message: 'already answered this round' } },
     });
     const caller = appRouter.createCaller(makeCtx({ db }));
-    await expect(
-      caller.battles.submitAnswer({ battleId: BATTLE_ID, roundId: ROUND_ID, chosenIndex: 0 }),
-    ).rejects.toMatchObject({ code: 'INTERNAL_SERVER_ERROR' });
+    const err = await caller.battles
+      .submitAnswer({ battleId: BATTLE_ID, roundId: ROUND_ID, chosenIndex: 0 })
+      .catch((e) => e);
+    expect(err.code).toBe('CONFLICT');
+    expect(err.message).toBe('already answered this round');
   });
 });

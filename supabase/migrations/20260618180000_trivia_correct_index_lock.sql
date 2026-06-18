@@ -80,6 +80,17 @@
 --   on public.trivia_questions from authenticated;
 -- grant select on public.trivia_questions to authenticated;
 --
+-- -- Drop the round-2 RESTRICTIVE direct-INSERT-deny policy on
+-- -- trivia_answers (round-2 PR #45 security-reviewer MEDIUM-1).
+-- drop policy if exists trivia_a_no_direct_insert on public.trivia_answers;
+--
+-- -- Drop the round-2 chosen_index upper-bound CHECK (round-2 PR #45
+-- -- security-reviewer MEDIUM-3). The original CHECK
+-- -- `trivia_answers_chosen_index_check (chosen_index >= 0)` from
+-- -- migration 20260420090004 stays in place.
+-- alter table public.trivia_answers
+--   drop constraint if exists trivia_answers_chosen_index_range;
+--
 -- -- Drop the UNIQUE constraint on trivia_answers (round_id, user_id).
 -- alter table public.trivia_answers
 --   drop constraint if exists trivia_answers_round_user_unique;
@@ -96,6 +107,50 @@ begin;
 alter table public.trivia_answers
   add constraint trivia_answers_round_user_unique
   unique (round_id, user_id);
+
+-- ---------------------------------------------------------------------------
+-- (a.2) Tighten chosen_index range (round-2 security-reviewer MEDIUM-3)
+-- ---------------------------------------------------------------------------
+--
+-- The base CHECK from migration 20260420090004 enforces
+-- `chosen_index >= 0`. The function body + the Zod schema in
+-- `apps/api/src/routers/battles.ts` already bound to 0..3 — this
+-- CHECK aligns the three layers (table, function, Zod) so a future
+-- migration that supports 5-choice questions cannot silently let
+-- value 4 land in the table while the router still rejects it. The
+-- couple-point with the function is documented in TYRION_BUILD_QUEUE
+-- under the "4-choice invariant" note.
+alter table public.trivia_answers
+  add constraint trivia_answers_chosen_index_range
+  check (chosen_index between 0 and 3);
+
+-- ---------------------------------------------------------------------------
+-- (a.3) RESTRICTIVE direct-INSERT-deny on trivia_answers (round-2
+--       security-reviewer MEDIUM-1)
+-- ---------------------------------------------------------------------------
+--
+-- Today no `GRANT INSERT ON public.trivia_answers TO authenticated`
+-- exists, so direct PostgREST INSERTs already 42501 at the GRANT
+-- layer. This RESTRICTIVE policy is belt-and-suspenders: if a future
+-- migration ever adds the grant accidentally (e.g. as a shortcut),
+-- the policy still blocks every direct INSERT — RESTRICTIVE policies
+-- combine with AND semantics, so a `with check (false)` rejects every
+-- row before it can reach the table.
+--
+-- This does NOT block `submit_trivia_answer`. The function is
+-- SECURITY DEFINER and runs as its owner (postgres / migration
+-- runner). public.trivia_answers does NOT have `force row level
+-- security` set (verified pre-migration on dev), so the owner role
+-- bypasses RLS — the RPC's insert continues to land. If a future
+-- migration adds `alter table public.trivia_answers force row level
+-- security`, this policy would start blocking the RPC too, which is
+-- the wrong outcome; the RPC's path would need a matching PERMISSIVE
+-- policy at that point.
+create policy trivia_a_no_direct_insert on public.trivia_answers
+  as restrictive
+  for insert
+  to authenticated
+  with check (false);
 
 -- ---------------------------------------------------------------------------
 -- (b) Tighten column grant on trivia_questions
