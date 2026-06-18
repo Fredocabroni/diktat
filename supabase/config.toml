@@ -41,7 +41,12 @@ file_size_limit = "50MiB"
 [auth]
 enabled = true
 site_url = "http://localhost:3000"
-additional_redirect_urls = ["http://localhost:3000/**"]
+additional_redirect_urls = [
+  "http://localhost:3000/**",
+  "https://diktat-web1.vercel.app/**",
+  # dev/preview only — production auth redirect list must be the production domain only, never this wildcard.
+  "https://*-fredocabronis-projects.vercel.app/**",
+]
 jwt_expiry = 3600
 enable_refresh_token_rotation = true
 refresh_token_reuse_interval = 10
