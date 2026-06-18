@@ -162,28 +162,34 @@ describe('pushSubscriptionsRouter.unregister', () => {
 });
 
 describe('userRouter.updateNotificationPreferences', () => {
-  it('merges streak_risk_push into existing prefs (read-modify-write)', async () => {
-    // First op = SELECT current prefs. Second op = UPDATE merged prefs.
-    // The fake fakeDb shares a single result across all ops, so we cheat
-    // by returning the merged result on every call — the assertion is
-    // about what was PASSED to update().
-    const { db, calls } = fakeDb('users', {
-      data: {
-        notification_preferences: { _seen_intro: true, streak_risk_push: true },
-      },
-      error: null,
-    });
+  // updateNotificationPreferences now routes through SECURITY DEFINER
+  // `update_notification_preferences(p_prefs jsonb)` (migration
+  // 20260618170000). The merge with existing preferences happens
+  // ATOMICALLY inside the function body — the router just forwards
+  // the partial patch. So the assertion shape changes: verify the
+  // router sends the right partial, not the result of a router-side
+  // read-modify-write.
+  it('forwards the partial patch (streak_risk_push only) to the rpc', async () => {
+    const { db } = fakeDb('users', { data: null, error: null });
+    const rpcCalls: { fn: string; args: unknown }[] = [];
+    // Override the rpc method to capture calls.
+    (db as unknown as { rpc: (fn: string, args?: unknown) => unknown }).rpc = (
+      fn: string,
+      args?: unknown,
+    ) => {
+      rpcCalls.push({ fn, args });
+      return Promise.resolve({
+        data: { _seen_intro: true, streak_risk_push: false },
+        error: null,
+      });
+    };
     const caller = appRouter.createCaller(makeCtx({ db }));
 
     await caller.user.updateNotificationPreferences({ streakRiskPush: false });
 
-    const updateOp = calls.ops.find((op) => op.op === 'update');
-    expect(updateOp).toBeDefined();
-    const patch = updateOp!.args[0] as { notification_preferences: Record<string, unknown> };
-    // Pre-existing key preserved.
-    expect(patch.notification_preferences._seen_intro).toBe(true);
-    // New key applied.
-    expect(patch.notification_preferences.streak_risk_push).toBe(false);
+    expect(rpcCalls).toEqual([
+      { fn: 'update_notification_preferences', args: { p_prefs: { streak_risk_push: false } } },
+    ]);
   });
 
   it('UNAUTHORIZED for unauthed callers', async () => {

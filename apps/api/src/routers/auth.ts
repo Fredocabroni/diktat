@@ -9,11 +9,12 @@ export const authRouter = router({
   session: publicProcedure.query(async ({ ctx }) => {
     if (!ctx.userId) return null;
 
-    const { data, error } = await ctx.db
-      .from('users')
-      .select('id, onboarded_at')
-      .eq('id', ctx.userId)
-      .maybeSingle();
+    // Routes through SECURITY DEFINER `get_user_self()` (migration
+    // 20260618120000). `onboarded_at` is a private column and is
+    // unreachable via direct PostgREST SELECT as `authenticated` —
+    // the RPC is the only path. Same self-lock as the original
+    // .eq('id', ctx.userId) shape.
+    const { data, error } = await ctx.db.rpc('get_user_self').maybeSingle();
 
     if (error) {
       // Surface the userId so the client can still render an authed shell;

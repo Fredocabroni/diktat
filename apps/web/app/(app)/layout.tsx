@@ -25,15 +25,15 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
   } = await supabase.auth.getUser();
   if (!user) redirect('/login');
 
-  // First-run users land on the onboarding flow. We fetch onboarded_at
-  // here (one small row) rather than a full profile join — the tab pages
-  // fetch what they need via tRPC.
-  const profileResult = await supabase
-    .from('users')
-    .select('onboarded_at')
-    .eq('id', user.id)
-    .maybeSingle<{ onboarded_at: string | null }>();
-  const profile = profileResult.data;
+  // First-run users land on the onboarding flow. `onboarded_at` is a
+  // private column on public.users — unreachable via direct PostgREST
+  // SELECT as the `authenticated` role per the column-grant audit
+  // (migration 20260617160000) and the H1 fix (20260618120000). The
+  // self-only `get_user_self()` RPC is the only path. Same self-lock
+  // as the original .eq('id', user.id) shape — the function locks to
+  // auth.uid() inside its body.
+  const profileResult = await supabase.rpc('get_user_self');
+  const profile = (profileResult.data?.[0] ?? null) as { onboarded_at: string | null } | null;
   if (profile && !profile.onboarded_at) redirect('/onboard/welcome');
 
   return (

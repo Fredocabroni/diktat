@@ -153,13 +153,12 @@ export const userRouter = router({
     }),
 
   completeOnboarding: protectedProcedure.mutation(async ({ ctx }) => {
-    const { data, error } = await ctx.db
-      .from('users')
-      .update({ onboarded_at: new Date().toISOString() })
-      .eq('id', ctx.userId)
-      .select('id, onboarded_at')
-      .maybeSingle();
-
+    // Routes through SECURITY DEFINER `complete_onboarding()`
+    // (migration 20260618170000). Atomic conditional UPDATE stamps
+    // onboarded_at on first call; returns the existing value on
+    // subsequent calls. Idempotent + one-way — cannot un-onboard or
+    // backdate. Locked to auth.uid() inside the function body.
+    const { data, error } = await ctx.db.rpc('complete_onboarding');
     if (error) {
       throw new TRPCError({
         code: 'INTERNAL_SERVER_ERROR',
@@ -170,7 +169,7 @@ export const userRouter = router({
     if (!data) {
       throw new TRPCError({ code: 'NOT_FOUND', message: 'Profile not found.' });
     }
-    return data;
+    return { id: ctx.userId, onboarded_at: data };
   }),
 
   // Update notification preferences. Per-notification-type granularity —
@@ -186,34 +185,22 @@ export const userRouter = router({
       }),
     )
     .mutation(async ({ ctx, input }) => {
-      const { data: existing, error: readErr } = await ctx.db
-        .from('users')
-        .select('notification_preferences')
-        .eq('id', ctx.userId)
-        .maybeSingle();
-      if (readErr) {
-        throw new TRPCError({
-          code: 'INTERNAL_SERVER_ERROR',
-          message: 'Failed to read notification preferences.',
-          cause: readErr,
-        });
-      }
-      if (!existing) {
-        throw new TRPCError({ code: 'NOT_FOUND', message: 'Profile not found.' });
-      }
-      const current = (existing.notification_preferences ?? {}) as Record<string, unknown>;
-      const next: Record<string, unknown> = { ...current };
+      // Routes through SECURITY DEFINER
+      // `update_notification_preferences(p_prefs jsonb)` (migration
+      // 20260618170000). The function atomically merges the partial
+      // patch into the caller's existing notification_preferences,
+      // eliminating the read-then-write race the old router shape
+      // had. It also validates the input is a jsonb object with only
+      // known keys (V1: streak_risk_push) and correct value types —
+      // SECURITY DEFINER bypasses RLS, so input validation is the
+      // access boundary.
+      const patch: Record<string, unknown> = {};
       if (input.streakRiskPush !== undefined) {
-        next.streak_risk_push = input.streakRiskPush;
+        patch.streak_risk_push = input.streakRiskPush;
       }
-
-      const { data, error } = await ctx.db
-        .from('users')
-        .update({ notification_preferences: next as Json })
-        .eq('id', ctx.userId)
-        .select('id, notification_preferences')
-        .maybeSingle();
-
+      const { data, error } = await ctx.db.rpc('update_notification_preferences', {
+        p_prefs: patch as Json,
+      });
       if (error) {
         throw new TRPCError({
           code: 'INTERNAL_SERVER_ERROR',
@@ -224,7 +211,7 @@ export const userRouter = router({
       if (!data) {
         throw new TRPCError({ code: 'NOT_FOUND', message: 'Profile not found.' });
       }
-      return data;
+      return { id: ctx.userId, notification_preferences: data };
     }),
 
   // Store the caller's IANA timezone. The Phase 4 scheduler's per-user-local
@@ -235,13 +222,16 @@ export const userRouter = router({
   setTimezone: protectedProcedure
     .input(z.object({ timezone: timezoneSchema }))
     .mutation(async ({ ctx, input }) => {
-      const { data, error } = await ctx.db
-        .from('users')
-        .update({ timezone: input.timezone })
-        .eq('id', ctx.userId)
-        .select('id, timezone')
-        .maybeSingle();
-
+      // Routes through SECURITY DEFINER `set_user_timezone(p_tz text)`
+      // (migration 20260618170000). The function validates length
+      // (1..64 chars) + existence in `pg_catalog.pg_timezone_names` —
+      // the same catalog the scheduler's per-user-local sweeps
+      // resolve against, so a value that passes is guaranteed to
+      // resolve downstream. The Zod schema above is a fast-path
+      // client-side gate; the DB-side check is the load-bearing one.
+      const { data, error } = await ctx.db.rpc('set_user_timezone', {
+        p_tz: input.timezone,
+      });
       if (error) {
         throw new TRPCError({
           code: 'INTERNAL_SERVER_ERROR',
@@ -252,6 +242,6 @@ export const userRouter = router({
       if (!data) {
         throw new TRPCError({ code: 'NOT_FOUND', message: 'Profile not found.' });
       }
-      return data;
+      return { id: ctx.userId, timezone: data };
     }),
 });

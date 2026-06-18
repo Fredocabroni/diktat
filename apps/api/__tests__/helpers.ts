@@ -116,6 +116,20 @@ export function fakeDb<T>(table: string, result: FakeQueryResult<T>) {
   builder.then = (resolve: (v: FakeQueryResult<T>) => unknown) =>
     Promise.resolve(resolve(resolveValue));
 
+  // Best-effort rpc shim: returns a resolved-null builder for any
+  // SECURITY DEFINER call a router happens to make alongside its
+  // primary from() flow (e.g. matchmaking.enqueue's bump_last_active
+  // bump). Tests that need to assert the rpc shape should use
+  // fakeRpcDb / fakeUserMeDb in the router test file directly.
+  const rpcBuilder: Record<string, unknown> = {};
+  for (const op of ['select', 'eq', 'lt', 'lte', 'gt', 'gte', 'order', 'limit']) {
+    rpcBuilder[op] = () => rpcBuilder;
+  }
+  const rpcOk = { data: null, error: null };
+  rpcBuilder.maybeSingle = () => Promise.resolve(rpcOk);
+  rpcBuilder.single = () => Promise.resolve(rpcOk);
+  rpcBuilder.then = (resolve: (v: typeof rpcOk) => unknown) => Promise.resolve(resolve(rpcOk));
+
   const db = {
     from: (t: string) => {
       if (t !== table) {
@@ -123,6 +137,7 @@ export function fakeDb<T>(table: string, result: FakeQueryResult<T>) {
       }
       return builder;
     },
+    rpc: (_fn: string, _args?: unknown) => rpcBuilder,
   };
 
   return { db, calls };

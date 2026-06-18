@@ -1317,6 +1317,7 @@ export type Database = {
         Args: { p_user_id: string; p_yesterday: string };
         Returns: Json;
       };
+      bump_last_active: { Args: Record<string, never>; Returns: string };
       claim_scheduled_jobs: {
         Args: {
           p_handler_types: string[];
@@ -1347,6 +1348,7 @@ export type Database = {
           isSetofReturn: true;
         };
       };
+      complete_onboarding: { Args: Record<string, never>; Returns: string };
       evaluate_risk_push: {
         Args: { p_local_date: string; p_user_id: string };
         Returns: Json;
@@ -1381,6 +1383,8 @@ export type Database = {
       };
       increment_take5_progress: { Args: { p_user_id: string }; Returns: Json };
       is_self: { Args: { target_user_id: string }; Returns: boolean };
+      set_user_timezone: { Args: { p_tz: string }; Returns: string };
+      update_notification_preferences: { Args: { p_prefs: Json }; Returns: Json };
     };
     Enums: {
       [_ in never]: never;
