@@ -110,10 +110,28 @@ export const matchmakingRouter = router({
       // Best-effort activity bump via SECURITY DEFINER
       // `bump_last_active()` (migration 20260618170000). The function
       // stamps server-side now() (caller cannot backdate or replay
-      // an arbitrary moment) and is locked to auth.uid(). Errors are
-      // swallowed — the matchmaking enqueue already succeeded, an
-      // activity-tracking failure should not roll it back.
-      await ctx.db.rpc('bump_last_active');
+      // an arbitrary moment) and is locked to auth.uid(). Fire-and-
+      // forget: matchmaking already succeeded; an activity-tracking
+      // failure must not roll it back. PR #44 round-2 security-
+      // reviewer MEDIUM-4: log on error so a systemic failure
+      // (function dropped, permission revoked) is visible in
+      // production instead of silently stagnating last_active_at.
+      void Promise.resolve(ctx.db.rpc('bump_last_active'))
+        .then(({ error }) => {
+          if (error) {
+            console.warn({
+              event: 'bump_last_active.failed',
+              code: error.code,
+              message: error.message,
+            });
+          }
+        })
+        .catch((e: unknown) => {
+          console.warn({
+            event: 'bump_last_active.failed',
+            error: e instanceof Error ? e.message : String(e),
+          });
+        });
 
       return { status: 'waiting' as const, joinedAtMs, ap, mode };
     }),

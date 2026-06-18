@@ -36,6 +36,20 @@
 -- to the existing `get_user_self()` RPC from PR #43 — same self-lock,
 -- same column set, no new function needed.
 --
+-- Dead-letter RLS policy note (PR #44 round-2 security-reviewer MEDIUM-2)
+-- ----------------------------------------------------------------------
+-- The pre-existing `users_update_self` RLS policy on public.users
+-- (migration 20260420090002:46) authorises self-UPDATEs at the
+-- row level. It is currently DEAD-LETTER: no `GRANT UPDATE ON
+-- public.users TO authenticated` exists in migration history, so
+-- every direct PostgREST UPDATE 42501s at the GRANT layer before
+-- RLS is consulted. The four SECURITY DEFINER RPCs below are the
+-- only authorised mutation path; the RLS policy is preserved
+-- purely so a future direct-grant decision has an obvious row-
+-- level safety net to rely on. Auditors should NOT cite the
+-- policy as the current access-control surface — that role is
+-- played by these RPCs.
+--
 -- Out-of-scope for THIS migration
 -- -------------------------------
 --   - updateHandle (UPDATE on public.users.handle). Also 42501s today.
@@ -97,7 +111,7 @@ begin
       from public.users
       where id = auth.uid();
     if v_stamped is null then
-      raise exception 'user row missing for %', auth.uid() using errcode = 'P0002';
+      raise exception 'user row missing' using errcode = 'P0002';
     end if;
   end if;
 
@@ -158,6 +172,22 @@ begin
       using errcode = '22023';
   end if;
 
+  -- (d) Empty-patch early-exit (PR #44 round-2 security-reviewer
+  -- MEDIUM-3). `{} || {}` is identity; skipping the UPDATE avoids the
+  -- no-op row lock + WAL entry that a loop-calling abuser could use
+  -- as a low-effort contention vector. Read the current value
+  -- through the same SECURITY DEFINER privilege so the caller still
+  -- gets back the canonical merged shape.
+  if p_prefs = '{}'::jsonb then
+    select notification_preferences into v_merged
+      from public.users
+      where id = auth.uid();
+    if v_merged is null then
+      raise exception 'user row missing' using errcode = 'P0002';
+    end if;
+    return v_merged;
+  end if;
+
   -- Merge with existing so unprovided keys persist; `||` on jsonb is
   -- right-biased, so the new keys in p_prefs override prior values.
   -- Atomic update eliminates the read-then-write race the router used
@@ -168,7 +198,7 @@ begin
     returning notification_preferences into v_merged;
 
   if v_merged is null then
-    raise exception 'user row missing for %', auth.uid() using errcode = 'P0002';
+    raise exception 'user row missing' using errcode = 'P0002';
   end if;
 
   return v_merged;
@@ -218,7 +248,7 @@ begin
     where id = auth.uid();
 
   if not found then
-    raise exception 'user row missing for %', auth.uid() using errcode = 'P0002';
+    raise exception 'user row missing' using errcode = 'P0002';
   end if;
 
   return p_tz;
@@ -255,7 +285,7 @@ begin
     where id = auth.uid();
 
   if not found then
-    raise exception 'user row missing for %', auth.uid() using errcode = 'P0002';
+    raise exception 'user row missing' using errcode = 'P0002';
   end if;
 
   return v_now;
