@@ -36,19 +36,31 @@
 -- to the existing `get_user_self()` RPC from PR #43 — same self-lock,
 -- same column set, no new function needed.
 --
--- Dead-letter RLS policy note (PR #44 round-2 security-reviewer MEDIUM-2)
--- ----------------------------------------------------------------------
+-- Drop `users_update_self` policy (PR #44 round-3 security-reviewer R2)
+-- ---------------------------------------------------------------------
 -- The pre-existing `users_update_self` RLS policy on public.users
--- (migration 20260420090002:46) authorises self-UPDATEs at the
--- row level. It is currently DEAD-LETTER: no `GRANT UPDATE ON
--- public.users TO authenticated` exists in migration history, so
--- every direct PostgREST UPDATE 42501s at the GRANT layer before
--- RLS is consulted. The four SECURITY DEFINER RPCs below are the
--- only authorised mutation path; the RLS policy is preserved
--- purely so a future direct-grant decision has an obvious row-
--- level safety net to rely on. Auditors should NOT cite the
--- policy as the current access-control surface — that role is
--- played by these RPCs.
+-- (migration 20260420090002:46) authorised self-UPDATEs at the
+-- row level — `USING is_self(id) WITH CHECK is_self(id)`. The
+-- WITH CHECK only restricts WHICH ROW an authenticated caller can
+-- write; it does NOT restrict WHICH COLUMNS. So if a future
+-- migration ever added `GRANT UPDATE ON public.users TO
+-- authenticated` (e.g. as a shortcut alongside the SELECT pattern),
+-- any authenticated user could execute
+--   UPDATE users SET current_ap = 99999, tier_id = 12 WHERE id = auth.uid()
+-- — writing to economy/identity columns the SECURITY DEFINER RPCs
+-- below are designed to protect. The WITH CHECK passes (the row id
+-- is still auth.uid()); RLS column-scope is not a feature.
+--
+-- This migration DROPS the policy so the silent enablement path
+-- is structurally closed. The four SECURITY DEFINER RPCs below are
+-- the only authorised mutation path on public.users; a future
+-- `update_user_handle` RPC (queued sibling) lands the fifth.
+-- A future engineer who wants to allow a self-write path must
+-- write a per-column SECURITY DEFINER RPC (the pattern this
+-- migration establishes) rather than a blanket GRANT.
+--
+-- Rollback: the verbatim ROLLBACK SCRIPT in the header recreates
+-- the policy with its original USING + WITH CHECK clause.
 --
 -- Out-of-scope for THIS migration
 -- -------------------------------
@@ -63,6 +75,13 @@
 -- ROLLBACK SCRIPT (run as postgres / supabase-admin)
 -- ---------------------------------------------------------------------------
 -- begin;
+-- -- Restore the original users_update_self policy verbatim
+-- -- (matches migration 20260420090002:46).
+-- create policy users_update_self on public.users
+--   for update to authenticated
+--   using (public.is_self(id))
+--   with check (public.is_self(id));
+-- -- Revoke + drop each SECURITY DEFINER mutation RPC.
 -- revoke execute on function public.complete_onboarding() from authenticated;
 -- drop function if exists public.complete_onboarding();
 -- revoke execute on function public.update_notification_preferences(jsonb) from authenticated;
@@ -75,6 +94,18 @@
 -- ---------------------------------------------------------------------------
 
 begin;
+
+-- ---------------------------------------------------------------------------
+-- (0) Drop users_update_self
+-- ---------------------------------------------------------------------------
+--
+-- Defence in depth: structurally close the path where a future
+-- GRANT UPDATE could silently enable self-writes to privileged
+-- columns (current_ap, tier_id, fingerprint, etc.) on the caller's
+-- own row. See header notes above for the full rationale. Direct
+-- writes to public.users go through the SECURITY DEFINER RPCs
+-- below only.
+drop policy if exists users_update_self on public.users;
 
 -- ---------------------------------------------------------------------------
 -- (1) complete_onboarding() — idempotent + one-way
