@@ -50,6 +50,11 @@ function fakeUserMeDb(opts: {
 
 describe('userRouter.me', () => {
   it('returns the joined profile from rpc + tiers + streaks', async () => {
+    // The RPC returns only the explicit nine-column set per the round-2
+    // hardening — `fingerprint`, `timezone`, `last_active_at`,
+    // `created_at`, `updated_at` are structurally absent. The fake
+    // mirrors that exactly so a future refactor that re-introduces a
+    // private column on the SDK payload fails this test.
     const userRow = {
       id: 'user-123',
       handle: 'citizen_abcdef0123',
@@ -57,13 +62,8 @@ describe('userRouter.me', () => {
       avatar_url: null,
       current_ap: 100,
       tier_id: 0,
-      fingerprint: {},
-      onboarded_at: null,
-      created_at: '2026-01-01T00:00:00Z',
-      updated_at: '2026-01-01T00:00:00Z',
-      timezone: 'America/New_York',
       is_bot: false,
-      last_active_at: null,
+      onboarded_at: null,
       notification_preferences: {},
     };
     const tier = { id: 0, name: 'Citizen', payout_eligible: false, floor_protected: true };
@@ -126,13 +126,8 @@ describe('userRouter.me', () => {
       display_name: null,
       avatar_url: null,
       current_ap: 100,
-      fingerprint: {},
-      onboarded_at: null,
-      created_at: '2026-01-01T00:00:00Z',
-      updated_at: '2026-01-01T00:00:00Z',
-      timezone: 'America/New_York',
       is_bot: false,
-      last_active_at: null,
+      onboarded_at: null,
       notification_preferences: {},
     };
     const db = fakeUserMeDb({

@@ -74,15 +74,15 @@ async function main(): Promise<void> {
   console.log('[client] userScopedClient created — anon-key + bearer header');
 
   // (3) Raw rpc('get_user_self') — isolates SECURITY DEFINER layer.
-  console.log('\n[raw probe — RPC] ctx.db.rpc("get_user_self"):');
-  const rpcRes = await db.rpc('get_user_self');
+  console.log('\n[raw probe — RPC] ctx.db.rpc("get_user_self").maybeSingle():');
+  const rpcRes = await db.rpc('get_user_self').maybeSingle();
   if (rpcRes.error) {
     console.log(`  ERROR: ${JSON.stringify(rpcRes.error)}`);
   } else if (!rpcRes.data) {
     console.log('  (returned null — function ran but no row matched auth.uid())');
   } else {
-    const row = rpcRes.data as Record<string, unknown>;
-    const publicCols = [
+    const row = rpcRes.data as unknown as Record<string, unknown>;
+    const expectedCols = [
       'id',
       'handle',
       'display_name',
@@ -90,15 +90,24 @@ async function main(): Promise<void> {
       'current_ap',
       'tier_id',
       'is_bot',
+      'onboarded_at',
+      'notification_preferences',
     ];
-    const privateCols = ['fingerprint', 'onboarded_at', 'notification_preferences', 'timezone'];
-    console.log(`  PASS — returned ${Object.keys(row).length} columns`);
+    const excludedCols = ['fingerprint', 'timezone', 'last_active_at', 'created_at', 'updated_at'];
+    const present = Object.keys(row);
+    const missingExpected = expectedCols.filter((c) => !(c in row));
+    const leakedExcluded = excludedCols.filter((c) => c in row);
+    console.log(`  PASS — returned ${present.length} columns: ${present.join(', ')}`);
     console.log(
-      `  public cols present:  ${publicCols.filter((c) => c in row).join(', ')} (expect 7)`,
+      `  expected cols missing: ${missingExpected.length === 0 ? '(none)' : missingExpected.join(', ')}`,
     );
     console.log(
-      `  private cols present: ${privateCols.filter((c) => c in row).join(', ')} (expect 4 — RPC bypasses column grant)`,
+      `  excluded cols leaked:  ${leakedExcluded.length === 0 ? '(none — structurally absent ✓)' : leakedExcluded.join(', ')}`,
     );
+    if (leakedExcluded.length > 0) {
+      process.exitCode = 1;
+      console.log('  *** MEDIUM-1 NOT CLOSED: excluded columns leaked through the RPC ***');
+    }
   }
 
   // (4) Column-grant path — public subset via direct PostgREST SELECT.

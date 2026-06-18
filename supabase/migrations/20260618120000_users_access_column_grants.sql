@@ -109,8 +109,31 @@ grant select (id, handle, display_name, avatar_url, current_ap, tier_id, is_bot)
 -- (b) Self-only access RPC for the private columns.
 -- ---------------------------------------------------------------------------
 
-create or replace function public.get_user_self()
-returns public.users
+-- The return type is an EXPLICIT column set, NOT `public.users`. This
+-- closes round-1 security-reviewer MEDIUM-1: a `returns public.users`
+-- function would have `fingerprint`, `timezone`, `last_active_at`,
+-- `created_at`, and `updated_at` in the raw RPC payload (SECURITY
+-- DEFINER bypasses the column-level GRANT, exposing everything in the
+-- row). With the columns spelled out below, those five fields are
+-- structurally absent from the return type — `user.me` can't leak them
+-- via a future spread refactor because the SDK never sees them.
+--
+-- `returns table(...)` is set-of semantics (zero-or-one row here),
+-- so the supabase-js SDK exposes the result as an array; the router
+-- uses `.maybeSingle()` to narrow to {row | null}.
+drop function if exists public.get_user_self();
+create function public.get_user_self()
+returns table (
+  id uuid,
+  handle extensions.citext,
+  display_name text,
+  avatar_url text,
+  current_ap integer,
+  tier_id smallint,
+  is_bot boolean,
+  onboarded_at timestamptz,
+  notification_preferences jsonb
+)
 language sql
 security definer
 set search_path = ''
@@ -122,13 +145,28 @@ as $$
   -- below additionally restricts EXECUTE to `authenticated` so this
   -- defence-in-depth NULL case is only ever reachable as a contract
   -- bug, not as a routine call.
-  select u.*
+  select
+    u.id,
+    u.handle,
+    u.display_name,
+    u.avatar_url,
+    u.current_ap,
+    u.tier_id,
+    u.is_bot,
+    u.onboarded_at,
+    u.notification_preferences
   from public.users u
   where u.id = auth.uid();
 $$;
 
 comment on function public.get_user_self() is
-  'Self-only access to the caller''s full public.users row. SECURITY DEFINER bypasses the column-level GRANT that hides private columns from authenticated PostgREST callers; the function body locks reads to auth.uid() so a caller cannot fetch another user''s row.';
+  'Self-only access to the caller''s users row, returning the explicit
+   public column set + onboarded_at + notification_preferences.
+   Excludes fingerprint, timezone, last_active_at, created_at,
+   updated_at — those columns are structurally absent from the
+   return type so a future router refactor cannot leak them. SECURITY
+   DEFINER bypasses the column-level GRANT; the function body locks
+   reads to auth.uid() so a caller cannot fetch another user''s row.';
 
 -- Strip default PUBLIC execute so a misconfigured grant cannot expose
 -- this to anon. Re-grant explicitly to authenticated only. service_role

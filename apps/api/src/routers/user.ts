@@ -58,9 +58,12 @@ export const userRouter = router({
     // auth.uid() inside the function body. `tiers` (read-all) and
     // `streaks` (self-only via RLS) keep coming through PostgREST
     // because their column grants landed in 20260617160000.
-    // `returns public.users` (non-setof composite) means the RPC's data
-    // is the row directly — not an array, no `.maybeSingle()` needed.
-    const { data: userRow, error: userErr } = await ctx.db.rpc('get_user_self');
+    // `returns table(...)` is set-of-zero-or-one — the SDK returns an
+    // array; `.maybeSingle()` narrows to row | null. The return type is
+    // an explicit nine-column shape so `fingerprint`, `timezone`,
+    // `last_active_at`, `created_at`, and `updated_at` are structurally
+    // absent from the SDK payload (round-2 security-reviewer MEDIUM-1).
+    const { data: userRow, error: userErr } = await ctx.db.rpc('get_user_self').maybeSingle();
 
     if (userErr) {
       throw new TRPCError({
