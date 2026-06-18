@@ -55,15 +55,25 @@
 -- (b) Tightened WITH CHECK
 --     USING already pins the updatable row set to (caller's own AND
 --     open). The hardened WITH CHECK enforces that the post-image is
---     a valid CLOSED session within a tight wall-clock window of now:
+--     a valid CLOSED session within a tight wall-clock window
+--     symmetric around (started_at .. now()):
 --       (1) is_self preserved — defence-in-depth against a future
 --           grant change that re-exposes user_id;
 --       (2) ended_at is NOT NULL — every UPDATE must close the
 --           session, not produce some other "open + mutated" shape;
---       (3) ended_at <= now() + 1 minute — bounds client clock drift,
---           prevents "ended_at = year 3000" from manufacturing a
---           1000-year session duration if a future feature ever
---           reads session length.
+--       (3) ended_at <= now() + 1 minute — bounds client clock drift
+--           forward, prevents "ended_at = year 3000" from
+--           manufacturing a 1000-year session duration if a future
+--           feature ever reads session length;
+--       (4) ended_at >= started_at - 1 minute — bounds client clock
+--           drift backward, prevents "ended_at = 1970-01-01" from
+--           manufacturing a NEGATIVE-duration session (round-2 PR #46
+--           security-reviewer LOW finding). The 1-minute skew window
+--           matches the INSERT policy's started_at acceptance band
+--           (now()-1m..now()) so a legitimate near-now close on a
+--           freshly-opened session is never false-rejected, even if
+--           the client clock is ahead of server time during INSERT
+--           and behind during UPDATE (or vice versa).
 --
 -- Both layers must agree independently for an UPDATE to land. An
 -- authenticated session UPDATE now means "close my open session with a
@@ -121,6 +131,7 @@ create policy sessions_update_self on public.sessions
     public.is_self(user_id)
     and ended_at is not null
     and ended_at <= now() + interval '1 minute'
+    and ended_at >= started_at - interval '1 minute'
   );
 
 commit;
