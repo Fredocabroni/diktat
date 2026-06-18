@@ -121,6 +121,14 @@ grant select (id, handle, display_name, avatar_url, current_ap, tier_id, is_bot)
 -- `returns table(...)` is set-of semantics (zero-or-one row here),
 -- so the supabase-js SDK exposes the result as an array; the router
 -- uses `.maybeSingle()` to narrow to {row | null}.
+--
+-- `DROP FUNCTION` (not `CREATE OR REPLACE`) is required because round-2
+-- changed the function's return type. PostgreSQL's `CREATE OR REPLACE
+-- FUNCTION` permits body and language changes but NOT a return-type
+-- change — attempting `CREATE OR REPLACE` here would error with
+-- "cannot change return type of existing function". The drop+create is
+-- atomic inside this migration's `begin;`/`commit;` so there is no
+-- runtime window where the function is absent in normal operation.
 drop function if exists public.get_user_self();
 create function public.get_user_self()
 returns table (
