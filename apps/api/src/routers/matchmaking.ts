@@ -107,14 +107,31 @@ export const matchmakingRouter = router({
         ex: META_TTL_S,
       });
 
-      // Best-effort activity bump. The column may not exist in
-      // generated types yet (migration 0010 lands with PR #15) — the
-      // untyped cast keeps this forward-compatible.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await (ctx.db as any)
-        .from('users')
-        .update({ last_active_at: new Date(joinedAtMs).toISOString() })
-        .eq('id', ctx.userId);
+      // Best-effort activity bump via SECURITY DEFINER
+      // `bump_last_active()` (migration 20260618170000). The function
+      // stamps server-side now() (caller cannot backdate or replay
+      // an arbitrary moment) and is locked to auth.uid(). Fire-and-
+      // forget: matchmaking already succeeded; an activity-tracking
+      // failure must not roll it back. PR #44 round-2 security-
+      // reviewer MEDIUM-4: log on error so a systemic failure
+      // (function dropped, permission revoked) is visible in
+      // production instead of silently stagnating last_active_at.
+      void Promise.resolve(ctx.db.rpc('bump_last_active'))
+        .then(({ error }) => {
+          if (error) {
+            console.warn({
+              event: 'bump_last_active.failed',
+              code: error.code,
+              message: error.message,
+            });
+          }
+        })
+        .catch((e: unknown) => {
+          console.warn({
+            event: 'bump_last_active.failed',
+            error: e instanceof Error ? e.message : String(e),
+          });
+        });
 
       return { status: 'waiting' as const, joinedAtMs, ap, mode };
     }),
