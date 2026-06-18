@@ -46,3 +46,18 @@ pnpm-debug.log*
 .claude/state/
 .claude/local-overrides.json
 .claude/worktrees/
+
+# Dev-only one-shot scripts — never committed.
+#
+# Runtime probes that forge authenticated JWTs against a Supabase project
+# (apps/api/scripts/probe-*.ts) bundle SUPABASE_JWT_SECRET-driven token
+# generation in a single file. The secret itself is the vulnerability
+# vector — but a committed forging utility lowers the bar for an insider
+# or supply-chain attacker who later obtains the secret. Keep them local.
+#
+# Dev DDL one-shots (apps/workers/scripts/dev-*.mjs) execute DROP/CREATE
+# against whatever DATABASE_URL is set in the environment with no guard.
+# A mis-set env var would drop production schema objects on invocation.
+# Keep them local; migrations are the source of truth.
+apps/api/scripts/probe-*.ts
+apps/workers/scripts/dev-*.mjs

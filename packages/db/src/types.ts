@@ -1359,6 +1359,26 @@ export type Database = {
         Args: { p_claim_id: string; p_sources: Json; p_verdict: Json };
         Returns: string;
       };
+      get_user_self: {
+        Args: Record<string, never>;
+        Returns: {
+          avatar_url: string | null;
+          current_ap: number;
+          display_name: string | null;
+          handle: string;
+          id: string;
+          is_bot: boolean;
+          notification_preferences: Json;
+          onboarded_at: string | null;
+          tier_id: number;
+        }[];
+        SetofOptions: {
+          from: '*';
+          to: 'users';
+          isOneToOne: false;
+          isSetofReturn: true;
+        };
+      };
       increment_take5_progress: { Args: { p_user_id: string }; Returns: Json };
       is_self: { Args: { target_user_id: string }; Returns: boolean };
     };
