@@ -1384,6 +1384,23 @@ export type Database = {
       increment_take5_progress: { Args: { p_user_id: string }; Returns: Json };
       is_self: { Args: { target_user_id: string }; Returns: boolean };
       set_user_timezone: { Args: { p_tz: string }; Returns: string };
+      submit_trivia_answer: {
+        Args: {
+          p_battle_id: string;
+          p_round_id: string;
+          p_chosen_index: number;
+        };
+        Returns: {
+          correct: boolean;
+          latency_ms: number;
+        }[];
+        SetofOptions: {
+          from: '*';
+          to: 'trivia_answers';
+          isOneToOne: false;
+          isSetofReturn: true;
+        };
+      };
       update_notification_preferences: { Args: { p_prefs: Json }; Returns: Json };
     };
     Enums: {
