@@ -5,16 +5,23 @@ import { appRouter } from '../../src/routers/index.js';
 import { makeCtx } from '../helpers.js';
 
 /**
- * Wallet router talks to two tables in `balance` (wallets + users) and one
- * in each of `transactions` / `ghostEarnings`. Build a multi-table fake.
+ * Wallet router talks to two tables in `balance` (wallets + users), one
+ * table in `transactions`, and one RPC (`wallet_ghost_earnings`) in
+ * `ghostEarnings`. Build a multi-table + rpc fake.
  */
 function multiTableDb(
   responses: Record<string, { data: unknown; error: { code?: string; message: string } | null }>,
+  rpcResponses: Record<
+    string,
+    { data: unknown; error: { code?: string; message: string } | null }
+  > = {},
 ): {
   db: Context['db'];
   calls: { table: string; ops: { op: string; args: unknown[] }[] }[];
+  rpcCalls: { fn: string; args: unknown }[];
 } {
   const calls: { table: string; ops: { op: string; args: unknown[] }[] }[] = [];
+  const rpcCalls: { fn: string; args: unknown }[] = [];
 
   const makeBuilder = (table: string, result: { data: unknown; error: unknown }) => {
     const ops: { op: string; args: unknown[] }[] = [];
@@ -25,6 +32,7 @@ function multiTableDb(
       'eq',
       'lt',
       'gt',
+      'or',
       'order',
       'limit',
       'update',
@@ -49,9 +57,15 @@ function multiTableDb(
       if (!r) throw new Error(`multiTableDb: no response stubbed for "${table}"`);
       return makeBuilder(table, r);
     },
+    rpc: (fn: string, args?: unknown) => {
+      const r = rpcResponses[fn];
+      if (!r) throw new Error(`multiTableDb: no rpc stubbed for "${fn}"`);
+      rpcCalls.push({ fn, args });
+      return Promise.resolve(r);
+    },
   };
 
-  return { db: db as unknown as Context['db'], calls };
+  return { db: db as unknown as Context['db'], calls, rpcCalls };
 }
 
 describe('walletRouter.balance', () => {
@@ -89,8 +103,11 @@ describe('walletRouter.balance', () => {
 });
 
 describe('walletRouter.transactions', () => {
-  it('returns items + nextCursor when more pages exist', async () => {
-    // Stub returns limit + 1 rows so the router emits a cursor.
+  it('returns items + composite {createdAt,id} nextCursor when more pages exist', async () => {
+    // Stub returns limit + 1 rows so the router emits a cursor. The
+    // nextCursor is built from items[items.length-1] (the LAST item of
+    // the trimmed page), not rows[limit] — that way the next page's
+    // composite-OR filter starts strictly before the page boundary.
     const rows = Array.from({ length: 51 }, (_, i) => ({
       id: `tx-${i}`,
       delta: 10,
@@ -107,7 +124,10 @@ describe('walletRouter.transactions', () => {
 
     const page = await caller.wallet.transactions({ limit: 50 });
     expect(page.items).toHaveLength(50);
-    expect(page.nextCursor).toBe(rows[50]?.created_at);
+    expect(page.nextCursor).toEqual({
+      createdAt: rows[49]!.created_at,
+      id: rows[49]!.id,
+    });
   });
 
   it('omits cursor on the last page', async () => {
@@ -133,32 +153,59 @@ describe('walletRouter.transactions', () => {
     expect(page.items).toHaveLength(1);
     expect(page.nextCursor).toBeNull();
   });
-});
 
-describe('walletRouter.ghostEarnings', () => {
-  it('sums ghost_credit deltas', async () => {
+  it('emits the composite-OR filter when a cursor is provided', async () => {
     const { db, calls } = multiTableDb({
-      ap_transactions: {
-        data: [{ delta: 5 }, { delta: 12 }, { delta: 3 }],
-        error: null,
-      },
+      ap_transactions: { data: [], error: null },
     });
     const caller = appRouter.createCaller(makeCtx({ db }));
 
-    const result = await caller.wallet.ghostEarnings();
-    expect(result.totalAp).toBe(20);
+    const cursor = {
+      createdAt: '2026-04-20T10:30:00Z',
+      id: '11111111-1111-4111-8111-111111111111',
+    };
+    await caller.wallet.transactions({ limit: 50, cursor });
 
-    // Sanity: filter applied on reason = ghost_credit.
-    const reasonCall = calls[0]?.ops.find(
-      (op) => op.op === 'eq' && (op.args[0] as string) === 'reason',
-    );
-    expect(reasonCall?.args).toEqual(['reason', 'ghost_credit']);
+    // Expect the .or() call mirroring (created_at, id) < (cursor)
+    // composite tuple comparison.
+    const orCall = calls[0]?.ops.find((op) => op.op === 'or');
+    expect(orCall?.args).toEqual([
+      `created_at.lt.${cursor.createdAt},and(created_at.eq.${cursor.createdAt},id.lt.${cursor.id})`,
+    ]);
+
+    // And the secondary `id desc` order key must be present alongside
+    // `created_at desc` so the index seeks tie-stably.
+    const orderCalls =
+      calls[0]?.ops.filter((op) => op.op === 'order').map((op) => op.args[0]) ?? [];
+    expect(orderCalls).toEqual(['created_at', 'id']);
+  });
+});
+
+describe('walletRouter.ghostEarnings', () => {
+  it('calls wallet_ghost_earnings() RPC and returns its bigint sum', async () => {
+    const { db, rpcCalls } = multiTableDb({}, { wallet_ghost_earnings: { data: 20, error: null } });
+    const caller = appRouter.createCaller(makeCtx({ db }));
+
+    const result = await caller.wallet.ghostEarnings();
+    expect(result).toEqual({ totalAp: 20 });
+
+    // Sanity: the procedure invoked the RPC, not a table read.
+    expect(rpcCalls).toEqual([{ fn: 'wallet_ghost_earnings', args: undefined }]);
   });
 
-  it('returns 0 when there are no ghost credits', async () => {
-    const { db } = multiTableDb({
-      ap_transactions: { data: [], error: null },
-    });
+  it('coerces bigint-as-string to number (Supabase-js may serialize)', async () => {
+    const { db } = multiTableDb(
+      {},
+      // Mirrors the wire-shape where bigint comes back as a string.
+      { wallet_ghost_earnings: { data: '42' as unknown as number, error: null } },
+    );
+    const caller = appRouter.createCaller(makeCtx({ db }));
+
+    expect(await caller.wallet.ghostEarnings()).toEqual({ totalAp: 42 });
+  });
+
+  it('returns 0 when the RPC sums to null/0 (empty ghost ledger)', async () => {
+    const { db } = multiTableDb({}, { wallet_ghost_earnings: { data: 0, error: null } });
     const caller = appRouter.createCaller(makeCtx({ db }));
 
     expect(await caller.wallet.ghostEarnings()).toEqual({ totalAp: 0 });

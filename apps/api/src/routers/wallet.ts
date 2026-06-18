@@ -20,7 +20,16 @@ function microsToUsd(micros: bigint | number | string | null | undefined): numbe
 
 const transactionsInput = z.object({
   limit: z.number().int().min(1).max(100).default(50),
-  cursor: z.string().datetime().optional(),
+  // Composite (created_at, id) keyset cursor — tie-stable across
+  // rows that share a microsecond. Round-tripped opaquely from the
+  // server's nextCursor by `useInfiniteQuery`'s getNextPageParam,
+  // so the shape is internal to this router.
+  cursor: z
+    .object({
+      createdAt: z.string().datetime(),
+      id: z.string().uuid(),
+    })
+    .optional(),
 });
 
 export const walletRouter = router({
@@ -61,9 +70,22 @@ export const walletRouter = router({
       .select('id, delta, balance_after, reason, ref_type, ref_id, created_at')
       .eq('user_id', ctx.userId)
       .order('created_at', { ascending: false })
+      .order('id', { ascending: false })
       .limit(input.limit + 1);
 
-    if (input.cursor) query = query.lt('created_at', input.cursor);
+    if (input.cursor) {
+      // Composite (created_at, id) keyset: strictly-before in
+      // (created_at desc, id desc) order. The two-clause OR mirrors the
+      // SQL tuple comparison (created_at, id) < (cursor.createdAt,
+      // cursor.id). PostgREST renders top-level OR alternatives
+      // comma-separated; AND-groups wrap in `and(...)`. The composite
+      // index `ap_tx_user_recent_idx (user_id, created_at desc, id desc)`
+      // (migration 20260618220000) supports this seek index-only.
+      query = query.or(
+        `created_at.lt.${input.cursor.createdAt},` +
+          `and(created_at.eq.${input.cursor.createdAt},id.lt.${input.cursor.id})`,
+      );
+    }
 
     const { data, error } = await query;
     if (error) {
@@ -77,20 +99,19 @@ export const walletRouter = router({
     const rows = data ?? [];
     const hasMore = rows.length > input.limit;
     const items = hasMore ? rows.slice(0, input.limit) : rows;
-    const nextCursor = hasMore ? (rows[input.limit]?.created_at ?? null) : null;
+    const lastItem = items[items.length - 1];
+    const nextCursor =
+      hasMore && lastItem ? { createdAt: lastItem.created_at, id: lastItem.id } : null;
 
     return { items, nextCursor };
   }),
 
   ghostEarnings: protectedProcedure.query(async ({ ctx }) => {
-    // Ghost credits accumulate for tiers 0–2 (computed by the AP engine).
-    // We sum them here for the wallet badge; the engine has already capped
-    // and gated eligibility at write time, so a simple aggregate is safe.
-    const { data, error } = await ctx.db
-      .from('ap_transactions')
-      .select('delta')
-      .eq('user_id', ctx.userId)
-      .eq('reason', 'ghost_credit');
+    // Aggregate pushed into a SECURITY INVOKER SQL function
+    // (migration 20260618220000). Postgres sums ghost_credit deltas
+    // for auth.uid() inside the DB; only a single bigint crosses the
+    // wire. RLS scopes the read to the caller via ap_tx_select_self.
+    const { data, error } = await ctx.db.rpc('wallet_ghost_earnings');
 
     if (error) {
       throw new TRPCError({
@@ -100,7 +121,9 @@ export const walletRouter = router({
       });
     }
 
-    const totalAp = (data ?? []).reduce((acc, row) => acc + row.delta, 0);
-    return { totalAp };
+    // Supabase-js + PostgREST may return the bigint as string or
+    // number depending on adapter; coerce defensively to preserve
+    // the existing `{ totalAp: number }` contract.
+    return { totalAp: Number(data ?? 0) };
   }),
 });
