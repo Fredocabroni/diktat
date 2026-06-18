@@ -1,8 +1,8 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
+import type { Context } from '../../src/context.js';
 import { appRouter } from '../../src/routers/index.js';
-import { fakeDb, makeCtx } from '../helpers.js';
-import * as supabaseModule from '../../src/supabase.js';
+import { fakeDb, type FakeQueryResult, makeCtx } from '../helpers.js';
 
 const BATTLE_ID = '11111111-1111-4111-8111-111111111111';
 const ROUND_ID = '22222222-2222-4222-8222-222222222222';
@@ -45,103 +45,142 @@ describe('battlesRouter.getRound', () => {
   });
 });
 
+// submitAnswer now routes entirely through `rpc('submit_trivia_answer')`
+// — the SECURITY DEFINER function grades, validates, and inserts inside
+// the DB. The router's only job is to map sqlstate → tRPC error codes.
+// The fake below stubs `rpc(...)` directly + asserts the args shape.
+function fakeRpcDb(opts: {
+  rpc: FakeQueryResult<unknown>;
+  rpcCalls?: { fn: string; args: unknown }[];
+}): Context['db'] {
+  const calls = opts.rpcCalls;
+  const builder: Record<string, unknown> = {};
+  for (const op of ['select', 'eq', 'lt', 'lte', 'gt', 'gte', 'order', 'limit']) {
+    builder[op] = () => builder;
+  }
+  builder.maybeSingle = () => Promise.resolve(opts.rpc);
+  builder.single = () => Promise.resolve(opts.rpc);
+  builder.then = (resolve: (v: FakeQueryResult<unknown>) => unknown) =>
+    Promise.resolve(resolve(opts.rpc));
+  return {
+    rpc: (fn: string, args?: unknown) => {
+      calls?.push({ fn, args });
+      return builder;
+    },
+    from: () => {
+      throw new Error('fakeRpcDb: did not expect a from() call');
+    },
+  } as unknown as Context['db'];
+}
+
 describe('battlesRouter.submitAnswer', () => {
-  it('grades against question.correct_index and writes via service role', async () => {
-    // Three sequential single-table fakeDb chains: battles, battle_rounds, trivia_questions.
-    // The fakeDb harness expects exactly one table per builder, so we
-    // build a bespoke chained client for this test.
-    const battleRow = { id: BATTLE_ID, status: 'live' };
-    const roundRow = {
-      id: ROUND_ID,
-      round_no: 0,
-      payload: { questionId: QUESTION_ID },
-      created_at: new Date(Date.now() - 4_000).toISOString(),
-    };
-    const questionRow = { correct_index: 2 };
-
-    const tables: Record<string, unknown> = {
-      battles: { data: battleRow, error: null },
-      battle_rounds: { data: roundRow, error: null },
-      trivia_questions: { data: questionRow, error: null },
-    };
-
-    const calls: { table: string; ops: { op: string; args: unknown[] }[] }[] = [];
-
-    function makeBuilder(table: string): Record<string, unknown> {
-      const ops: { op: string; args: unknown[] }[] = [];
-      calls.push({ table, ops });
-      const builder: Record<string, unknown> = {};
-      for (const op of ['select', 'eq']) {
-        builder[op] = (...args: unknown[]) => {
-          ops.push({ op, args });
-          return builder;
-        };
-      }
-      builder.maybeSingle = () => Promise.resolve(tables[table]);
-      return builder;
-    }
-
-    const db = { from: (t: string) => makeBuilder(t) };
-
-    // Stub the service-role client for the trivia_answers insert.
-    const insertSpy = vi.fn().mockResolvedValue({ error: null });
-    const fakeServiceFrom = (t: string) => {
-      if (t !== 'trivia_answers') {
-        throw new Error(`unexpected service-role table ${t}`);
-      }
-      return { insert: insertSpy };
-    };
-    const serviceRoleSpy = vi
-      .spyOn(supabaseModule, 'serviceRoleClient')
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      .mockReturnValue({ from: fakeServiceFrom } as any);
-
-    try {
-      const caller = appRouter.createCaller(makeCtx({ db }));
-      const result = await caller.battles.submitAnswer({
-        battleId: BATTLE_ID,
-        roundId: ROUND_ID,
-        chosenIndex: 2,
-      });
-
-      expect(result.correct).toBe(true);
-      expect(result.latencyMs).toBeGreaterThanOrEqual(3_500);
-      expect(insertSpy).toHaveBeenCalledTimes(1);
-      const sent = insertSpy.mock.calls[0]![0];
-      expect(sent).toMatchObject({
-        battle_id: BATTLE_ID,
-        round_id: ROUND_ID,
-        question_id: QUESTION_ID,
-        chosen_index: 2,
-        correct: true,
-      });
-      expect(typeof sent.latency_ms).toBe('number');
-    } finally {
-      serviceRoleSpy.mockRestore();
-    }
-  });
-
-  it('rejects with BAD_REQUEST when battle.status is not live', async () => {
-    const tables: Record<string, unknown> = {
-      battles: { data: { id: BATTLE_ID, status: 'settled' }, error: null },
-    };
-    function makeBuilder(table: string): Record<string, unknown> {
-      const builder: Record<string, unknown> = {};
-      for (const op of ['select', 'eq']) {
-        builder[op] = () => builder;
-      }
-      builder.maybeSingle = () => Promise.resolve(tables[table]);
-      return builder;
-    }
-    const db = { from: (t: string) => makeBuilder(t) };
+  it('forwards (battle_id, round_id, chosen_index) and returns {correct, latencyMs}', async () => {
+    const rpcCalls: { fn: string; args: unknown }[] = [];
+    const db = fakeRpcDb({
+      rpc: { data: { correct: true, latency_ms: 1234 }, error: null },
+      rpcCalls,
+    });
     const caller = appRouter.createCaller(makeCtx({ db }));
 
+    const result = await caller.battles.submitAnswer({
+      battleId: BATTLE_ID,
+      roundId: ROUND_ID,
+      chosenIndex: 2,
+    });
+
+    expect(result).toEqual({ correct: true, latencyMs: 1234 });
+    expect(rpcCalls).toEqual([
+      {
+        fn: 'submit_trivia_answer',
+        args: {
+          p_battle_id: BATTLE_ID,
+          p_round_id: ROUND_ID,
+          p_chosen_index: 2,
+        },
+      },
+    ]);
+  });
+
+  it('maps 23505 (re-submit) → CONFLICT', async () => {
+    const db = fakeRpcDb({
+      rpc: { data: null, error: { code: '23505', message: 'already answered this round' } },
+    });
+    const caller = appRouter.createCaller(makeCtx({ db }));
     await expect(
-      caller.battles.submitAnswer({
-        battleId: BATTLE_ID,
-        roundId: ROUND_ID,
-        chosenIndex: 0,
-      }),
+      caller.battles.submitAnswer({ battleId: BATTLE_ID, roundId: ROUND_ID, chosenIndex: 0 }),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+  });
+
+  it('maps 42501 (not a participant) → FORBIDDEN', async () => {
+    const db = fakeRpcDb({
+      rpc: { data: null, error: { code: '42501', message: 'not a participant' } },
+    });
+    const caller = appRouter.createCaller(makeCtx({ db }));
+    await expect(
+      caller.battles.submitAnswer({ battleId: BATTLE_ID, roundId: ROUND_ID, chosenIndex: 0 }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+  });
+
+  it('maps 22023 (battle not live / bad input) → BAD_REQUEST', async () => {
+    const db = fakeRpcDb({
+      rpc: { data: null, error: { code: '22023', message: 'battle not accepting answers' } },
+    });
+    const caller = appRouter.createCaller(makeCtx({ db }));
+    await expect(
+      caller.battles.submitAnswer({ battleId: BATTLE_ID, roundId: ROUND_ID, chosenIndex: 0 }),
     ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+  });
+
+  it('maps P0002 (battle/round/question missing) → NOT_FOUND', async () => {
+    const db = fakeRpcDb({
+      rpc: { data: null, error: { code: 'P0002', message: 'round not found' } },
+    });
+    const caller = appRouter.createCaller(makeCtx({ db }));
+    await expect(
+      caller.battles.submitAnswer({ battleId: BATTLE_ID, roundId: ROUND_ID, chosenIndex: 0 }),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+
+  it('maps 28000 (unauthenticated) → UNAUTHORIZED', async () => {
+    const db = fakeRpcDb({
+      rpc: { data: null, error: { code: '28000', message: 'unauthenticated' } },
+    });
+    const caller = appRouter.createCaller(makeCtx({ db }));
+    await expect(
+      caller.battles.submitAnswer({ battleId: BATTLE_ID, roundId: ROUND_ID, chosenIndex: 0 }),
+    ).rejects.toMatchObject({ code: 'UNAUTHORIZED' });
+  });
+
+  it('unmapped sqlstate falls through to INTERNAL_SERVER_ERROR with a generic message', async () => {
+    // Round-2 PR #45 security-reviewer MEDIUM-2: the raw Postgres
+    // error message must NOT reach the client on the fallthrough
+    // path (could leak schema/constraint names). Static message on
+    // the wire; `cause: error` preserved for server-side logs.
+    const dbError = {
+      code: 'XX000',
+      message: 'function public.foo() does not exist',
+    };
+    const db = fakeRpcDb({ rpc: { data: null, error: dbError } });
+    const caller = appRouter.createCaller(makeCtx({ db }));
+    const err = await caller.battles
+      .submitAnswer({ battleId: BATTLE_ID, roundId: ROUND_ID, chosenIndex: 0 })
+      .catch((e) => e);
+    expect(err.code).toBe('INTERNAL_SERVER_ERROR');
+    expect(err.message).toBe('Internal error.');
+    expect(err.message).not.toContain('foo()');
+  });
+
+  it('mapped sqlstates keep the function-authored message on the wire', async () => {
+    // Mapped messages are audit-reviewed function-authored strings —
+    // safe to forward to the caller (and useful for client UX).
+    const db = fakeRpcDb({
+      rpc: { data: null, error: { code: '23505', message: 'already answered this round' } },
+    });
+    const caller = appRouter.createCaller(makeCtx({ db }));
+    const err = await caller.battles
+      .submitAnswer({ battleId: BATTLE_ID, roundId: ROUND_ID, chosenIndex: 0 })
+      .catch((e) => e);
+    expect(err.code).toBe('CONFLICT');
+    expect(err.message).toBe('already answered this round');
   });
 });
