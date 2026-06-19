@@ -24,6 +24,7 @@ import { createHash } from 'node:crypto';
 import { TRPCError } from '@trpc/server';
 import { z } from 'zod';
 
+import { aiSpendLimit } from '../rate-limit.js';
 import { protectedProcedure, router } from '../trpc.js';
 import { serviceRoleClient } from '../supabase.js';
 
@@ -53,79 +54,88 @@ function utcDayStamp(now: Date = new Date()): string {
 }
 
 export const factCheckRouter = router({
-  enqueue: protectedProcedure.input(enqueueInput).mutation(async ({ ctx, input }) => {
-    const claimContext = input.claimContext ?? '';
-    const dedupHash = dedupHashFor(input.claimText, claimContext);
+  enqueue: protectedProcedure
+    // M5 — AI-spend tier. Each call enqueues a fact_check job that
+    // costs $0.05–0.20 in AI spend. Budget: 20/day per userId
+    // (TBD-pending-product-decision in TYRION_BUILD_QUEUE) + 3/min
+    // burst to prevent a single user bursting the orchestrator at
+    // midnight UTC. Fails-CLOSED on Redis outage: better to 429 than
+    // leak $1+ during the outage window.
+    .use(aiSpendLimit('factCheck.enqueue', { daily: 20, burst: 3 }))
+    .input(enqueueInput)
+    .mutation(async ({ ctx, input }) => {
+      const claimContext = input.claimContext ?? '';
+      const dedupHash = dedupHashFor(input.claimText, claimContext);
 
-    // Service-role client: writes to fact_check_claims + scheduled_jobs
-    // both require it (RLS does not allow user-side INSERT on either).
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const service = serviceRoleClient(ctx.env) as any;
+      // Service-role client: writes to fact_check_claims + scheduled_jobs
+      // both require it (RLS does not allow user-side INSERT on either).
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const service = serviceRoleClient(ctx.env) as any;
 
-    // 1) Upsert claim with ignoreDuplicates — if the hash already exists,
-    //    no row is rewritten. Then SELECT to recover the id whether the
-    //    INSERT happened or the row pre-existed.
-    const { error: upsertErr } = await service.from('fact_check_claims').upsert(
-      {
-        claim_text: input.claimText,
-        claim_context: claimContext,
-        dedup_hash: dedupHash,
-        ref_type: input.refType,
-        ref_id: input.refId ?? null,
-        created_by: ctx.userId,
-      },
-      { onConflict: 'dedup_hash', ignoreDuplicates: true },
-    );
-    if (upsertErr) {
-      throw new TRPCError({
-        code: 'INTERNAL_SERVER_ERROR',
-        message: 'Failed to upsert fact-check claim.',
-        cause: upsertErr,
+      // 1) Upsert claim with ignoreDuplicates — if the hash already exists,
+      //    no row is rewritten. Then SELECT to recover the id whether the
+      //    INSERT happened or the row pre-existed.
+      const { error: upsertErr } = await service.from('fact_check_claims').upsert(
+        {
+          claim_text: input.claimText,
+          claim_context: claimContext,
+          dedup_hash: dedupHash,
+          ref_type: input.refType,
+          ref_id: input.refId ?? null,
+          created_by: ctx.userId,
+        },
+        { onConflict: 'dedup_hash', ignoreDuplicates: true },
+      );
+      if (upsertErr) {
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message: 'Failed to upsert fact-check claim.',
+          cause: upsertErr,
+        });
+      }
+
+      const { data: claimRow, error: selectErr } = await service
+        .from('fact_check_claims')
+        .select('id')
+        .eq('dedup_hash', dedupHash)
+        .maybeSingle();
+      if (selectErr || !claimRow) {
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message: 'Failed to read back fact-check claim id.',
+          cause: selectErr,
+        });
+      }
+      const claimId = claimRow.id as string;
+
+      // 2) Enqueue a fact_check job. idempotency_key = '{claim_id}:{UTC_day}'
+      //    so a same-day re-enqueue is a no-op (the orchestrator will cache-
+      //    hit anyway), but a next-UTC-day re-enqueue is allowed.
+      const idempotencyKey = `${claimId}:${utcDayStamp()}`;
+      const { error: jobErr } = await service.from('scheduled_jobs').insert({
+        job_type: 'fact_check',
+        idempotency_key: idempotencyKey,
+        payload: {
+          claim_id: claimId,
+          enqueued_at: new Date().toISOString(),
+        },
       });
-    }
+      // 23505 = unique_violation on (job_type, idempotency_key). That's a
+      // same-day duplicate enqueue — accept silently and return the claim.
+      if (jobErr && jobErr.code !== '23505') {
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message: 'Failed to enqueue fact-check job.',
+          cause: jobErr,
+        });
+      }
 
-    const { data: claimRow, error: selectErr } = await service
-      .from('fact_check_claims')
-      .select('id')
-      .eq('dedup_hash', dedupHash)
-      .maybeSingle();
-    if (selectErr || !claimRow) {
-      throw new TRPCError({
-        code: 'INTERNAL_SERVER_ERROR',
-        message: 'Failed to read back fact-check claim id.',
-        cause: selectErr,
-      });
-    }
-    const claimId = claimRow.id as string;
-
-    // 2) Enqueue a fact_check job. idempotency_key = '{claim_id}:{UTC_day}'
-    //    so a same-day re-enqueue is a no-op (the orchestrator will cache-
-    //    hit anyway), but a next-UTC-day re-enqueue is allowed.
-    const idempotencyKey = `${claimId}:${utcDayStamp()}`;
-    const { error: jobErr } = await service.from('scheduled_jobs').insert({
-      job_type: 'fact_check',
-      idempotency_key: idempotencyKey,
-      payload: {
-        claim_id: claimId,
-        enqueued_at: new Date().toISOString(),
-      },
-    });
-    // 23505 = unique_violation on (job_type, idempotency_key). That's a
-    // same-day duplicate enqueue — accept silently and return the claim.
-    if (jobErr && jobErr.code !== '23505') {
-      throw new TRPCError({
-        code: 'INTERNAL_SERVER_ERROR',
-        message: 'Failed to enqueue fact-check job.',
-        cause: jobErr,
-      });
-    }
-
-    return {
-      claimId,
-      idempotencyKey,
-      queued: jobErr?.code !== '23505',
-    };
-  }),
+      return {
+        claimId,
+        idempotencyKey,
+        queued: jobErr?.code !== '23505',
+      };
+    }),
 
   getVerdict: protectedProcedure.input(getVerdictInput).query(async ({ ctx, input }) => {
     // User-scoped client: RLS allows read-all to authenticated on all three

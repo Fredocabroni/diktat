@@ -13,6 +13,7 @@
 import { TRPCError } from '@trpc/server';
 import { z } from 'zod';
 
+import { mutationLimit } from '../rate-limit.js';
 import { protectedProcedure, router } from '../trpc.js';
 
 const positionSchema = z.number().int().min(-2).max(2);
@@ -58,6 +59,9 @@ interface TopicRow {
 
 export const feedRouter = router({
   recordShift: protectedProcedure
+    // M5 — 10/min per user. One stance per Drop in practice; 10/min
+    // is the anti-bot floor.
+    .use(mutationLimit('feed.recordShift', { perMin: 10 }))
     .input(
       z.object({
         topicId: z.string().uuid(),

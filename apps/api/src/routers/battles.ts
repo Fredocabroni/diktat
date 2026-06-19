@@ -15,6 +15,7 @@
 import { TRPCError } from '@trpc/server';
 import { z } from 'zod';
 
+import { mutationLimit } from '../rate-limit.js';
 import { protectedProcedure, router } from '../trpc.js';
 
 const battleIdInput = z.object({ battleId: z.string().uuid() });
@@ -119,6 +120,9 @@ export const battlesRouter = router({
     }),
 
   submitAnswer: protectedProcedure
+    // M5 — 30/min per user. 1-per-round → 1/2s headroom for bot
+    // contention; humans take 5–10s/round.
+    .use(mutationLimit('battles.submitAnswer', { perMin: 30 }))
     .input(
       battleIdInput.extend({
         roundId: z.string().uuid(),

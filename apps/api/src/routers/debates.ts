@@ -25,6 +25,7 @@
 import { TRPCError } from '@trpc/server';
 import { z } from 'zod';
 
+import { mutationLimit } from '../rate-limit.js';
 import { protectedProcedure, router } from '../trpc.js';
 
 const VERDICT_ROUND_NO = 3;
@@ -114,6 +115,8 @@ export const debatesRouter = router({
    * submitted, or deadline passed).
    */
   submitArgument: protectedProcedure
+    // M5 — 10/min per user. 100-2000 char text; humans type slow.
+    .use(mutationLimit('debates.submitArgument', { perMin: 10 }))
     .input(
       z.object({
         roundId: z.string().uuid(),

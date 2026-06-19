@@ -7,6 +7,7 @@ import { z } from 'zod';
 
 import type { Database } from '@diktat/db';
 
+import { mutationLimit } from '../rate-limit.js';
 import { protectedProcedure, router } from '../trpc.js';
 
 type Json = Database['public']['Tables']['users']['Row']['notification_preferences'];
@@ -122,6 +123,9 @@ export const userRouter = router({
   }),
 
   updateHandle: protectedProcedure
+    // M5 — 5/min per user. Tight; closes the handle-enumeration
+    // timing oracle (CLAUDE.md). 5/min makes scanning impractical.
+    .use(mutationLimit('user.updateHandle', { perMin: 5 }))
     .input(z.object({ handle: handleSchema }))
     .mutation(async ({ ctx, input }) => {
       const { data, error } = await ctx.db
@@ -152,25 +156,29 @@ export const userRouter = router({
       return data;
     }),
 
-  completeOnboarding: protectedProcedure.mutation(async ({ ctx }) => {
-    // Routes through SECURITY DEFINER `complete_onboarding()`
-    // (migration 20260618170000). Atomic conditional UPDATE stamps
-    // onboarded_at on first call; returns the existing value on
-    // subsequent calls. Idempotent + one-way — cannot un-onboard or
-    // backdate. Locked to auth.uid() inside the function body.
-    const { data, error } = await ctx.db.rpc('complete_onboarding');
-    if (error) {
-      throw new TRPCError({
-        code: 'INTERNAL_SERVER_ERROR',
-        message: 'Failed to complete onboarding.',
-        cause: error,
-      });
-    }
-    if (!data) {
-      throw new TRPCError({ code: 'NOT_FOUND', message: 'Profile not found.' });
-    }
-    return { id: ctx.userId, onboarded_at: data };
-  }),
+  completeOnboarding: protectedProcedure
+    // M5 — 10/min per user. Idempotent at the function layer; the
+    // budget prevents a stuck client from hammering the RPC.
+    .use(mutationLimit('user.completeOnboarding', { perMin: 10 }))
+    .mutation(async ({ ctx }) => {
+      // Routes through SECURITY DEFINER `complete_onboarding()`
+      // (migration 20260618170000). Atomic conditional UPDATE stamps
+      // onboarded_at on first call; returns the existing value on
+      // subsequent calls. Idempotent + one-way — cannot un-onboard or
+      // backdate. Locked to auth.uid() inside the function body.
+      const { data, error } = await ctx.db.rpc('complete_onboarding');
+      if (error) {
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message: 'Failed to complete onboarding.',
+          cause: error,
+        });
+      }
+      if (!data) {
+        throw new TRPCError({ code: 'NOT_FOUND', message: 'Profile not found.' });
+      }
+      return { id: ctx.userId, onboarded_at: data };
+    }),
 
   // Update notification preferences. Per-notification-type granularity —
   // V1 ships exactly one key (`streak_risk_push`); future types add their
@@ -179,6 +187,8 @@ export const userRouter = router({
   // caller didn't pass (race-tolerant: last-write-wins for settings-toggle
   // traffic is acceptable; the window is microseconds).
   updateNotificationPreferences: protectedProcedure
+    // M5 — 10/min per user.
+    .use(mutationLimit('user.updateNotificationPreferences', { perMin: 10 }))
     .input(
       z.object({
         streakRiskPush: z.boolean().optional(),
@@ -220,6 +230,8 @@ export const userRouter = router({
   // IANA name. Validate against the runtime's tz database
   // (Intl.supportedValuesOf('timeZone')) before writing.
   setTimezone: protectedProcedure
+    // M5 — 10/min per user.
+    .use(mutationLimit('user.setTimezone', { perMin: 10 }))
     .input(z.object({ timezone: timezoneSchema }))
     .mutation(async ({ ctx, input }) => {
       // Routes through SECURITY DEFINER `set_user_timezone(p_tz text)`

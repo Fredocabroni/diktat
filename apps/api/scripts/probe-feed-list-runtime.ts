@@ -93,6 +93,7 @@ async function main(): Promise<void> {
     db,
     bearerToken: bearer,
     redis: {} as Context['redis'],
+    clientIpCidr: 'probe-feed-list',
   };
 
   let result: { topics: unknown[] } | null = null;
