@@ -60,6 +60,14 @@ jobs:
         run: |
           set -o pipefail
           exit_code=$(cat review_exit_code 2>/dev/null || echo 1)
+          # check-review-output.sh contract:
+          #   exit 0 + stdout "ok"    → real review, post review_output.md.
+          #   exit 0 + stdout "empty" → no scope, post nothing.
+          #   exit 1 + stdout REASON  → upstream failure. REASON is a
+          #                              CONTROLLED string (classified
+          #                              message, no raw agent body).
+          #                              Post REASON, log raw stdout,
+          #                              exit 1.
           if status=$(.github/scripts/check-review-output.sh review_output.md "$exit_code"); then
             case "$status" in
               ok)
@@ -74,6 +82,14 @@ jobs:
                 ;;
             esac
           else
-            gh pr comment "$PR_NUMBER" --body-file review_output.md || true
+            # Failure branch: post the CONTROLLED reason from the
+            # script (NOT --body-file review_output.md). Exfil
+            # hardening per PR #51 round-1 security-reviewer M1.
+            # See claude-review.yml's matching block for the full
+            # rationale.
+            gh pr comment "$PR_NUMBER" --body "$status" || true
+            echo "::group::raw agent stdout (workflow log only — not posted to PR)"
+            cat review_output.md || true
+            echo "::endgroup::"
             exit 1
           fi
