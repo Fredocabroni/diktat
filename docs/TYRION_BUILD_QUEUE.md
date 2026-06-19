@@ -515,6 +515,32 @@ Every item below MUST land before the first non-test user is allowed to sign up.
 
   **Bundling**: pair with the queued prompt-tightening passes — the no-scope marker (require all subagents emit a `## Review — no files in scope` header even on empty scope, so the empty carveout in `check-review-output.sh` can go away) and the context-bleed Mode-A / Mode-B fixes from the entry above. Three prompt changes + the two-layer success-path hardening land in one PR.
 
+  **PR #54 security-reviewer F1 — structural M1 boundary guard at the call site (sharpest finding).** The current M1 controlled-reason discipline lives ENTIRELY inside `check-review-output.sh`; the workflow's `gh pr comment --body "$status"` trusts whatever `$status` is without a call-site cap or content check. If a future maintainer relaxes the script's reason-building (e.g. interpolates a `$body` substring into the reason for "better diagnostics"), agent content flows to the PR comment unredacted — exactly the regression M1 was designed to prevent. **Fix at the call site, not just the script**:
+
+  ```bash
+  status_safe=$(printf '%s' "$status" | head -c 500)
+  if printf '%s' "$status_safe" | grep -qE '^Reviewer gate (failed|skipped) '; then
+    gh pr comment "$PR_NUMBER" --body "$status_safe" || true
+  else
+    # The script returned a non-controlled-reason string. Refuse to post
+    # ANYTHING to the PR. Workflow log gets the raw body via the
+    # ::group:: below; the gate still fails red.
+    echo "::error::check-review-output.sh returned non-controlled-reason; refusing to post"
+  fi
+  ```
+
+  Apply at the failure branch in both `claude-review.yml` and `claude-migrate-review.yml`. Belt-and-suspenders against the most plausible future regression in this code.
+
+  **PR #54 security-reviewer F2 / F3–F7 (one-liners and doc notes that ride with the round-3 PR)**:
+  - **F2** — `matrix.reviewer.name` is interpolated via `${{ }}` into the step `name:` field at `claude-review.yml:14`. Today the matrix is static YAML so the surface is zero, but the pattern is unconstrained. If the matrix is ever sourced from `workflow_dispatch` inputs or `github.event.*`, that interpolation becomes a script-injection vector. Add an inline `# SAFE: matrix.reviewer.name must ONLY be sourced from static YAML — never from workflow_dispatch or github.event.*` comment adjacent to both interpolation sites (`name:` and the `Run ${{ matrix.reviewer.name }}` step).
+  - **F3** — TOCTOU risk on `review_exit_code` only applies on self-hosted runners with persistent workspaces. We run hosted-only today; document the constraint in `claude-review.yml`. If self-hosted is ever adopted, migrate `review_exit_code` to a step output (not workspace-file based) so a subsequent malicious step cannot rewrite it.
+  - **F4** — `review_output.md` / `review_exit_code` collision across matrix jobs within the same checkout. Hosted matrix jobs get isolated workspaces so this is theoretically a non-issue, but stamp the filenames with `${{ matrix.reviewer.name }}` (`review_output_${{ matrix.reviewer.name }}.md`) to lock the isolation in. One-line change.
+  - **F5** — `printf '%b' "$diag"` in `check-review-output.test.sh:112` interprets backslash-escapes correctly but mis-parses any `%` character in interpolated content. Today no fixture emits a `%`, but a future fixture or runtime output could. Switch to `printf '%s\n'` per line — single-line fix.
+  - **F6** — `awk 'NF{print; exit}'` inside `diagnose()` runs unbounded on a runaway body with a gigabyte-of-whitespace preamble. Pre-truncate via `head -c 102400` before awk: `first=$(head -c 102400 "$file" 2>/dev/null | awk 'NF{print; exit}' || echo "")`. One-line change at `check-review-output.sh` (one site for the `diagnose()` first-line capture).
+  - **F7** — `BASH_SOURCE[0]`-based `REPO_ROOT` in the test script assumes the script is invoked from the repo root. CI is fine (`actions/checkout` guarantees it). Add a one-line comment at the top of `check-review-output.test.sh`: `# Must be run from the repo root (BASH_SOURCE[0]-based path resolution).`
+
+  All seven (F1–F7) bundle into the round-3 PR. F1 is the load-bearing one; F2–F7 are one-liners that pay back the next time anyone touches the gate code.
+
   **Ride-along doc nits from PR #52 round-1 security-reviewer (round-3 territory)**:
   - **M2** — document the Zod-invariant comment at `apps/api/src/routers/wallet.ts:85` where `input.cursor.createdAt` (datetime) and `input.cursor.id` (uuid) are spliced into the PostgREST `.or(...)` filter string. Safe under the current Zod constraints (`z.string().datetime()` + `z.string().uuid()` restrict the character set to safe-for-PostgREST); brittle if either Zod constraint is ever relaxed during a refactor. One-line comment documents the invariant so the next editor doesn't loosen the Zod schema without also reshaping the `.or()` call.
   - **L1** — add a prominent `[PROD-CAUTION]` comment at the `drop index if exists public.ap_tx_user_recent_idx` line in `supabase/migrations/20260618220000_wallet_aggregate_pushdown_and_keyset_index.sql`. The migration header already notes the in-tx `DROP + CREATE` is instant on dev's 0-row table and that prod-scale rebuild needs `CONCURRENTLY` outside a transaction, but the WARNING needs to be at the exact line an on-call responder would copy/paste.
