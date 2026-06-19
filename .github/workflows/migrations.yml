@@ -1,0 +1,66 @@
+name: migrations-fresh-apply
+
+# Closes the [P0-before-prod] CI-doesn't-apply-migrations-to-a-fresh-DB
+# gap. Boots a clean local supabase stack on the GHA runner and applies
+# every migration in `supabase/migrations/` from empty. Any migration
+# error fails the step (and the job).
+#
+# Path-filtered: only runs when migrations or this workflow file change.
+# The fresh apply is deterministic given the migration set, so re-running
+# on a typo'd README change would just burn CI minutes.
+#
+# Pin posture: setup-cli is pinned to a full commit SHA — it installs
+# the binary that does the migration apply, so a compromised release
+# tag could mark a broken migration set as clean. Same trust-boundary
+# argument as the queued docs-only-guard paths-filter pin. Utility
+# actions (`actions/checkout`) keep the floating major tag that the
+# rest of the repo uses.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "supabase/migrations/**"
+      - ".github/workflows/migrations.yml"
+  push:
+    branches: [main]
+    paths:
+      - "supabase/migrations/**"
+      - ".github/workflows/migrations.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  fresh-apply:
+    name: migrations from empty
+    runs-on: ubuntu-latest
+    # Local stack boot is the slow step (~60–90s); reset is fast.
+    # 10 min is comfortable headroom for a 27-migration set.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      # supabase/setup-cli@v2.1.1 — pinned to the v2.1.1 release SHA
+      # (2026-05-21). Trust-boundary pin: a moved tag could install a
+      # doctored CLI that passes a broken migration set as clean.
+      - name: Install Supabase CLI
+        uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf # v2.1.1
+        with:
+          version: latest
+
+      # Boots Postgres + auth + storage + realtime in Docker (preinstalled
+      # on `ubuntu-latest`). Six of the 27 migrations reference auth.uid()
+      # / TO {authenticated,service_role,anon} / references auth.users, so
+      # the `auth` schema and the supabase roles MUST exist before the
+      # migration apply — bare Postgres would fail those migrations.
+      - name: Start local supabase stack
+        run: supabase start
+
+      # `supabase db reset` drops the local DB, recreates it, and applies
+      # every migration in `supabase/migrations/` in timestamp order from
+      # empty. No `--no-seed` needed: `supabase/seed.sql` does not exist
+      # in this repo. Non-zero exit on the first migration that errors;
+      # the job inherits that exit code.
+      - name: Apply all migrations from empty
+        run: supabase db reset
