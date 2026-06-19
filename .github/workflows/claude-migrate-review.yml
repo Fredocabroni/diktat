@@ -12,8 +12,53 @@ permissions:
   pull-requests: write
 
 jobs:
+  # Docs-only guard — harmonized with claude-review.yml. The
+  # workflow-level `paths:` filter already constrains triggers to
+  # supabase/migrations/** + packages/db/**, so this guard is mostly
+  # redundant on its current shape (those paths are always `code`).
+  # We add it anyway for symmetry with claude-review.yml and to
+  # future-proof against any widening of the workflow trigger.
+  changes:
+    name: classify-diff
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    if: ${{ vars.ENABLE_CLAUDE_REVIEW == 'true' }}
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+      docs: ${{ steps.filter.outputs.docs }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: filter
+        # dorny/paths-filter@v4.0.1 (SHA pin — trust-boundary action).
+        uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
+        with:
+          filters: |
+            code:
+              - 'apps/**'
+              - 'packages/**'
+              - 'supabase/migrations/**'
+              - '.github/**'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - 'turbo.json'
+              - 'tsconfig*.json'
+              - 'eslint.config.*'
+              - 'vitest.config.*'
+              - 'vite.config.*'
+              - '.nvmrc'
+              - '.npmrc'
+              - 'supabase/config.toml'
+            docs:
+              - 'docs/**'
+              - 'README*'
+              - '*.md'
+
   schema-review:
     name: schema-reviewer
+    needs: [changes]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # Gate via repo Variable: set ENABLE_CLAUDE_REVIEW=true to activate
@@ -28,6 +73,7 @@ jobs:
           node-version-file: .nvmrc
 
       - name: Install Claude Code
+        if: ${{ needs.changes.outputs.code == 'true' }}
         run: npm i -g @anthropic-ai/claude-code
 
       # Capture-then-post pattern, harmonized with claude-review.yml.
@@ -43,6 +89,7 @@ jobs:
       # code, and posts via gh pr comment from a step that does have
       # GH_TOKEN. Same gate-integrity script as claude-review.yml.
       - name: Run schema-reviewer
+        if: ${{ needs.changes.outputs.code == 'true' }}
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
@@ -54,6 +101,7 @@ jobs:
           set -e
 
       - name: Post review
+        if: ${{ needs.changes.outputs.code == 'true' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -93,3 +141,12 @@ jobs:
             echo "::endgroup::"
             exit 1
           fi
+
+      # Docs-only audit signal — harmonized with claude-review.yml.
+      # Compared to 'false' explicitly so the audit doesn't fire when
+      # `changes` was skipped via the ENABLE_CLAUDE_REVIEW vars gate.
+      - name: Audit — docs-only diff, reviewer skipped
+        if: ${{ needs.changes.outputs.code == 'false' }}
+        run: |
+          echo "docs-only diff — schema-reviewer agent skipped" >> "$GITHUB_STEP_SUMMARY"
+          echo "docs-only diff — schema-reviewer agent skipped"
