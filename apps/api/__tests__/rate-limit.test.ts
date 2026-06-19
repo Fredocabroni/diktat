@@ -58,30 +58,42 @@ async function runMiddleware(
 }
 
 describe('checkAndIncrementSingle', () => {
-  it('allows under-budget (current < limit) → allowed=true, current=N', async () => {
+  it('allows under-budget (current < limit) → allowed=true, current=N, ttl threaded', async () => {
     const redis = fakeRedis();
-    redis.evalReturn = 5;
+    // New Lua return shape: [cur, ttlSec].
+    redis.evalReturn = [5, 42];
     const r = await checkAndIncrementSingle(redis, 'rl:test:k', 10, 60, true);
-    expect(r).toEqual({ allowed: true, current: 5, redisDown: false });
+    expect(r).toEqual({ allowed: true, current: 5, retryAfterSec: 42, redisDown: false });
   });
 
   it('allows AT-budget (current === limit)', async () => {
     const redis = fakeRedis();
-    redis.evalReturn = 10;
+    redis.evalReturn = [10, 30];
     const r = await checkAndIncrementSingle(redis, 'rl:test:k', 10, 60, true);
     expect(r.allowed).toBe(true);
     expect(r.current).toBe(10);
+    expect(r.retryAfterSec).toBe(30);
   });
 
-  it('denies OVER-budget (current > limit) → allowed=false', async () => {
+  it('denies OVER-budget (current > limit) → allowed=false, retryAfter from TTL', async () => {
     const redis = fakeRedis();
-    redis.evalReturn = 11;
+    redis.evalReturn = [11, 17];
     const r = await checkAndIncrementSingle(redis, 'rl:test:k', 10, 60, true);
     expect(r.allowed).toBe(false);
     expect(r.current).toBe(11);
+    expect(r.retryAfterSec).toBe(17);
   });
 
-  it('Redis-throw with failOpen=true → allowed=true, redisDown=true', async () => {
+  it('accepts legacy single-number Lua return; ttl falls back to windowSec', async () => {
+    const redis = fakeRedis();
+    redis.evalReturn = 7; // legacy shape, missing ttl
+    const r = await checkAndIncrementSingle(redis, 'rl:test:k', 10, 60, true);
+    expect(r.allowed).toBe(true);
+    expect(r.current).toBe(7);
+    expect(r.retryAfterSec).toBe(60);
+  });
+
+  it('Redis-throw with failOpen=true → allowed=true, redisDown=true, retryAfter=windowSec', async () => {
     const redis: RedisClient = {
       ...fakeRedis(),
 
@@ -90,7 +102,12 @@ describe('checkAndIncrementSingle', () => {
       },
     };
     const r = await checkAndIncrementSingle(redis, 'rl:test:k', 10, 60, true);
-    expect(r).toEqual({ allowed: true, current: -1, redisDown: true });
+    expect(r).toEqual({
+      allowed: true,
+      current: -1,
+      retryAfterSec: 60,
+      redisDown: true,
+    });
   });
 
   it('Redis-throw with failOpen=false → allowed=false, redisDown=true', async () => {
@@ -102,42 +119,60 @@ describe('checkAndIncrementSingle', () => {
       },
     };
     const r = await checkAndIncrementSingle(redis, 'rl:test:k', 10, 60, false);
-    expect(r).toEqual({ allowed: false, current: -1, redisDown: true });
+    expect(r).toEqual({
+      allowed: false,
+      current: -1,
+      retryAfterSec: 60,
+      redisDown: true,
+    });
   });
 });
 
 describe('checkAndIncrementCombined (aiSpend two-gate atomic)', () => {
-  it('allowed when Lua returns [1, "", d, b]', async () => {
+  it('allowed when Lua returns [1, "", d, b, -1]; retryAfter is -1', async () => {
     const redis = fakeRedis();
-    redis.evalReturn = [1, '', 5, 1];
+    // New 5-tuple shape: [allowed, deniedBy, d, b, ttl].
+    redis.evalReturn = [1, '', 5, 1, -1];
     const r = await checkAndIncrementCombined(redis, 'rl:ai:k:d', 'rl:ai:k:b', 20, 3, false);
     expect(r).toEqual({
       allowed: true,
       deniedBy: '',
       dailyCount: 5,
       burstCount: 1,
+      retryAfterSec: -1,
       redisDown: false,
     });
   });
 
-  it('denied by daily when Lua returns [0, "daily", d, b]', async () => {
+  it('denied by daily → retryAfter is the daily-key TTL (e.g. 70000s)', async () => {
     const redis = fakeRedis();
-    redis.evalReturn = [0, 'daily', 20, 1];
+    // Daily denial: ttl is the remaining seconds on the daily key.
+    redis.evalReturn = [0, 'daily', 20, 1, 70_000];
     const r = await checkAndIncrementCombined(redis, 'rl:ai:k:d', 'rl:ai:k:b', 20, 3, false);
     expect(r.allowed).toBe(false);
     expect(r.deniedBy).toBe('daily');
     expect(r.dailyCount).toBe(20);
     expect(r.burstCount).toBe(1);
+    expect(r.retryAfterSec).toBe(70_000); // Not 60 — full daily-window remainder.
   });
 
-  it('denied by burst when Lua returns [0, "burst", d, b]', async () => {
+  it('denied by burst → retryAfter is the burst-key TTL (e.g. 30s)', async () => {
     const redis = fakeRedis();
-    redis.evalReturn = [0, 'burst', 5, 3];
+    redis.evalReturn = [0, 'burst', 5, 3, 30];
     const r = await checkAndIncrementCombined(redis, 'rl:ai:k:d', 'rl:ai:k:b', 20, 3, false);
     expect(r.allowed).toBe(false);
     expect(r.deniedBy).toBe('burst');
     expect(r.dailyCount).toBe(5);
     expect(r.burstCount).toBe(3);
+    expect(r.retryAfterSec).toBe(30);
+  });
+
+  it('denied with ttl<=0 (Redis edge case) → retryAfter falls back to the window length', async () => {
+    const redis = fakeRedis();
+    redis.evalReturn = [0, 'daily', 20, 1, 0];
+    const r = await checkAndIncrementCombined(redis, 'rl:ai:k:d', 'rl:ai:k:b', 20, 3, false);
+    expect(r.allowed).toBe(false);
+    expect(r.retryAfterSec).toBe(86_400); // DAILY_WINDOW_SEC fall-back
   });
 
   it('Redis-throw with failOpen=false → denied', async () => {

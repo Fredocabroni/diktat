@@ -6,9 +6,17 @@
 import { verifyJwt } from '@diktat/auth';
 import { Redis } from '@upstash/redis';
 import type { FastifyRequest } from 'fastify';
+import { z } from 'zod';
 
 import type { Env } from './env.js';
 import { userScopedClient, type DbClient } from './supabase.js';
+
+// JWT `sub` claim — must be a UUID. Supabase mints `sub = auth.users.id`
+// which is always uuid v4. Validating here closes a key-corruption
+// vector: a crafted JWT with `sub = "x:extra:field"` would otherwise
+// produce malformed Redis keys like `rl:mut:battles.submitAnswer:u:x:
+// extra:field:12345`. PR #56 r2 security-reviewer MEDIUM-sub-validation.
+const subjectSchema = z.string().uuid();
 
 /**
  * Minimal Redis surface the routers depend on. Lets tests substitute
@@ -137,25 +145,40 @@ export function normalizeIpToCidr(rawIp: string): string {
  *   `2001:db8::1`     → ['2001','db8','0','0','0','0','0','1']
  *   `fe80::1:2:3:4`   → ['fe80','0','0','0','1','2','3','4']
  */
+// Each hextet must be 1–4 hex digits. Otherwise the function returns
+// null and normalizeIpToCidr classifies as 'ip-malformed-v6'. Without
+// this guard a value like `::ZZZZ:1` would pass the structural check
+// and produce a key like `rl:pub:auth.session:ip:0:0:0:0:ZZZZ:1::/64`.
+// PR #56 r2 security-reviewer L-hextet-validation.
+const HEXTET_RE = /^[0-9a-fA-F]{1,4}$/;
+
 function expandIPv6(ip: string): string[] | null {
   const dcIndex = ip.indexOf('::');
+  let expanded: string[];
   if (dcIndex === -1) {
     const parts = ip.split(':');
-    return parts.length === 8 ? parts : null;
+    if (parts.length !== 8) return null;
+    expanded = parts;
+  } else {
+    // Split on `::` into head and tail. Each half is `:`-separated;
+    // empty strings (from leading or trailing `::`) are filtered.
+    const head = ip
+      .slice(0, dcIndex)
+      .split(':')
+      .filter((p) => p !== '');
+    const tail = ip
+      .slice(dcIndex + 2)
+      .split(':')
+      .filter((p) => p !== '');
+    const gap = 8 - head.length - tail.length;
+    if (gap < 0) return null; // already 8 hextets — `::` is redundant/illegal
+    expanded = [...head, ...Array.from({ length: gap }, () => '0'), ...tail];
   }
-  // Split on `::` into head and tail. Each half is `:`-separated;
-  // empty strings (from leading or trailing `::`) are filtered.
-  const head = ip
-    .slice(0, dcIndex)
-    .split(':')
-    .filter((p) => p !== '');
-  const tail = ip
-    .slice(dcIndex + 2)
-    .split(':')
-    .filter((p) => p !== '');
-  const gap = 8 - head.length - tail.length;
-  if (gap < 0) return null; // already 8 hextets — `::` is redundant/illegal
-  return [...head, ...Array.from({ length: gap }, () => '0'), ...tail];
+  // Validate every hextet. The Array.fill('0') gaps satisfy the regex.
+  for (const h of expanded) {
+    if (!HEXTET_RE.test(h)) return null;
+  }
+  return expanded;
 }
 
 export async function buildContext(env: Env, req: FastifyRequest): Promise<Context> {
@@ -175,7 +198,11 @@ export async function buildContext(env: Env, req: FastifyRequest): Promise<Conte
           : { secret: env.SUPABASE_JWT_SECRET }),
         ...(env.SUPABASE_JWT_ISSUER ? { issuer: env.SUPABASE_JWT_ISSUER } : {}),
       });
-      userId = claims.sub;
+      // Parse rather than assume — see subjectSchema header. A throw
+      // here cascades to the catch below and the request is treated
+      // as anon, which is the correct posture (a malformed sub means
+      // the JWT verifier returned something we can't safely embed).
+      userId = subjectSchema.parse(claims.sub);
       role = claims.role;
       verifiedToken = rawBearer;
     } catch {

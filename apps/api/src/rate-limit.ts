@@ -58,65 +58,31 @@
 import { TRPCError } from '@trpc/server';
 
 import type { RedisClient } from './context.js';
+// Implementation details (Lua scripts, key builders, window sizes) live
+// in `rate-limit.internal.ts`. Production code MUST NOT import from
+// `.internal.ts` — only the middleware factories defined below should.
+// PR #56 r2 security-reviewer L-internals.
+import {
+  authedKey,
+  BURST_WINDOW_SEC,
+  COMBINED_ATOMIC_LUA,
+  DAILY_WINDOW_SEC,
+  GLOBAL_PROCEDURE_NAME,
+  GLOBAL_WINDOW_SEC,
+  MUTATION_WINDOW_SEC,
+  publicKey,
+  PUBLIC_WINDOW_SEC,
+  SINGLE_GATE_LUA,
+} from './rate-limit.internal.js';
 import { middleware } from './trpc.js';
 
-// ---------------------------------------------------------------------------
-// Lua scripts
-// ---------------------------------------------------------------------------
+// Lua scripts, key builders, window sizes are imported above from
+// `rate-limit.internal.ts` (see header). Everything below operates on
+// those imports.
 
-// Single-gate fixed-window: INCR-then-check semantics in the CALLER
-// (Lua only does the atomic INCR+EXPIRE). The TS layer compares the
-// returned counter to the limit. Denied calls increment the counter.
-const SINGLE_GATE_LUA = `
-local cur = redis.call('INCR', KEYS[1])
-if cur == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end
-return cur
-`.trim();
-
-// Combined-atomic two-gate fixed-window: check-then-INCR semantics
-// across BOTH counters. Returns {allowed, deniedBy, dailyCount,
-// burstCount} so the caller can build a precise error message.
-// KEYS[1] = daily key, KEYS[2] = burst key.
-// ARGV: dailyLimit, dailyWindowSec, burstLimit, burstWindowSec.
-// EXPIRE is set EXCLUSIVELY on the first INCR (cur == 1) of each key.
-// Intentional: this is a FIXED-WINDOW limiter aligned to the
-// {windowStart} key suffix the TS caller embeds. Each window is a
-// new key; TTL only needs to be set once on creation. NOT a sliding
-// window — do NOT add a refresh on subsequent INCRs or the daily
-// counter would never roll over. (PR #56 r1 security-reviewer L-clarity.)
-const COMBINED_ATOMIC_LUA = `
-local d = tonumber(redis.call('GET', KEYS[1]) or '0')
-local b = tonumber(redis.call('GET', KEYS[2]) or '0')
-local d_limit = tonumber(ARGV[1])
-local b_limit = tonumber(ARGV[3])
-if d >= d_limit then return {0, 'daily', d, b} end
-if b >= b_limit then return {0, 'burst', d, b} end
-d = redis.call('INCR', KEYS[1])
--- EXPIRE set ONCE on the first INCR of this window-keyed counter.
--- Fixed-window: each new windowStart minted by the TS caller is a
--- new key; refreshing the TTL on later INCRs would defeat rollover.
-if d == 1 then redis.call('EXPIRE', KEYS[1], ARGV[2]) end
-b = redis.call('INCR', KEYS[2])
-if b == 1 then redis.call('EXPIRE', KEYS[2], ARGV[4]) end
-return {1, '', d, b}
-`.trim();
-
-// ---------------------------------------------------------------------------
-// Window-start computation
-// ---------------------------------------------------------------------------
-
-const MS_PER_SEC = 1_000;
-
-function windowStart(nowMs: number, windowSec: number): number {
-  return Math.floor(nowMs / (windowSec * MS_PER_SEC));
-}
-
-// Day window for AI spend: align to UTC day boundary so the user's
-// daily budget rolls over at midnight UTC, not on a sliding 24h.
-const DAILY_WINDOW_SEC = 86_400;
-const BURST_WINDOW_SEC = 60;
-const MUTATION_WINDOW_SEC = 60;
-const PUBLIC_WINDOW_SEC = 60;
+// (Lua scripts, window sizes, and key builders all live in
+// `rate-limit.internal.ts` — see the import block at the top of this
+// file. This module composes them into the public middleware factories.)
 
 // ---------------------------------------------------------------------------
 // Shared checkAndIncrement helpers — exported for the Fastify outer hook
@@ -126,6 +92,8 @@ const PUBLIC_WINDOW_SEC = 60;
 export interface SingleGateResult {
   readonly allowed: boolean;
   readonly current: number;
+  /** Seconds until the window key expires. Used for Retry-After. */
+  readonly retryAfterSec: number;
   /** True if the helper short-circuited due to a thrown Redis error. */
   readonly redisDown: boolean;
 }
@@ -139,15 +107,30 @@ export async function checkAndIncrementSingle(
 ): Promise<SingleGateResult> {
   try {
     const raw = await redis.eval(SINGLE_GATE_LUA, [key], [windowSec]);
-    const current = typeof raw === 'number' ? raw : Number(raw);
+    // SINGLE_GATE_LUA returns [cur, ttl]. Accept legacy single-number
+    // returns as well (cur only, ttl = window) so a half-deployed
+    // helper doesn't crash — bounded by Number.isFinite below.
+    let current: number;
+    let ttlSec: number;
+    if (Array.isArray(raw) && raw.length >= 2) {
+      current = Number(raw[0]);
+      ttlSec = Number(raw[1]);
+    } else {
+      current = typeof raw === 'number' ? raw : Number(raw);
+      ttlSec = windowSec;
+    }
     if (!Number.isFinite(current)) {
       // Bad return — treat as Redis-down and use failOpen policy.
-      return { allowed: failOpen, current: -1, redisDown: true };
+      return { allowed: failOpen, current: -1, retryAfterSec: windowSec, redisDown: true };
     }
-    return { allowed: current <= limit, current, redisDown: false };
+    // TTL <= 0 fall-back: -1 means no TTL set, -2 means key missing.
+    // Either should not happen post-INCR+EXPIRE, but if it does,
+    // advise clients to wait one window length.
+    const retryAfterSec = ttlSec > 0 ? Math.ceil(ttlSec) : windowSec;
+    return { allowed: current <= limit, current, retryAfterSec, redisDown: false };
   } catch {
     // Upstash REST timeout / network / parse error.
-    return { allowed: failOpen, current: -1, redisDown: true };
+    return { allowed: failOpen, current: -1, retryAfterSec: windowSec, redisDown: true };
   }
 }
 
@@ -156,6 +139,12 @@ export interface CombinedGateResult {
   readonly deniedBy: 'daily' | 'burst' | '';
   readonly dailyCount: number;
   readonly burstCount: number;
+  /**
+   * Seconds until the denying key expires. -1 on allowed path. Used
+   * for an accurate Retry-After header — a daily deny carries up to
+   * 86400s; a burst deny carries up to 60s.
+   */
+  readonly retryAfterSec: number;
   readonly redisDown: boolean;
 }
 
@@ -172,13 +161,15 @@ export async function checkAndIncrementCombined(
       COMBINED_ATOMIC_LUA,
       [dailyKey, burstKey],
       [dailyLimit, DAILY_WINDOW_SEC, burstLimit, BURST_WINDOW_SEC],
-    )) as [number | string, string, number | string, number | string];
-    if (!Array.isArray(raw) || raw.length !== 4) {
+    )) as [number | string, string, number | string, number | string, number | string];
+    // COMBINED_ATOMIC_LUA returns 5-tuple [allowed, deniedBy, d, b, ttl].
+    if (!Array.isArray(raw) || raw.length < 4) {
       return {
         allowed: failOpen,
         deniedBy: '',
         dailyCount: -1,
         burstCount: -1,
+        retryAfterSec: BURST_WINDOW_SEC,
         redisDown: true,
       };
     }
@@ -188,11 +179,24 @@ export async function checkAndIncrementCombined(
       (raw[1] as string) === 'daily' || (raw[1] as string) === 'burst'
         ? (raw[1] as 'daily' | 'burst')
         : '';
+    const ttlRaw = raw.length >= 5 ? Number(raw[4]) : -1;
+    // Allowed path: TTL is meaningless; ignore. Deny path: TTL <= 0
+    // shouldn't happen (key just GET'd successfully), but fall back to
+    // the window length of the denying gate.
+    let retryAfterSec: number;
+    if (allowed) {
+      retryAfterSec = -1;
+    } else if (ttlRaw > 0) {
+      retryAfterSec = Math.ceil(ttlRaw);
+    } else {
+      retryAfterSec = deniedBy === 'daily' ? DAILY_WINDOW_SEC : BURST_WINDOW_SEC;
+    }
     return {
       allowed,
       deniedBy,
       dailyCount: Number(raw[2]),
       burstCount: Number(raw[3]),
+      retryAfterSec,
       redisDown: false,
     };
   } catch {
@@ -201,27 +205,10 @@ export async function checkAndIncrementCombined(
       deniedBy: '',
       dailyCount: -1,
       burstCount: -1,
+      retryAfterSec: BURST_WINDOW_SEC,
       redisDown: true,
     };
   }
-}
-
-// ---------------------------------------------------------------------------
-// Key builders
-// ---------------------------------------------------------------------------
-
-function authedKey(
-  tier: 'ai' | 'mut',
-  procedure: string,
-  userId: string,
-  windowSec: number,
-  nowMs: number,
-): string {
-  return `rl:${tier}:${procedure}:u:${userId}:${windowStart(nowMs, windowSec)}`;
-}
-
-function publicKey(procedure: string, cidr: string, windowSec: number, nowMs: number): string {
-  return `rl:pub:${procedure}:ip:${cidr}:${windowStart(nowMs, windowSec)}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -270,13 +257,34 @@ export function aiSpendLimit(procedure: string, opts: AiSpendOpts) {
       throw new TRPCError({
         code: 'TOO_MANY_REQUESTS',
         message: 'Rate limit unavailable. Try again shortly.',
+        cause: { retryAfterSec: BURST_WINDOW_SEC } as unknown as Error,
       });
     }
     if (!result.allowed) {
-      const which = result.deniedBy === 'burst' ? 'burst (3/min)' : 'daily';
+      // Wire message redacts the numeric cap — server-side log gets
+      // the full classification. Disclosing "(burst (3/min))" lets an
+      // adversary calibrate just under the cap. PR #56 r2 reviewer
+      // MEDIUM-redaction.
+      const which = result.deniedBy === 'burst' ? 'burst' : 'daily';
+
+      console.warn(
+        JSON.stringify({
+          event: 'rate_limit.deny',
+          tier: 'ai',
+          procedure,
+          deniedBy: result.deniedBy,
+          dailyCount: result.dailyCount,
+          burstCount: result.burstCount,
+          retryAfterSec: result.retryAfterSec,
+        }),
+      );
       throw new TRPCError({
         code: 'TOO_MANY_REQUESTS',
         message: `Rate limit exceeded (${which}).`,
+        // Carries retryAfterSec through to responseMeta in server.ts
+        // so the Retry-After header reflects the ACTUAL window of the
+        // denying gate — 86400s for daily, 60s for burst.
+        cause: { retryAfterSec: result.retryAfterSec } as unknown as Error,
       });
     }
     return next();
@@ -326,6 +334,7 @@ export function mutationLimit(procedure: string, opts: MutationOpts) {
       throw new TRPCError({
         code: 'TOO_MANY_REQUESTS',
         message: 'Rate limit exceeded.',
+        cause: { retryAfterSec: result.retryAfterSec } as unknown as Error,
       });
     }
     return next();
@@ -362,6 +371,7 @@ export function publicLimit(procedure: string, opts: PublicOpts) {
       throw new TRPCError({
         code: 'TOO_MANY_REQUESTS',
         message: 'Rate limit exceeded.',
+        cause: { retryAfterSec: result.retryAfterSec } as unknown as Error,
       });
     }
     return next();
@@ -384,15 +394,12 @@ export function publicLimit(procedure: string, opts: PublicOpts) {
  * `nowMs` parameter allows deterministic testing; production passes
  * `Date.now()`.
  */
-const GLOBAL_PROCEDURE_NAME = '__global__';
-const GLOBAL_WINDOW_SEC = 60;
-
 export async function checkGlobalOuterHook(opts: {
   redis: RedisClient;
   ipCidr: string;
   perMin: number;
   nowMs?: number;
-}): Promise<{ allowed: boolean; current: number; redisDown: boolean }> {
+}): Promise<SingleGateResult> {
   const now = opts.nowMs ?? Date.now();
   const key = publicKey(GLOBAL_PROCEDURE_NAME, opts.ipCidr, GLOBAL_WINDOW_SEC, now);
   const result = await checkAndIncrementSingle(
@@ -414,20 +421,8 @@ export async function checkGlobalOuterHook(opts: {
   return result;
 }
 
-// ---------------------------------------------------------------------------
-// Exposed for fixture tests
-// ---------------------------------------------------------------------------
-
-export const __internals = {
-  SINGLE_GATE_LUA,
-  COMBINED_ATOMIC_LUA,
-  windowStart,
-  authedKey,
-  publicKey,
-  DAILY_WINDOW_SEC,
-  BURST_WINDOW_SEC,
-  MUTATION_WINDOW_SEC,
-  PUBLIC_WINDOW_SEC,
-  GLOBAL_WINDOW_SEC,
-  GLOBAL_PROCEDURE_NAME,
-};
+// The previous `export const __internals = {...}` lived here. It moved
+// to `rate-limit.internal.ts` to keep the Lua scripts and key builders
+// out of `rate-limit.ts`'s public surface (PR #56 r2 security-reviewer
+// L-internals). Test files import the fixture surface from
+// `rate-limit.internal.ts` directly.
