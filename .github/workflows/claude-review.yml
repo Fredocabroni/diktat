@@ -78,31 +78,50 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           REVIEW_PROMPT: ${{ matrix.reviewer.prompt }}
-        # `|| true` kept on purpose: these reviewers are advisory-but-
-        # visible. A real blocking gate (parseable verdict → exit code
-        # → fail the job on BLOCK) is logged as future work; not built
-        # tonight.
+        # The previous `|| true` swallowed claude -p's exit code,
+        # silently green-stamping any API failure as "no scope" (PRs
+        # #48, #49, #50 — Anthropic credit exhaustion). We now CAPTURE
+        # the exit code to a file; the Post step gates on both
+        # (claude exit == 0) AND (markdown header present in output).
+        # See .github/scripts/check-review-output.sh for the detection.
         run: |
+          set +e
           claude -p "$REVIEW_PROMPT" \
             --model claude-sonnet-4-6 \
-            --output-format text > review_output.md || true
+            --output-format text > review_output.md
+          echo "$?" > review_exit_code
+          set -e
 
-      # Post the captured report as a PR comment. The guard checks
-      # for SUBSTANTIVE content (non-whitespace), not just file size:
-      # when a reviewer's watch-paths see no matching changes in the
-      # PR diff, the agent legitimately produces whitespace-only output,
-      # which `[ -s ]` alone misreads as "post this". GitHub's API
-      # then rejects the blank body with
-      # `GraphQL: Body cannot be blank (addComment)` and the Post step
-      # fails the job for no real reason. Strip whitespace before the
-      # check.
+      # Gate the captured output via the shared detection script. The
+      # script exits 0 + "ok" for a real review (header present);
+      # 0 + "empty" for legitimate no-scope (no comment posted);
+      # 1 for any upstream failure (body posted for visibility, job
+      # fails red). This replaces the prior whitespace-only check
+      # which couldn't tell a legitimate empty from a credit-error
+      # body that just lacked a header.
       - name: Post review
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          if [ -s review_output.md ] && [ -n "$(tr -d '[:space:]' < review_output.md)" ]; then
-            gh pr comment "$PR_NUMBER" --body-file review_output.md
+          set -o pipefail
+          exit_code=$(cat review_exit_code 2>/dev/null || echo 1)
+          if status=$(.github/scripts/check-review-output.sh review_output.md "$exit_code"); then
+            case "$status" in
+              ok)
+                gh pr comment "$PR_NUMBER" --body-file review_output.md
+                ;;
+              empty)
+                echo "reviewer produced no substantive output (no files in scope)"
+                ;;
+              *)
+                echo "::error::unrecognized status from check-review-output.sh: $status"
+                exit 1
+                ;;
+            esac
           else
-            echo "reviewer produced no substantive output (file empty or whitespace-only)"
+            # Detection failed. Post the body anyway so the upstream
+            # error message is visible on the PR — then fail the job.
+            gh pr comment "$PR_NUMBER" --body-file review_output.md || true
+            exit 1
           fi
