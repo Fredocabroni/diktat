@@ -30,17 +30,50 @@ jobs:
       - name: Install Claude Code
         run: npm i -g @anthropic-ai/claude-code
 
-      # `|| true` normalizes this reviewer to advisory posture, matching
-      # the three reviewers in claude-review.yml. Without it, a transient
-      # claude exit (rate limit, network blip, API hiccup) hard-fails
-      # schema-reviewer and blocks the PR even though the verdict was
-      # never produced. The full posting redesign (agent writes file,
-      # workflow posts via gh pr comment) is deferred to a follow-up PR
-      # so this PR stays scoped to the advisory-posture normalization.
+      # Capture-then-post pattern, harmonized with claude-review.yml.
+      # The prior legacy shape asked the agent to shell out to
+      # `gh pr comment` itself — claude -p's headless Bash-permission
+      # gate blocked that call, and the step also had no GH_TOKEN in
+      # env, so schema-reviewer never actually posted ANY comment.
+      # The check exited 0 from `|| true` and the silent-APPROVE
+      # shape we saw on PRs #45 / #46 was the consequence: a check
+      # bucket with a green tick and no body.
+      #
+      # The new shape captures stdout to a file, captures the exit
+      # code, and posts via gh pr comment from a step that does have
+      # GH_TOKEN. Same gate-integrity script as claude-review.yml.
       - name: Run schema-reviewer
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          claude -p "Run the schema-reviewer subagent on the supabase/migrations/ files changed in this PR. Post the verdict (APPROVE or BLOCK) and full checklist as a PR comment via gh." \
+          set +e
+          claude -p "Run the schema-reviewer subagent on the supabase/migrations/ files changed in this PR. Output ONLY the review report in markdown — no preamble, no commentary, no closing remarks. Do not attempt to post it or run any shell command." \
             --model claude-sonnet-4-6 \
-            --output-format text || true
+            --output-format text > review_output.md
+          echo "$?" > review_exit_code
+          set -e
+
+      - name: Post review
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -o pipefail
+          exit_code=$(cat review_exit_code 2>/dev/null || echo 1)
+          if status=$(.github/scripts/check-review-output.sh review_output.md "$exit_code"); then
+            case "$status" in
+              ok)
+                gh pr comment "$PR_NUMBER" --body-file review_output.md
+                ;;
+              empty)
+                echo "schema-reviewer produced no substantive output (no files in scope)"
+                ;;
+              *)
+                echo "::error::unrecognized status from check-review-output.sh: $status"
+                exit 1
+                ;;
+            esac
+          else
+            gh pr comment "$PR_NUMBER" --body-file review_output.md || true
+            exit 1
+          fi

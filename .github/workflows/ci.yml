@@ -45,3 +45,12 @@ jobs:
 
       - name: Test
         run: pnpm turbo test
+
+      # Reviewer gate-integrity script test. Runs against fixtures of
+      # real review bodies + every observed and likely upstream error
+      # shape; needs no Anthropic credits. Proves both directions:
+      # real reviews pass, errors fail red. Future regressions in
+      # .github/scripts/check-review-output.sh are caught here before
+      # they ship.
+      - name: Verify reviewer gate-integrity script
+        run: bash .github/scripts/__tests__/check-review-output.test.sh
