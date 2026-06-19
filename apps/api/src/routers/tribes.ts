@@ -7,26 +7,34 @@
 import { TRPCError } from '@trpc/server';
 import { z } from 'zod';
 
+import { mutationLimit, publicLimit } from '../rate-limit.js';
 import { protectedProcedure, publicProcedure, router } from '../trpc.js';
 
 export const tribesRouter = router({
-  list: publicProcedure.query(async ({ ctx }) => {
-    const { data, error } = await ctx.db
-      .from('tribes')
-      .select('id, slug, name, description, manifesto')
-      .order('name', { ascending: true });
+  list: publicProcedure
+    // M5 — 300/min per IP /24. Read-only, client-cacheable, called by
+    // the onboarding tribe-picker.
+    .use(publicLimit('tribes.list', { perMin: 300 }))
+    .query(async ({ ctx }) => {
+      const { data, error } = await ctx.db
+        .from('tribes')
+        .select('id, slug, name, description, manifesto')
+        .order('name', { ascending: true });
 
-    if (error) {
-      throw new TRPCError({
-        code: 'INTERNAL_SERVER_ERROR',
-        message: 'Failed to load tribes.',
-        cause: error,
-      });
-    }
-    return data ?? [];
-  }),
+      if (error) {
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message: 'Failed to load tribes.',
+          cause: error,
+        });
+      }
+      return data ?? [];
+    }),
 
   join: protectedProcedure
+    // M5 — 5/min per user. Tribe-switching mid-session is rare; tight
+    // budget shouldn't pinch real users.
+    .use(mutationLimit('tribes.join', { perMin: 5 }))
     .input(z.object({ tribeId: z.string().uuid() }))
     .mutation(async ({ ctx, input }) => {
       const { data, error } = await ctx.db

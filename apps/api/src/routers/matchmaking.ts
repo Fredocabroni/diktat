@@ -13,7 +13,12 @@
 import { TRPCError } from '@trpc/server';
 import { z } from 'zod';
 
+import { mutationLimit } from '../rate-limit.js';
 import { protectedProcedure, router } from '../trpc.js';
+
+// Shared rate-limit budget for the enqueue/cancel pair so cycling
+// enqueue+cancel rapidly doesn't slip past the per-procedure cap.
+const MATCHMAKING_SHARED_KEY = 'matchmaking';
 
 const modeSchema = z.enum(['trivia', 'open_debate']);
 type Mode = z.infer<typeof modeSchema>;
@@ -56,6 +61,10 @@ function parseJson<T>(raw: unknown): T | null {
 
 export const matchmakingRouter = router({
   enqueue: protectedProcedure
+    // M5 — 20/min per user, SHARED counter with `cancel`. Cycling
+    // enqueue+cancel is a Redis-sorted-set thrash vector; the shared
+    // counter caps combined throughput.
+    .use(mutationLimit('matchmaking.enqueue', { perMin: 20, sharedKey: MATCHMAKING_SHARED_KEY }))
     .input(
       z
         .object({
@@ -137,6 +146,8 @@ export const matchmakingRouter = router({
     }),
 
   cancel: protectedProcedure
+    // M5 — shared 20/min counter with `enqueue` (same MATCHMAKING_SHARED_KEY).
+    .use(mutationLimit('matchmaking.cancel', { perMin: 20, sharedKey: MATCHMAKING_SHARED_KEY }))
     .input(z.object({ mode: modeSchema }))
     .mutation(async ({ ctx, input }) => {
       const removed = await ctx.redis.zrem(queueKey(input.mode), ctx.userId!);

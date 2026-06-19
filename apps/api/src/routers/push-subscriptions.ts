@@ -25,8 +25,13 @@
 import { TRPCError } from '@trpc/server';
 import { z } from 'zod';
 
+import { mutationLimit } from '../rate-limit.js';
 import { protectedProcedure, router } from '../trpc.js';
 import { serviceRoleClient } from '../supabase.js';
+
+// Shared rate-limit budget for the register/unregister pair so
+// re-grant flapping doesn't slip past the per-procedure cap.
+const PUSH_SUBS_SHARED_KEY = 'pushSubs';
 
 // Endpoint validation. The push service hands the browser an opaque HTTPS
 // URL; the workers process then POSTs a VAPID-signed envelope to it. To
@@ -115,57 +120,66 @@ export const pushSubscriptionsRouter = router({
   // for the same (user, endpoint) pair. Service-role write because the
   // UPSERT must clear disabled_at / disabled_reason — fields RLS blocks
   // self-UPDATE of. ctx.userId is the only user_id ever written.
-  register: protectedProcedure.input(registerInput).mutation(async ({ ctx, input }) => {
-    const service = serviceRoleClient(ctx.env);
-    const { data, error } = await service
-      .from('user_push_subscriptions')
-      .upsert(
-        {
-          user_id: ctx.userId,
-          endpoint: input.endpoint,
-          p256dh: input.p256dh,
-          auth: input.auth,
-          user_agent: input.userAgent ?? null,
-          disabled_at: null,
-          disabled_reason: null,
-        },
-        { onConflict: 'user_id,endpoint' },
-      )
-      .select('id, endpoint, created_at')
-      .maybeSingle();
+  register: protectedProcedure
+    // M5 — 10/min, SHARED counter with `unregister`. Tight enough to
+    // bot-cap; loose enough for a normal device-grant flow.
+    .use(mutationLimit('pushSubs.register', { perMin: 10, sharedKey: PUSH_SUBS_SHARED_KEY }))
+    .input(registerInput)
+    .mutation(async ({ ctx, input }) => {
+      const service = serviceRoleClient(ctx.env);
+      const { data, error } = await service
+        .from('user_push_subscriptions')
+        .upsert(
+          {
+            user_id: ctx.userId,
+            endpoint: input.endpoint,
+            p256dh: input.p256dh,
+            auth: input.auth,
+            user_agent: input.userAgent ?? null,
+            disabled_at: null,
+            disabled_reason: null,
+          },
+          { onConflict: 'user_id,endpoint' },
+        )
+        .select('id, endpoint, created_at')
+        .maybeSingle();
 
-    if (error) {
-      throw new TRPCError({
-        code: 'INTERNAL_SERVER_ERROR',
-        message: 'Failed to register push subscription.',
-        cause: error,
-      });
-    }
-    if (!data) {
-      throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'No row returned.' });
-    }
-    return data;
-  }),
+      if (error) {
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message: 'Failed to register push subscription.',
+          cause: error,
+        });
+      }
+      if (!data) {
+        throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'No row returned.' });
+      }
+      return data;
+    }),
 
   // Hard-delete the subscription. RLS DELETE policy on user_push_subscriptions
   // gates this to is_self(user_id), so even a hostile caller can only remove
   // their own rows.
-  unregister: protectedProcedure.input(unregisterInput).mutation(async ({ ctx, input }) => {
-    const { error } = await ctx.db
-      .from('user_push_subscriptions')
-      .delete()
-      .eq('user_id', ctx.userId)
-      .eq('endpoint', input.endpoint);
+  unregister: protectedProcedure
+    // M5 — shared 10/min counter with `register`.
+    .use(mutationLimit('pushSubs.unregister', { perMin: 10, sharedKey: PUSH_SUBS_SHARED_KEY }))
+    .input(unregisterInput)
+    .mutation(async ({ ctx, input }) => {
+      const { error } = await ctx.db
+        .from('user_push_subscriptions')
+        .delete()
+        .eq('user_id', ctx.userId)
+        .eq('endpoint', input.endpoint);
 
-    if (error) {
-      throw new TRPCError({
-        code: 'INTERNAL_SERVER_ERROR',
-        message: 'Failed to remove push subscription.',
-        cause: error,
-      });
-    }
-    return { ok: true };
-  }),
+      if (error) {
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message: 'Failed to remove push subscription.',
+          cause: error,
+        });
+      }
+      return { ok: true };
+    }),
 
   // List the caller's subscriptions. Used by the settings UI to render
   // "remove device" rows. RLS SELECT policy gates by is_self(user_id).

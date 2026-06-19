@@ -23,9 +23,12 @@ const TEST_ENV: Env = {
 export function fakeRedis(): RedisClient & {
   zset: Map<string, Map<string, number>>;
   kv: Map<string, string>;
+  evalCalls: Array<{ script: string; keys: string[]; args: (string | number)[] }>;
+  evalReturn: unknown;
 } {
   const zset = new Map<string, Map<string, number>>();
   const kv = new Map<string, string>();
+  const evalCalls: Array<{ script: string; keys: string[]; args: (string | number)[] }> = [];
 
   function getZset(key: string): Map<string, number> {
     let s = zset.get(key);
@@ -36,9 +39,15 @@ export function fakeRedis(): RedisClient & {
     return s;
   }
 
-  return {
+  // The fake's `eval` is a recording stub. Tests that need to drive
+  // rate-limiter behaviour overwrite `evalReturn` (or shape it via a
+  // function in a future helper) to choose the return value the Lua
+  // script would have produced. Default `0` means "no rate-limit hit".
+  const fake = {
     zset,
     kv,
+    evalCalls,
+    evalReturn: 0 as unknown,
     async zadd(key, sm) {
       getZset(key).set(sm.member, sm.score);
       return 1;
@@ -71,7 +80,17 @@ export function fakeRedis(): RedisClient & {
       }
       return n;
     },
+    async eval(script, keys, args) {
+      evalCalls.push({ script, keys, args });
+      return fake.evalReturn;
+    },
+  } satisfies RedisClient & {
+    zset: typeof zset;
+    kv: typeof kv;
+    evalCalls: typeof evalCalls;
+    evalReturn: unknown;
   };
+  return fake;
 }
 
 /**
@@ -154,6 +173,13 @@ export function makeCtx(overrides: Partial<Context> & { db: unknown }): Context 
     role: 'authenticated',
     bearerToken: 'fake-token',
     redis: fakeRedis(),
+    // Default to TEST-NET-3 (RFC 5737). Tests that hit publicLimit
+    // without an explicit clientIpCidr would otherwise embed
+    // `undefined` directly into the Redis key string — producing keys
+    // like `rl:pub:auth.session:ip:undefined:...` that don't match
+    // any production-shaped counter and silently hide cross-IP
+    // collision bugs. PR #56 r1 security-reviewer M-makectx.
+    clientIpCidr: '198.51.100.0/24',
     ...(overrides as Partial<Context>),
     db: overrides.db as Context['db'],
   };
