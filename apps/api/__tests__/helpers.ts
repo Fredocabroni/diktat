@@ -173,6 +173,13 @@ export function makeCtx(overrides: Partial<Context> & { db: unknown }): Context 
     role: 'authenticated',
     bearerToken: 'fake-token',
     redis: fakeRedis(),
+    // Default to TEST-NET-3 (RFC 5737). Tests that hit publicLimit
+    // without an explicit clientIpCidr would otherwise embed
+    // `undefined` directly into the Redis key string — producing keys
+    // like `rl:pub:auth.session:ip:undefined:...` that don't match
+    // any production-shaped counter and silently hide cross-IP
+    // collision bugs. PR #56 r1 security-reviewer M-makectx.
+    clientIpCidr: '198.51.100.0/24',
     ...(overrides as Partial<Context>),
     db: overrides.db as Context['db'],
   };

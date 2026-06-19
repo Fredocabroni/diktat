@@ -78,6 +78,12 @@ return cur
 // burstCount} so the caller can build a precise error message.
 // KEYS[1] = daily key, KEYS[2] = burst key.
 // ARGV: dailyLimit, dailyWindowSec, burstLimit, burstWindowSec.
+// EXPIRE is set EXCLUSIVELY on the first INCR (cur == 1) of each key.
+// Intentional: this is a FIXED-WINDOW limiter aligned to the
+// {windowStart} key suffix the TS caller embeds. Each window is a
+// new key; TTL only needs to be set once on creation. NOT a sliding
+// window — do NOT add a refresh on subsequent INCRs or the daily
+// counter would never roll over. (PR #56 r1 security-reviewer L-clarity.)
 const COMBINED_ATOMIC_LUA = `
 local d = tonumber(redis.call('GET', KEYS[1]) or '0')
 local b = tonumber(redis.call('GET', KEYS[2]) or '0')
@@ -86,6 +92,9 @@ local b_limit = tonumber(ARGV[3])
 if d >= d_limit then return {0, 'daily', d, b} end
 if b >= b_limit then return {0, 'burst', d, b} end
 d = redis.call('INCR', KEYS[1])
+-- EXPIRE set ONCE on the first INCR of this window-keyed counter.
+-- Fixed-window: each new windowStart minted by the TS caller is a
+-- new key; refreshing the TTL on later INCRs would defeat rollover.
 if d == 1 then redis.call('EXPIRE', KEYS[1], ARGV[2]) end
 b = redis.call('INCR', KEYS[2])
 if b == 1 then redis.call('EXPIRE', KEYS[2], ARGV[4]) end

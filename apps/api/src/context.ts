@@ -43,7 +43,10 @@ export interface Context {
 }
 
 let cachedRedis: Redis | null = null;
-function getOrBuildRedis(env: Env): Redis {
+// Exported so server.ts can reuse the same client for its Fastify outer
+// hook instead of constructing a second instance (PR #56 r1 security-
+// reviewer L-redis-dup).
+export function getOrBuildRedis(env: Env): Redis {
   if (cachedRedis !== null) return cachedRedis;
   cachedRedis = new Redis({
     url: env.UPSTASH_REDIS_REST_URL,
@@ -94,7 +97,10 @@ export function normalizeIpToCidr(rawIp: string): string {
   const ip = rawIp.startsWith('::ffff:') ? rawIp.slice('::ffff:'.length) : rawIp;
   if (ip.includes('.')) {
     const parts = ip.split('.');
-    if (parts.length === 4 && parts.every((p) => /^\d{1,3}$/.test(p))) {
+    // Each octet must be a 1–3 digit string AND in the 0–255 range.
+    // The regex alone passes `999.999.999.999`; the numeric check
+    // closes that hole. (PR #56 r1 security-reviewer L-octet-range.)
+    if (parts.length === 4 && parts.every((p) => /^\d{1,3}$/.test(p) && Number(p) <= 255)) {
       return `${parts[0]}.${parts[1]}.${parts[2]}.0/24`;
     }
     return 'ip-malformed-v4';

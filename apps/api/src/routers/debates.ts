@@ -210,6 +210,12 @@ export const debatesRouter = router({
    * Cialdini authority).
    */
   castVote: protectedProcedure
+    // M5 round-2 — 20/min per user. Verdict-round opens to all
+    // non-participants simultaneously; the budget is loose enough
+    // not to pinch normal voting while still capping the
+    // unconstrained 3-DB-round-trip load surface the round-1
+    // security-reviewer flagged.
+    .use(mutationLimit('debates.castVote', { perMin: 20 }))
     .input(
       z.object({
         battleId: z.string().uuid(),

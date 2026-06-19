@@ -1,23 +1,24 @@
 import cors from '@fastify/cors';
 import { fastifyTRPCPlugin, type FastifyTRPCPluginOptions } from '@trpc/server/adapters/fastify';
-import { Redis } from '@upstash/redis';
 import Fastify from 'fastify';
 
-import { buildContext, normalizeIpToCidr, type RedisClient } from './context.js';
+import { buildContext, getOrBuildRedis, normalizeIpToCidr, type RedisClient } from './context.js';
 import { loadEnv } from './env.js';
 import { checkGlobalOuterHook } from './rate-limit.js';
 import { appRouter, type AppRouter } from './routers/index.js';
 
 const env = loadEnv();
-const outerRedis: RedisClient = new Redis({
-  url: env.UPSTASH_REDIS_REST_URL,
-  token: env.UPSTASH_REDIS_REST_TOKEN,
-}) as unknown as RedisClient;
+// Reuse the same Upstash client the per-request tRPC contexts use. The
+// prior shape constructed a separate `new Redis({...})` here, doubling
+// the credential surface in memory for no functional gain (Upstash REST
+// is stateless). PR #56 r1 security-reviewer L-redis-dup.
+const outerRedis = getOrBuildRedis(env) as unknown as RedisClient;
 
 // Outer-hook global ceiling. M5 design's anti-DDoS floor; tuned to a
 // generous human-burst per /24 NAT block. Tighten in M6 if real abuse
 // shows up post-launch.
 const OUTER_HOOK_PER_MIN = 1_200;
+const OUTER_HOOK_WINDOW_SEC = 60;
 
 // Paths exempt from the outer hook. Container / k8s / Railway health
 // checks fire often and would otherwise consume the IP-keyed budget.
@@ -83,8 +84,13 @@ app.addHook('onRequest', async (request, reply) => {
     // which then attempts a second `.send` and Fastify throws
     // FST_ERR_REP_ALREADY_SENT. Returning the reply object
     // short-circuits the request lifecycle deterministically.
+    // RFC 6585 §4: 429 SHOULD include Retry-After. The outer-hook
+    // window is 60s; advise clients to back off until the window
+    // rolls over. Without this header, naive clients retry
+    // immediately and burn their next-window budget too.
     return reply
       .code(429)
+      .header('Retry-After', String(OUTER_HOOK_WINDOW_SEC))
       .send({ error: 'Too many requests.', limit: OUTER_HOOK_PER_MIN, window: '60s' });
   }
 });
@@ -96,6 +102,18 @@ await app.register(fastifyTRPCPlugin, {
   trpcOptions: {
     router: appRouter,
     createContext: ({ req }) => buildContext(env, req),
+    // RFC 6585 §4 Retry-After on 429 responses thrown by the
+    // rate-limit middleware. `responseMeta` runs after the procedure
+    // (success or thrown error) and can stamp headers + the HTTP
+    // status. We add Retry-After only when any error is a
+    // TOO_MANY_REQUESTS — every other error keeps default behavior.
+    responseMeta({ errors }) {
+      const hasRateLimit = errors.some((e) => e.code === 'TOO_MANY_REQUESTS');
+      if (hasRateLimit) {
+        return { headers: new Headers({ 'retry-after': String(OUTER_HOOK_WINDOW_SEC) }) };
+      }
+      return {};
+    },
     onError({ error, path }) {
       // Log only the shape we control. `error.cause` holds raw Supabase
       // errors that we never want echoed into structured logs.
