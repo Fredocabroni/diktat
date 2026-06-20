@@ -47,6 +47,50 @@ export const debatesRouter = router({
    * rounds (with payload state + deadline), and arguments visible to the
    * caller (RLS enforces blind submission -- the opponent's argument is
    * filtered out by the database until the round reveals).
+   *
+   * Privacy boundary — RLS is authoritative; this resolver does NOT gate.
+   * Documented here so a future reader doesn't have to chase the policy
+   * chain across migrations. Mirrors the explicit contract in
+   * `supabase/migrations/20260524120000_open_debate_observer_select.sql`
+   * (PR 4.6 commit 4). PR #62 round-2 LOW-2 disclosure pass.
+   *
+   *   participants (battle_participants)
+   *     - PARTICIPANT view: own row only, via `bp_select_self`
+   *       (migration 20260420090004) → `USING (is_self(user_id))`.
+   *     - OBSERVER view: ANY authenticated user can read all seat rows
+   *       when `battle.mode='open_debate' AND battle.status IN
+   *       ('live','settled')`, via
+   *       `battle_participants_select_open_debate_observers` (additive,
+   *       migration 20260524120000). Intentional — the open-debate
+   *       VotePanel UI needs to render handles to label seats for
+   *       community vote casting.
+   *     - All other modes (trivia) + non-(live|settled) statuses:
+   *       non-participants get empty `participants[]`.
+   *
+   *   fields observer-visible: user_id, seat, entry_ap, result, and
+   *     `users(handle)` via PostgREST inline-join. Handle is in the
+   *     public column subset (`users_access_column_grants`,
+   *     migration 20260618120000) by §1 product spec — handles render
+   *     on leaderboards, profile pages, and tier badges. Not specific
+   *     to this surface.
+   *
+   *   arguments (debate_arguments): gated separately by
+   *     `debate_args_select_revealed` — observers see only round-
+   *     revealed text, never blind-submission text.
+   *   votes (debate_votes): gated separately — own vote during the
+   *     live window via `debate_votes_select_own`, all votes
+   *     post-settlement via `debate_votes_select_settled`.
+   *   battles row: gated by `battles_select_participants` +
+   *     `battles_select_queued` + `battles_select_open_debate_observers`
+   *     (OR-ed); observer admission is again gated to
+   *     `mode='open_debate' AND status IN ('live','settled')`.
+   *
+   * NO resolver-level mode/status branch. Shadowing the RLS rule here
+   * would create two contradictory truth-sources for the privacy
+   * boundary; if RLS regresses (column dropped from policy USING
+   * clause, observer policy widened, handle moved to the private
+   * column subset), the resolver must reflect that immediately and
+   * mechanically — not be a stale second copy.
    */
   getBattle: protectedProcedure
     // M5.1 — 90/min per user. Polled at 0.5Hz (30/min baseline) with
@@ -320,7 +364,16 @@ export const debatesRouter = router({
           cause: error,
         });
       }
-      return { ok: true, voteId: data?.id, apWeight: voterRow.current_ap };
+      // `voterRow.current_ap` is the authoritative AP snapshot and is
+      // written to `ap_at_vote_time` above; do NOT echo it back on the
+      // wire. Returning the caller's authoritative AP turned every vote
+      // into an oracle a stale client could use to refresh its cached
+      // balance from the server. The visible "weight" chip in
+      // VotePanel.tsx reads `ap_at_vote_time` off the votes list
+      // returned by `debates.getBattle`, not off this mutation's
+      // response — no UI consumer reads `apWeight`. PR #62 round-3
+      // MEDIUM-2 disclosure pass.
+      return { ok: true, voteId: data?.id };
     }),
 });
 
