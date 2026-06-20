@@ -27,7 +27,20 @@ const transactionsInput = z.object({
   // so the shape is internal to this router.
   cursor: z
     .object({
-      createdAt: z.string().datetime(),
+      // Future-date clamp mirrors `feed.list`'s pattern. A caller
+      // passing `9999-12-31T23:59:59Z` would otherwise widen the
+      // keyset window to "everything before the heat death of the
+      // universe" — RLS bounds the read to self-data via
+      // `ap_tx_select_self`, but the keyset pagination semantics
+      // break and the query becomes a forward-scan masquerading as
+      // a paginated read. PR #65 round-3 reviewer MEDIUM-1 +
+      // CLAUDE.md TODO ("API cursor clamp + aggregate push-down").
+      createdAt: z
+        .string()
+        .datetime()
+        .refine((v) => Date.parse(v) <= Date.now(), {
+          message: 'cursor.createdAt must not be in the future',
+        }),
       id: z.string().uuid(),
     })
     .optional(),

@@ -180,6 +180,69 @@ describe('walletRouter.transactions', () => {
       calls[0]?.ops.filter((op) => op.op === 'order').map((op) => op.args[0]) ?? [];
     expect(orderCalls).toEqual(['created_at', 'id']);
   });
+
+  // -------------------------------------------------------------------------
+  // PR #65 round-3 MEDIUM-1 — cursor.createdAt future-date clamp.
+  //
+  // The composite (created_at, id) keyset cursor accepts any RFC3339
+  // datetime. Without a future-date clamp, a caller passing
+  // `9999-12-31T23:59:59Z` would widen the seek window to "everything
+  // before the heat death of the universe" — the keyset pagination
+  // semantics collapse to a forward-scan, and RLS-bounded self-data
+  // becomes a full-table read for the caller's user. Mirror the
+  // `feed.list` cursor pattern with `z.string().datetime().refine(...)`.
+  //
+  // Past + present timestamps continue to pass; future timestamps
+  // throw at the Zod parse layer before the resolver runs.
+  // -------------------------------------------------------------------------
+  it('rejects a future cursor.createdAt at the Zod parse layer', async () => {
+    const { db } = multiTableDb({ ap_transactions: { data: [], error: null } });
+    const caller = appRouter.createCaller(makeCtx({ db }));
+
+    const futureCursor = {
+      createdAt: '9999-12-31T23:59:59Z',
+      id: '11111111-1111-4111-8111-111111111111',
+    };
+
+    await expect(caller.wallet.transactions({ limit: 50, cursor: futureCursor })).rejects.toThrow(
+      /cursor\.createdAt must not be in the future/,
+    );
+  });
+
+  it('accepts a past cursor.createdAt (one year ago is valid)', async () => {
+    const { db } = multiTableDb({ ap_transactions: { data: [], error: null } });
+    const caller = appRouter.createCaller(makeCtx({ db }));
+
+    const oneYearAgoMs = Date.now() - 365 * 24 * 60 * 60 * 1000;
+    const pastCursor = {
+      createdAt: new Date(oneYearAgoMs).toISOString(),
+      id: '11111111-1111-4111-8111-111111111111',
+    };
+
+    await expect(caller.wallet.transactions({ limit: 50, cursor: pastCursor })).resolves.toEqual({
+      items: [],
+      nextCursor: null,
+    });
+  });
+
+  it('accepts a near-now cursor.createdAt (yesterday)', async () => {
+    // Edge-of-window check: a cursor from yesterday must still clear
+    // the clamp — confirms the predicate is `<= now`, not `< now` or
+    // any stricter form that would refuse legitimate recent paginates.
+    const { db } = multiTableDb({ ap_transactions: { data: [], error: null } });
+    const caller = appRouter.createCaller(makeCtx({ db }));
+
+    const yesterdayMs = Date.now() - 24 * 60 * 60 * 1000;
+    const recentCursor = {
+      createdAt: new Date(yesterdayMs).toISOString(),
+      id: '11111111-1111-4111-8111-111111111111',
+    };
+
+    await expect(caller.wallet.transactions({ limit: 50, cursor: recentCursor })).resolves.toEqual({
+      items: [],
+      nextCursor: null,
+    });
+  });
 });
 
 describe('walletRouter.ghostEarnings', () => {
