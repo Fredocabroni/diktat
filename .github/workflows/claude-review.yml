@@ -10,8 +10,63 @@ permissions:
   pull-requests: write
 
 jobs:
+  # ----------------------------------------------------------------------
+  # Docs-only guard. Classifies the PR diff into `code` and `docs`
+  # outputs. Reviewer matrix jobs gate their agent-run + post steps on
+  # `code == 'true'`; a docs-only PR concludes each reviewer job
+  # SUCCESS without invoking `claude -p` and without burning Anthropic
+  # credits. Closes the recurring docs-only context-bleed pattern
+  # (PRs #47, #49, #50, #54, #55, #57, plus PR #56's final docs-commit
+  # cycle) that needed admin-override merges.
+  #
+  # Pin posture: dorny/paths-filter is SHA-pinned because it's the
+  # action that decides whether the security reviewer runs — a moved
+  # tag could reclassify a code diff as docs-only and suppress the
+  # review. Trust-boundary action; utility actions
+  # (actions/checkout / setup-node) keep the floating major tag.
+  changes:
+    name: classify-diff
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    if: ${{ vars.ENABLE_CLAUDE_REVIEW == 'true' }}
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+      docs: ${{ steps.filter.outputs.docs }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: filter
+        # dorny/paths-filter@v4.0.1 (2026-03-17), pinned to the release
+        # commit SHA. See header note above for the trust-boundary
+        # rationale on this specific pin.
+        uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
+        with:
+          filters: |
+            code:
+              - 'apps/**'
+              - 'packages/**'
+              - 'supabase/migrations/**'
+              - '.github/**'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - 'turbo.json'
+              - 'tsconfig*.json'
+              - 'eslint.config.*'
+              - 'vitest.config.*'
+              - 'vite.config.*'
+              - '.nvmrc'
+              - '.npmrc'
+              - 'supabase/config.toml'
+            docs:
+              - 'docs/**'
+              - 'README*'
+              - '*.md'
+
   review:
     name: ${{ matrix.reviewer.name }}
+    needs: [changes]
     runs-on: ubuntu-latest
     # Each reviewer is its own parallel matrix job with an independent
     # timeout. Previously all three ran sequentially in one 10-minute job,
@@ -56,6 +111,7 @@ jobs:
           node-version-file: .nvmrc
 
       - name: Install Claude Code
+        if: ${{ needs.changes.outputs.code == 'true' || needs.changes.outputs.docs == 'false' }}
         run: npm i -g @anthropic-ai/claude-code
 
       # The reviewer step CAPTURES agent stdout to a file and does NOT
@@ -74,6 +130,7 @@ jobs:
       #     could exfiltrate it via any subcommand. Now the token lives
       #     only in the Post step.
       - name: Run ${{ matrix.reviewer.name }}
+        if: ${{ needs.changes.outputs.code == 'true' || needs.changes.outputs.docs == 'false' }}
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           REVIEW_PROMPT: ${{ matrix.reviewer.prompt }}
@@ -111,6 +168,7 @@ jobs:
       # which couldn't tell a legitimate empty from a credit-error
       # body that just lacked a header.
       - name: Post review
+        if: ${{ needs.changes.outputs.code == 'true' || needs.changes.outputs.docs == 'false' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -153,3 +211,19 @@ jobs:
             echo "::endgroup::"
             exit 1
           fi
+
+      # Docs-only path: emit a visible "this was intentional" signal
+      # into the run summary so a skipped review reads as a designed
+      # outcome, not a misconfig. Inverted semantics — fires ONLY when
+      # the PR is PROVABLY docs-only (docs touched AND no code-allowlist
+      # match). Anything the code allowlist doesn't recognize
+      # (Dockerfile, root *.sh, supabase/functions/**, .env.example,
+      # Makefile, etc.) falls through to the agent-run gate above. This
+      # also keeps the vars-disabled path clean: when `changes` was
+      # skipped via ENABLE_CLAUDE_REVIEW, both outputs are empty strings
+      # and neither half of the AND matches.
+      - name: Audit — docs-only diff, reviewer skipped
+        if: ${{ needs.changes.outputs.code == 'false' && needs.changes.outputs.docs == 'true' }}
+        run: |
+          echo "docs-only diff — reviewer agent skipped" >> "$GITHUB_STEP_SUMMARY"
+          echo "docs-only diff — reviewer agent skipped"
