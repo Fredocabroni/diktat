@@ -73,7 +73,7 @@ jobs:
           node-version-file: .nvmrc
 
       - name: Install Claude Code
-        if: ${{ needs.changes.outputs.code == 'true' }}
+        if: ${{ needs.changes.outputs.code == 'true' || needs.changes.outputs.docs == 'false' }}
         run: npm i -g @anthropic-ai/claude-code
 
       # Capture-then-post pattern, harmonized with claude-review.yml.
@@ -89,7 +89,7 @@ jobs:
       # code, and posts via gh pr comment from a step that does have
       # GH_TOKEN. Same gate-integrity script as claude-review.yml.
       - name: Run schema-reviewer
-        if: ${{ needs.changes.outputs.code == 'true' }}
+        if: ${{ needs.changes.outputs.code == 'true' || needs.changes.outputs.docs == 'false' }}
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
@@ -101,7 +101,7 @@ jobs:
           set -e
 
       - name: Post review
-        if: ${{ needs.changes.outputs.code == 'true' }}
+        if: ${{ needs.changes.outputs.code == 'true' || needs.changes.outputs.docs == 'false' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -143,10 +143,12 @@ jobs:
           fi
 
       # Docs-only audit signal — harmonized with claude-review.yml.
-      # Compared to 'false' explicitly so the audit doesn't fire when
-      # `changes` was skipped via the ENABLE_CLAUDE_REVIEW vars gate.
-      - name: Audit — docs-only diff, reviewer skipped
-        if: ${{ needs.changes.outputs.code == 'false' }}
+      # Fires ONLY when the PR is PROVABLY docs-only (docs touched AND
+      # no code-allowlist match). The vars-disabled path stays clean
+      # because both outputs are empty strings and neither half of the
+      # AND matches.
+      - name: Audit — docs-only diff, schema-reviewer skipped
+        if: ${{ needs.changes.outputs.code == 'false' && needs.changes.outputs.docs == 'true' }}
         run: |
           echo "docs-only diff — schema-reviewer agent skipped" >> "$GITHUB_STEP_SUMMARY"
           echo "docs-only diff — schema-reviewer agent skipped"

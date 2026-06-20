@@ -111,7 +111,7 @@ jobs:
           node-version-file: .nvmrc
 
       - name: Install Claude Code
-        if: ${{ needs.changes.outputs.code == 'true' }}
+        if: ${{ needs.changes.outputs.code == 'true' || needs.changes.outputs.docs == 'false' }}
         run: npm i -g @anthropic-ai/claude-code
 
       # The reviewer step CAPTURES agent stdout to a file and does NOT
@@ -130,7 +130,7 @@ jobs:
       #     could exfiltrate it via any subcommand. Now the token lives
       #     only in the Post step.
       - name: Run ${{ matrix.reviewer.name }}
-        if: ${{ needs.changes.outputs.code == 'true' }}
+        if: ${{ needs.changes.outputs.code == 'true' || needs.changes.outputs.docs == 'false' }}
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           REVIEW_PROMPT: ${{ matrix.reviewer.prompt }}
@@ -168,7 +168,7 @@ jobs:
       # which couldn't tell a legitimate empty from a credit-error
       # body that just lacked a header.
       - name: Post review
-        if: ${{ needs.changes.outputs.code == 'true' }}
+        if: ${{ needs.changes.outputs.code == 'true' || needs.changes.outputs.docs == 'false' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -214,11 +214,16 @@ jobs:
 
       # Docs-only path: emit a visible "this was intentional" signal
       # into the run summary so a skipped review reads as a designed
-      # outcome, not a misconfig. Compared to 'false' explicitly so
-      # the audit doesn't fire when `changes` was skipped (vars-disabled
-      # path) — both `code` and `docs` would be empty strings then.
+      # outcome, not a misconfig. Inverted semantics — fires ONLY when
+      # the PR is PROVABLY docs-only (docs touched AND no code-allowlist
+      # match). Anything the code allowlist doesn't recognize
+      # (Dockerfile, root *.sh, supabase/functions/**, .env.example,
+      # Makefile, etc.) falls through to the agent-run gate above. This
+      # also keeps the vars-disabled path clean: when `changes` was
+      # skipped via ENABLE_CLAUDE_REVIEW, both outputs are empty strings
+      # and neither half of the AND matches.
       - name: Audit — docs-only diff, reviewer skipped
-        if: ${{ needs.changes.outputs.code == 'false' }}
+        if: ${{ needs.changes.outputs.code == 'false' && needs.changes.outputs.docs == 'true' }}
         run: |
           echo "docs-only diff — reviewer agent skipped" >> "$GITHUB_STEP_SUMMARY"
           echo "docs-only diff — reviewer agent skipped"
