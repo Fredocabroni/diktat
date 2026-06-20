@@ -25,7 +25,7 @@
 import { TRPCError } from '@trpc/server';
 import { z } from 'zod';
 
-import { mutationLimit } from '../rate-limit.js';
+import { mutationLimit, queryLimit } from '../rate-limit.js';
 import { protectedProcedure, router } from '../trpc.js';
 
 const VERDICT_ROUND_NO = 3;
@@ -49,6 +49,12 @@ export const debatesRouter = router({
    * filtered out by the database until the round reveals).
    */
   getBattle: protectedProcedure
+    // M5.1 — 90/min per user. Polled at 0.5Hz (30/min baseline) with
+    // refetchIntervalInBackground=false; 3x headroom for reconnects.
+    // THE LOAD-BEARING CAP: 5-query fan-out per call. At 90/min the
+    // worst-case DB load is 450 sub-queries/min/user (vs 150/min at
+    // the 30/min client baseline). Round-3 reviewer's specific concern.
+    .use(queryLimit('debates.getBattle', { perMin: 90 }))
     .input(z.object({ battleId: z.string().uuid() }))
     .query(async ({ ctx, input }) => {
       const [battleResult, participantsResult, roundsResult, argsResult, votesResult] =

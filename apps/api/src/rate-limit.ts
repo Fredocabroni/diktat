@@ -72,6 +72,7 @@ import {
   MUTATION_WINDOW_SEC,
   publicKey,
   PUBLIC_WINDOW_SEC,
+  QUERY_WINDOW_SEC,
   SINGLE_GATE_LUA,
 } from './rate-limit.internal.js';
 import { middleware } from './trpc.js';
@@ -325,6 +326,63 @@ export function mutationLimit(procedure: string, opts: MutationOpts) {
           event: 'rate_limit.redis_down',
           tier: 'mut',
           procedure: counterName,
+          posture: 'fail-open',
+        }),
+      );
+      return next();
+    }
+    if (!result.allowed) {
+      throw new TRPCError({
+        code: 'TOO_MANY_REQUESTS',
+        message: 'Rate limit exceeded.',
+        cause: { retryAfterSec: result.retryAfterSec } as unknown as Error,
+      });
+    }
+    return next();
+  });
+}
+
+// ---------------------------------------------------------------------------
+// queryLimit — read-tier middleware. Sibling to mutationLimit:
+//   - keys on ctx.userId (authed reads only — anon queries gated upstream
+//     by protectedProcedure where it applies)
+//   - fail-OPEN on Redis outage (matches mutation tier — a brief Upstash
+//     blip should not 429 polling reads and brick the live battle UI)
+//   - reuses SINGLE_GATE_LUA via checkAndIncrementSingle, so TTL-based
+//     Retry-After is threaded through `cause` for the responseMeta header
+//   - SEPARATE NAMESPACE: tier label 'q' — counter shape is
+//     `rl:q:{procedure}:u:{userId}:{windowStart}`. A user hammering
+//     battles.getRound at 180/min does NOT eat into their mutation budget
+//     for battles.submitAnswer or any other procedure.
+// Closes the M5.1 polling-query gap: round-3 reviewer flagged
+// debates.getBattle (5-query fan-out at 0.5Hz) and battles.getRound
+// (1Hz) as exhausting the DB pool before the IP-keyed outer hook fires.
+// ---------------------------------------------------------------------------
+interface QueryOpts {
+  /** Per-minute call budget for the authed user on this query procedure. */
+  readonly perMin: number;
+}
+
+export function queryLimit(procedure: string, opts: QueryOpts) {
+  return middleware(async ({ ctx, next }) => {
+    if (!ctx.userId) {
+      throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Sign in required.' });
+    }
+    const now = Date.now();
+    const key = authedKey('q', procedure, ctx.userId, QUERY_WINDOW_SEC, now);
+    const result = await checkAndIncrementSingle(
+      ctx.redis,
+      key,
+      opts.perMin,
+      QUERY_WINDOW_SEC,
+      /* failOpen */ true,
+    );
+    if (result.redisDown) {
+      console.warn(
+        JSON.stringify({
+          event: 'rate_limit.redis_down',
+          tier: 'q',
+          procedure,
           posture: 'fail-open',
         }),
       );

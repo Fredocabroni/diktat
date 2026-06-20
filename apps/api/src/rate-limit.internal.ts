@@ -76,8 +76,10 @@ export function windowStart(nowMs: number, windowSec: number): number {
   return Math.floor(nowMs / (windowSec * MS_PER_SEC));
 }
 
+export const QUERY_WINDOW_SEC = 60;
+
 export function authedKey(
-  tier: 'ai' | 'mut',
+  tier: 'ai' | 'mut' | 'q',
   procedure: string,
   userId: string,
   windowSec: number,
@@ -108,6 +110,7 @@ export const __internals = {
   DAILY_WINDOW_SEC,
   BURST_WINDOW_SEC,
   MUTATION_WINDOW_SEC,
+  QUERY_WINDOW_SEC,
   PUBLIC_WINDOW_SEC,
   GLOBAL_WINDOW_SEC,
   GLOBAL_PROCEDURE_NAME,

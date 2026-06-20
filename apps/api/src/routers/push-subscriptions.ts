@@ -25,7 +25,7 @@
 import { TRPCError } from '@trpc/server';
 import { z } from 'zod';
 
-import { mutationLimit } from '../rate-limit.js';
+import { mutationLimit, queryLimit } from '../rate-limit.js';
 import { protectedProcedure, router } from '../trpc.js';
 import { serviceRoleClient } from '../supabase.js';
 
@@ -183,22 +183,27 @@ export const pushSubscriptionsRouter = router({
 
   // List the caller's subscriptions. Used by the settings UI to render
   // "remove device" rows. RLS SELECT policy gates by is_self(user_id).
-  listMine: protectedProcedure.query(async ({ ctx }) => {
-    const { data, error } = await ctx.db
-      .from('user_push_subscriptions')
-      .select(
-        'id, endpoint, user_agent, created_at, last_delivered_at, disabled_at, disabled_reason',
-      )
-      .eq('user_id', ctx.userId)
-      .order('created_at', { ascending: false });
+  listMine: protectedProcedure
+    // M5.1 — 30/min per user. Defensive cap: zero client callers in
+    // `apps/web/` as of this PR. Revisit when a UI surface lands
+    // (settings page device list, future cross-device management).
+    .use(queryLimit('pushSubscriptions.listMine', { perMin: 30 }))
+    .query(async ({ ctx }) => {
+      const { data, error } = await ctx.db
+        .from('user_push_subscriptions')
+        .select(
+          'id, endpoint, user_agent, created_at, last_delivered_at, disabled_at, disabled_reason',
+        )
+        .eq('user_id', ctx.userId)
+        .order('created_at', { ascending: false });
 
-    if (error) {
-      throw new TRPCError({
-        code: 'INTERNAL_SERVER_ERROR',
-        message: 'Failed to load push subscriptions.',
-        cause: error,
-      });
-    }
-    return data ?? [];
-  }),
+      if (error) {
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message: 'Failed to load push subscriptions.',
+          cause: error,
+        });
+      }
+      return data ?? [];
+    }),
 });

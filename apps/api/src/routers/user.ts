@@ -7,7 +7,7 @@ import { z } from 'zod';
 
 import type { Database } from '@diktat/db';
 
-import { mutationLimit } from '../rate-limit.js';
+import { mutationLimit, queryLimit } from '../rate-limit.js';
 import { protectedProcedure, router } from '../trpc.js';
 
 type Json = Database['public']['Tables']['users']['Row']['notification_preferences'];
@@ -50,77 +50,83 @@ const timezoneSchema = z
   });
 
 export const userRouter = router({
-  me: protectedProcedure.query(async ({ ctx }) => {
-    // public.users is column-grant-restricted to a public subset for
-    // authenticated PostgREST callers (migration 20260618120000); the
-    // private columns this surface needs — `onboarded_at` and
-    // `notification_preferences` — are reachable only via the
-    // `get_user_self` SECURITY DEFINER RPC, which is locked to
-    // auth.uid() inside the function body. `tiers` (read-all) and
-    // `streaks` (self-only via RLS) keep coming through PostgREST
-    // because their column grants landed in 20260617160000.
-    // `returns table(...)` is set-of-zero-or-one — the SDK returns an
-    // array; `.maybeSingle()` narrows to row | null. The return type is
-    // an explicit nine-column shape so `fingerprint`, `timezone`,
-    // `last_active_at`, `created_at`, and `updated_at` are structurally
-    // absent from the SDK payload (round-2 security-reviewer MEDIUM-1).
-    const { data: userRow, error: userErr } = await ctx.db.rpc('get_user_self').maybeSingle();
+  me: protectedProcedure
+    // M5.1 — 60/min per user. Cold read (no client polling), 2 call
+    // sites (profile + settings/notifications). Server fan-out is 1
+    // RPC + 2 parallel queries. 60/min absorbs the absolute worst case
+    // (rapid page-toggles within the 30s staleTime window).
+    .use(queryLimit('user.me', { perMin: 60 }))
+    .query(async ({ ctx }) => {
+      // public.users is column-grant-restricted to a public subset for
+      // authenticated PostgREST callers (migration 20260618120000); the
+      // private columns this surface needs — `onboarded_at` and
+      // `notification_preferences` — are reachable only via the
+      // `get_user_self` SECURITY DEFINER RPC, which is locked to
+      // auth.uid() inside the function body. `tiers` (read-all) and
+      // `streaks` (self-only via RLS) keep coming through PostgREST
+      // because their column grants landed in 20260617160000.
+      // `returns table(...)` is set-of-zero-or-one — the SDK returns an
+      // array; `.maybeSingle()` narrows to row | null. The return type is
+      // an explicit nine-column shape so `fingerprint`, `timezone`,
+      // `last_active_at`, `created_at`, and `updated_at` are structurally
+      // absent from the SDK payload (round-2 security-reviewer MEDIUM-1).
+      const { data: userRow, error: userErr } = await ctx.db.rpc('get_user_self').maybeSingle();
 
-    if (userErr) {
-      throw new TRPCError({
-        code: 'INTERNAL_SERVER_ERROR',
-        message: 'Failed to load profile.',
-        cause: userErr,
-      });
-    }
-    if (!userRow) {
-      throw new TRPCError({ code: 'NOT_FOUND', message: 'Profile not found.' });
-    }
+      if (userErr) {
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message: 'Failed to load profile.',
+          cause: userErr,
+        });
+      }
+      if (!userRow) {
+        throw new TRPCError({ code: 'NOT_FOUND', message: 'Profile not found.' });
+      }
 
-    const [tierRes, streakRes] = await Promise.all([
-      ctx.db
-        .from('tiers')
-        .select('id, name, payout_eligible, floor_protected')
-        .eq('id', userRow.tier_id)
-        .maybeSingle(),
-      ctx.db
-        .from('streaks')
-        .select('current_length, longest_length, last_action_date, freeze_tokens')
-        .eq('user_id', userRow.id)
-        .maybeSingle(),
-    ]);
+      const [tierRes, streakRes] = await Promise.all([
+        ctx.db
+          .from('tiers')
+          .select('id, name, payout_eligible, floor_protected')
+          .eq('id', userRow.tier_id)
+          .maybeSingle(),
+        ctx.db
+          .from('streaks')
+          .select('current_length, longest_length, last_action_date, freeze_tokens')
+          .eq('user_id', userRow.id)
+          .maybeSingle(),
+      ]);
 
-    if (tierRes.error) {
-      throw new TRPCError({
-        code: 'INTERNAL_SERVER_ERROR',
-        message: 'Failed to load profile.',
-        cause: tierRes.error,
-      });
-    }
-    if (streakRes.error) {
-      throw new TRPCError({
-        code: 'INTERNAL_SERVER_ERROR',
-        message: 'Failed to load profile.',
-        cause: streakRes.error,
-      });
-    }
+      if (tierRes.error) {
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message: 'Failed to load profile.',
+          cause: tierRes.error,
+        });
+      }
+      if (streakRes.error) {
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message: 'Failed to load profile.',
+          cause: streakRes.error,
+        });
+      }
 
-    // Match the existing user.me return shape so the client surface is
-    // unchanged: the joined `tiers` / `streaks` objects sit alongside
-    // the users columns (subset the original PostgREST select projected).
-    return {
-      id: userRow.id,
-      handle: userRow.handle,
-      display_name: userRow.display_name,
-      avatar_url: userRow.avatar_url,
-      current_ap: userRow.current_ap,
-      tier_id: userRow.tier_id,
-      onboarded_at: userRow.onboarded_at,
-      notification_preferences: userRow.notification_preferences,
-      tiers: tierRes.data,
-      streaks: streakRes.data,
-    };
-  }),
+      // Match the existing user.me return shape so the client surface is
+      // unchanged: the joined `tiers` / `streaks` objects sit alongside
+      // the users columns (subset the original PostgREST select projected).
+      return {
+        id: userRow.id,
+        handle: userRow.handle,
+        display_name: userRow.display_name,
+        avatar_url: userRow.avatar_url,
+        current_ap: userRow.current_ap,
+        tier_id: userRow.tier_id,
+        onboarded_at: userRow.onboarded_at,
+        notification_preferences: userRow.notification_preferences,
+        tiers: tierRes.data,
+        streaks: streakRes.data,
+      };
+    }),
 
   updateHandle: protectedProcedure
     // M5 — 5/min per user. Tight; closes the handle-enumeration
