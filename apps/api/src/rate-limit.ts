@@ -38,15 +38,18 @@
 //                   share the same window without coordination
 //
 // Deny semantics:
-//   - The SINGLE-gate factories (mutationLimit, publicLimit) use
-//     INCR-then-check. The atomic INCR fires BEFORE the limit check,
-//     so a denied call INCREMENTS the counter (cur lands at limit+1).
-//     Practical impact: a user who hits 31/min on battles.submitAnswer
-//     sees the next call 429. The 32nd attempt would also see 429 and
-//     push the counter to 33. Counter resets when the window expires.
-//     This is by-design — the alternative (atomic check-then-INCR via
-//     Lua) costs one extra Lua round-trip for the simple case and
-//     buys nothing operationally for general mutations.
+//   - The SINGLE-gate factories (mutationLimit, queryLimit, publicLimit)
+//     use INCR-then-check. The atomic INCR fires BEFORE the limit
+//     check, so a denied call INCREMENTS the counter (cur lands at
+//     limit+1). Practical impact: a user who hits 31/min on
+//     battles.submitAnswer sees the next call 429. The 32nd attempt
+//     would also see 429 and push the counter to 33. Counter resets
+//     when the window expires. This is by-design — the alternative
+//     (atomic check-then-INCR via Lua) costs one extra Lua round-trip
+//     for the simple case and buys nothing operationally for general
+//     mutations OR for polling reads. PR #62 round-1 security-reviewer
+//     MEDIUM-1 confirmed: no practical bypass, only cosmetic
+//     over-counting on a blocked client for the window duration.
 //   - The COMBINED-atomic factory (aiSpendLimit) uses check-then-INCR
 //     across BOTH counters atomically inside Lua. A denied call does
 //     NOT increment EITHER counter — necessary because the daily
@@ -342,6 +345,32 @@ export function mutationLimit(procedure: string, opts: MutationOpts) {
   });
 }
 
+// Static map of query procedure → server-side DB fan-out count.
+// Used to enrich the redis_down warn log (M-2(a)) so an Upstash
+// outage that re-opens the high-fan-out read path is queryable in
+// logs. `poolRisk` is derived from fanOut: anything ≥ 4 queries is
+// 'high' because it's the class of read that exhausts the Supabase
+// pool first under uncapped load (debates.getBattle, the round-3
+// reviewer's specific concern). Values pulled from the recon (PR #62
+// summary table); update when a procedure's server implementation
+// changes. PR #62 round-1 security-reviewer MEDIUM-2(a).
+const QUERY_FAN_OUT: Record<string, number> = {
+  'battles.getRound': 1,
+  'battles.getBattle': 3,
+  'debates.getBattle': 5,
+  'matchmaking.getStatus': 0, // pure Redis — no DB queries
+  'user.me': 3, // 1 RPC sequential + 2 parallel
+  'feed.list': 1,
+  'factCheck.getVerdict': 1, // defensive default; no client caller today
+  'pushSubscriptions.listMine': 1, // defensive default; no client caller today
+};
+
+function classifyPoolRisk(fanOut: number): 'low' | 'medium' | 'high' {
+  if (fanOut >= 4) return 'high';
+  if (fanOut >= 2) return 'medium';
+  return 'low';
+}
+
 // ---------------------------------------------------------------------------
 // queryLimit — read-tier middleware. Sibling to mutationLimit:
 //   - keys on ctx.userId (authed reads only — anon queries gated upstream
@@ -378,17 +407,43 @@ export function queryLimit(procedure: string, opts: QueryOpts) {
       /* failOpen */ true,
     );
     if (result.redisDown) {
+      // M-2(a): structured Upstash-outage warn enriched with fanOut +
+      // poolRisk so an outage that re-opens the high-fan-out read path
+      // (debates.getBattle 5q, battles.getBattle / user.me 3q) is
+      // queryable in logs. ADDITIVE — control flow is unchanged: we
+      // still `return next()` and the request proceeds. The log is the
+      // signal an operator queries during an outage to see exactly
+      // which query procedures are running uncapped. Round-3 follow-up
+      // (queued, not in scope here) is whether the high-risk
+      // procedures should fail-CLOSED instead.
+      const fanOut = QUERY_FAN_OUT[procedure] ?? 1;
       console.warn(
         JSON.stringify({
           event: 'rate_limit.redis_down',
           tier: 'q',
           procedure,
           posture: 'fail-open',
+          fanOut,
+          poolRisk: classifyPoolRisk(fanOut),
         }),
       );
       return next();
     }
     if (!result.allowed) {
+      // LOW-1: structured deny log mirroring `aiSpendLimit`'s pattern
+      // so per-procedure deny frequency is observable in production.
+      // The wire message stays the redacted "Rate limit exceeded."
+      // (no budget value disclosed); the numeric `current` + the
+      // `retryAfterSec` land server-side only.
+      console.warn(
+        JSON.stringify({
+          event: 'rate_limit.deny',
+          tier: 'q',
+          procedure,
+          current: result.current,
+          retryAfterSec: result.retryAfterSec,
+        }),
+      );
       throw new TRPCError({
         code: 'TOO_MANY_REQUESTS',
         message: 'Rate limit exceeded.',
