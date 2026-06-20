@@ -13,7 +13,7 @@
 import { TRPCError } from '@trpc/server';
 import { z } from 'zod';
 
-import { mutationLimit } from '../rate-limit.js';
+import { mutationLimit, queryLimit } from '../rate-limit.js';
 import { protectedProcedure, router } from '../trpc.js';
 
 // Shared rate-limit budget for the enqueue/cancel pair so cycling
@@ -156,6 +156,11 @@ export const matchmakingRouter = router({
     }),
 
   getStatus: protectedProcedure
+    // M5.1 — 90/min per user. Polled at 0.5Hz (30/min baseline) +
+    // 1 init-on-mount; 3x headroom. Pure Redis (no DB queries), so
+    // this cap is anti-spam not pool-protection — keeps a stuck
+    // client from hammering the matchmaking queue lookup.
+    .use(queryLimit('matchmaking.getStatus', { perMin: 90 }))
     .input(z.object({ mode: modeSchema }))
     .query(async ({ ctx, input }) => {
       const matchedRaw = await ctx.redis.get(matchedKey(input.mode, ctx.userId!));

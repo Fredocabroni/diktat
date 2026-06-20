@@ -9,6 +9,7 @@ import {
   checkAndIncrementSingle,
   mutationLimit,
   publicLimit,
+  queryLimit,
 } from '../src/rate-limit.js';
 
 import { fakeRedis, makeCtx } from './helpers.js';
@@ -330,5 +331,82 @@ describe('mutationLimit shared-key', () => {
     const prefix2 = key2.split(':').slice(0, -1).join(':');
     expect(prefix1).toBe(prefix2);
     expect(prefix1).toMatch(/rl:mut:matchmaking:u:/);
+  });
+});
+
+describe('queryLimit (M5.1 read-tier, single-gate, fail-open)', () => {
+  it('passes at the limit (current === limit)', async () => {
+    // SINGLE_GATE_LUA returns [cur, ttl]; the helper compares cur <= limit.
+    const { ctx } = withRedis([180, 60]);
+    const mw = queryLimit('battles.getRound', { perMin: 180 });
+    const r = await runMiddleware(mw, ctx);
+    expect(r.error).toBe(null);
+    expect(r.proceeded).toBe(true);
+  });
+
+  it('throws TOO_MANY_REQUESTS at limit+1', async () => {
+    const { ctx } = withRedis([181, 60]);
+    const mw = queryLimit('battles.getRound', { perMin: 180 });
+    const r = await runMiddleware(mw, ctx);
+    expect(r.proceeded).toBe(false);
+    expect(r.error).toBeInstanceOf(TRPCError);
+    expect((r.error as TRPCError).code).toBe('TOO_MANY_REQUESTS');
+  });
+
+  it('keys on the `q` tier — separate namespace from mut', async () => {
+    const { ctx, redis } = withRedis([1, 60]);
+    const mw = queryLimit('battles.getRound', { perMin: 180 });
+    await runMiddleware(mw, ctx);
+    expect(redis.evalCalls.length).toBe(1);
+    const key = redis.evalCalls[0]!.keys[0]!;
+    // `rl:q:battles.getRound:u:user-123:<windowStart>`.
+    expect(key).toMatch(/^rl:q:battles\.getRound:u:user-123:\d+$/);
+    // Sibling shape: rl:mut:...:u:... should NOT appear in this key.
+    expect(key).not.toMatch(/rl:mut:/);
+  });
+
+  it('threads TTL-based Retry-After through TRPCError.cause on deny', async () => {
+    // Lua returns [cur=181, ttl=42] on deny; cause carries 42.
+    const { ctx } = withRedis([181, 42]);
+    const mw = queryLimit('debates.getBattle', { perMin: 90 });
+    const r = await runMiddleware(mw, ctx);
+    const cause = (r.error as TRPCError).cause as { retryAfterSec?: number } | undefined;
+    expect(cause?.retryAfterSec).toBe(42);
+  });
+
+  it('fail-OPEN on Redis throw — proceeds without erroring', async () => {
+    const redis = fakeRedis();
+    redis.eval = async () => {
+      throw new Error('upstash timeout');
+    };
+    const ctx = makeCtx({
+      db: {} as Context['db'],
+      redis: redis as unknown as RedisClient,
+      clientIpCidr: '198.51.100.0/24',
+    });
+    const mw = queryLimit('debates.getBattle', { perMin: 90 });
+    const r = await runMiddleware(mw, ctx);
+    expect(r.error).toBe(null);
+    expect(r.proceeded).toBe(true);
+  });
+
+  it('cross-user isolation: same procedure, different userIds → different keys', async () => {
+    const { ctx: ctxA, redis: redisA } = withRedis([1, 60], { userId: 'user-A' });
+    const { ctx: ctxB, redis: redisB } = withRedis([1, 60], { userId: 'user-B' });
+    const mw = queryLimit('user.me', { perMin: 60 });
+    await runMiddleware(mw, ctxA);
+    await runMiddleware(mw, ctxB);
+    const keyA = redisA.evalCalls[0]!.keys[0]!;
+    const keyB = redisB.evalCalls[0]!.keys[0]!;
+    expect(keyA).toMatch(/^rl:q:user\.me:u:user-A:\d+$/);
+    expect(keyB).toMatch(/^rl:q:user\.me:u:user-B:\d+$/);
+    expect(keyA).not.toBe(keyB);
+  });
+
+  it('throws UNAUTHORIZED when ctx.userId is null', async () => {
+    const { ctx } = withRedis([1, 60], { userId: null });
+    const mw = queryLimit('user.me', { perMin: 60 });
+    const r = await runMiddleware(mw, ctx);
+    expect((r.error as TRPCError).code).toBe('UNAUTHORIZED');
   });
 });

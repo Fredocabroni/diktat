@@ -13,7 +13,7 @@
 import { TRPCError } from '@trpc/server';
 import { z } from 'zod';
 
-import { mutationLimit } from '../rate-limit.js';
+import { mutationLimit, queryLimit } from '../rate-limit.js';
 import { protectedProcedure, router } from '../trpc.js';
 
 const positionSchema = z.number().int().min(-2).max(2);
@@ -109,47 +109,53 @@ export const feedRouter = router({
       };
     }),
 
-  list: protectedProcedure.input(listInputSchema).query(async ({ ctx, input }) => {
-    // Belt-and-suspenders future-clamp: the input schema already
-    // rejects future cursors, but a server-side Math.min closes the
-    // window against any later input-schema regression.
-    const requestedCursorMs = input?.cursor ? Date.parse(input.cursor) : Date.now();
-    const cursor = new Date(Math.min(requestedCursorMs, Date.now())).toISOString();
-    const limit = input?.limit ?? 1;
+  list: protectedProcedure
+    // M5.1 — 60/min per user. Cold read (no client polling), single
+    // call site (DropFeedClient on home). 1 DB query. Generous cap
+    // for the home-page rapid-navigation case.
+    .use(queryLimit('feed.list', { perMin: 60 }))
+    .input(listInputSchema)
+    .query(async ({ ctx, input }) => {
+      // Belt-and-suspenders future-clamp: the input schema already
+      // rejects future cursors, but a server-side Math.min closes the
+      // window against any later input-schema regression.
+      const requestedCursorMs = input?.cursor ? Date.parse(input.cursor) : Date.now();
+      const cursor = new Date(Math.min(requestedCursorMs, Date.now())).toISOString();
+      const limit = input?.limit ?? 1;
 
-    const { data, error } = (await ctx.db
-      .from('news_topics')
-      .select(TOPIC_SELECT)
-      .eq('is_drop', true)
-      .lte('drop_at', cursor)
-      .order('drop_at', { ascending: false })
-      .limit(limit)) as unknown as {
-      data: TopicRow[] | null;
-      error: { message: string } | null;
-    };
+      const { data, error } = (await ctx.db
+        .from('news_topics')
+        .select(TOPIC_SELECT)
+        .eq('is_drop', true)
+        .lte('drop_at', cursor)
+        .order('drop_at', { ascending: false })
+        .limit(limit)) as unknown as {
+        data: TopicRow[] | null;
+        error: { message: string } | null;
+      };
 
-    if (error) {
-      throw new TRPCError({
-        code: 'INTERNAL_SERVER_ERROR',
-        message: 'Failed to load Drop.',
-        cause: error,
-      });
-    }
+      if (error) {
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message: 'Failed to load Drop.',
+          cause: error,
+        });
+      }
 
-    const topics = (data ?? []).map((row) => ({
-      id: row.id,
-      headline: row.headline,
-      sourceTitle: row.source_title,
-      summary: row.summary,
-      primarySourceUrl: row.primary_source_url,
-      category: row.category,
-      dropAt: row.drop_at,
-      dedupClusterId: row.dedup_cluster_id,
-      curationMode: row.curation_mode,
-      isBlockExhausted: row.is_block_exhausted,
-      additionalSources: Array.isArray(row.additional_sources) ? row.additional_sources : [],
-    }));
+      const topics = (data ?? []).map((row) => ({
+        id: row.id,
+        headline: row.headline,
+        sourceTitle: row.source_title,
+        summary: row.summary,
+        primarySourceUrl: row.primary_source_url,
+        category: row.category,
+        dropAt: row.drop_at,
+        dedupClusterId: row.dedup_cluster_id,
+        curationMode: row.curation_mode,
+        isBlockExhausted: row.is_block_exhausted,
+        additionalSources: Array.isArray(row.additional_sources) ? row.additional_sources : [],
+      }));
 
-    return { topics };
-  }),
+      return { topics };
+    }),
 });

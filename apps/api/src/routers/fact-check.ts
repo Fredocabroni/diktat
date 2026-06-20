@@ -24,7 +24,7 @@ import { createHash } from 'node:crypto';
 import { TRPCError } from '@trpc/server';
 import { z } from 'zod';
 
-import { aiSpendLimit } from '../rate-limit.js';
+import { aiSpendLimit, queryLimit } from '../rate-limit.js';
 import { protectedProcedure, router } from '../trpc.js';
 import { serviceRoleClient } from '../supabase.js';
 
@@ -137,29 +137,35 @@ export const factCheckRouter = router({
       };
     }),
 
-  getVerdict: protectedProcedure.input(getVerdictInput).query(async ({ ctx, input }) => {
-    // User-scoped client: RLS allows read-all to authenticated on all three
-    // tables (the transparency contract per MASTER_PLAN §1).
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const { data, error } = (await (ctx.db as any)
-      .from('fact_check_verdicts')
-      .select(
-        'id, claim_id, verdict, confidence, reason, contested_reason, model, route, retrieval_mode, cost_usd, settled_at, fact_check_sources(url, label, fetch_status, snippet, position)',
-      )
-      .eq('claim_id', input.claimId)
-      .order('settled_at', { ascending: false })
-      .limit(1)
-      .maybeSingle()) as { data: VerdictRow | null; error: { message: string } | null };
+  getVerdict: protectedProcedure
+    // M5.1 — 30/min per user. Defensive cap: zero client callers in
+    // `apps/web/` as of this PR. Revisit the budget when a UI consumer
+    // lands (probably DropCard's fact-check verdict chip).
+    .use(queryLimit('factCheck.getVerdict', { perMin: 30 }))
+    .input(getVerdictInput)
+    .query(async ({ ctx, input }) => {
+      // User-scoped client: RLS allows read-all to authenticated on all three
+      // tables (the transparency contract per MASTER_PLAN §1).
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const { data, error } = (await (ctx.db as any)
+        .from('fact_check_verdicts')
+        .select(
+          'id, claim_id, verdict, confidence, reason, contested_reason, model, route, retrieval_mode, cost_usd, settled_at, fact_check_sources(url, label, fetch_status, snippet, position)',
+        )
+        .eq('claim_id', input.claimId)
+        .order('settled_at', { ascending: false })
+        .limit(1)
+        .maybeSingle()) as { data: VerdictRow | null; error: { message: string } | null };
 
-    if (error) {
-      throw new TRPCError({
-        code: 'INTERNAL_SERVER_ERROR',
-        message: 'Failed to read verdict.',
-        cause: error,
-      });
-    }
-    return data;
-  }),
+      if (error) {
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message: 'Failed to read verdict.',
+          cause: error,
+        });
+      }
+      return data;
+    }),
 });
 
 export interface VerdictRow {

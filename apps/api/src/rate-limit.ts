@@ -38,15 +38,18 @@
 //                   share the same window without coordination
 //
 // Deny semantics:
-//   - The SINGLE-gate factories (mutationLimit, publicLimit) use
-//     INCR-then-check. The atomic INCR fires BEFORE the limit check,
-//     so a denied call INCREMENTS the counter (cur lands at limit+1).
-//     Practical impact: a user who hits 31/min on battles.submitAnswer
-//     sees the next call 429. The 32nd attempt would also see 429 and
-//     push the counter to 33. Counter resets when the window expires.
-//     This is by-design — the alternative (atomic check-then-INCR via
-//     Lua) costs one extra Lua round-trip for the simple case and
-//     buys nothing operationally for general mutations.
+//   - The SINGLE-gate factories (mutationLimit, queryLimit, publicLimit)
+//     use INCR-then-check. The atomic INCR fires BEFORE the limit
+//     check, so a denied call INCREMENTS the counter (cur lands at
+//     limit+1). Practical impact: a user who hits 31/min on
+//     battles.submitAnswer sees the next call 429. The 32nd attempt
+//     would also see 429 and push the counter to 33. Counter resets
+//     when the window expires. This is by-design — the alternative
+//     (atomic check-then-INCR via Lua) costs one extra Lua round-trip
+//     for the simple case and buys nothing operationally for general
+//     mutations OR for polling reads. PR #62 round-1 security-reviewer
+//     MEDIUM-1 confirmed: no practical bypass, only cosmetic
+//     over-counting on a blocked client for the window duration.
 //   - The COMBINED-atomic factory (aiSpendLimit) uses check-then-INCR
 //     across BOTH counters atomically inside Lua. A denied call does
 //     NOT increment EITHER counter — necessary because the daily
@@ -72,6 +75,7 @@ import {
   MUTATION_WINDOW_SEC,
   publicKey,
   PUBLIC_WINDOW_SEC,
+  QUERY_WINDOW_SEC,
   SINGLE_GATE_LUA,
 } from './rate-limit.internal.js';
 import { middleware } from './trpc.js';
@@ -331,6 +335,120 @@ export function mutationLimit(procedure: string, opts: MutationOpts) {
       return next();
     }
     if (!result.allowed) {
+      throw new TRPCError({
+        code: 'TOO_MANY_REQUESTS',
+        message: 'Rate limit exceeded.',
+        cause: { retryAfterSec: result.retryAfterSec } as unknown as Error,
+      });
+    }
+    return next();
+  });
+}
+
+// Static map of query procedure → server-side DB fan-out count.
+// Used to enrich the redis_down warn log (M-2(a)) so an Upstash
+// outage that re-opens the high-fan-out read path is queryable in
+// logs. `poolRisk` is derived from fanOut: anything ≥ 4 queries is
+// 'high' because it's the class of read that exhausts the Supabase
+// pool first under uncapped load (debates.getBattle, the round-3
+// reviewer's specific concern). Values pulled from the recon (PR #62
+// summary table); update when a procedure's server implementation
+// changes. PR #62 round-1 security-reviewer MEDIUM-2(a).
+const QUERY_FAN_OUT: Record<string, number> = {
+  'battles.getRound': 1,
+  'battles.getBattle': 3,
+  'debates.getBattle': 5,
+  'matchmaking.getStatus': 0, // pure Redis — no DB queries
+  'user.me': 3, // 1 RPC sequential + 2 parallel
+  'feed.list': 1,
+  'factCheck.getVerdict': 1, // defensive default; no client caller today
+  'pushSubscriptions.listMine': 1, // defensive default; no client caller today
+  'wallet.balance': 2, // wallets + users in parallel
+  'wallet.transactions': 1, // single keyset seek (index-only)
+  'wallet.ghostEarnings': 1, // single SECURITY INVOKER aggregate RPC
+};
+
+function classifyPoolRisk(fanOut: number): 'low' | 'medium' | 'high' {
+  if (fanOut >= 4) return 'high';
+  if (fanOut >= 2) return 'medium';
+  return 'low';
+}
+
+// ---------------------------------------------------------------------------
+// queryLimit — read-tier middleware. Sibling to mutationLimit:
+//   - keys on ctx.userId (authed reads only — anon queries gated upstream
+//     by protectedProcedure where it applies)
+//   - fail-OPEN on Redis outage (matches mutation tier — a brief Upstash
+//     blip should not 429 polling reads and brick the live battle UI)
+//   - reuses SINGLE_GATE_LUA via checkAndIncrementSingle, so TTL-based
+//     Retry-After is threaded through `cause` for the responseMeta header
+//   - SEPARATE NAMESPACE: tier label 'q' — counter shape is
+//     `rl:q:{procedure}:u:{userId}:{windowStart}`. A user hammering
+//     battles.getRound at 180/min does NOT eat into their mutation budget
+//     for battles.submitAnswer or any other procedure.
+// Closes the M5.1 polling-query gap: round-3 reviewer flagged
+// debates.getBattle (5-query fan-out at 0.5Hz) and battles.getRound
+// (1Hz) as exhausting the DB pool before the IP-keyed outer hook fires.
+// ---------------------------------------------------------------------------
+interface QueryOpts {
+  /** Per-minute call budget for the authed user on this query procedure. */
+  readonly perMin: number;
+}
+
+export function queryLimit(procedure: string, opts: QueryOpts) {
+  return middleware(async ({ ctx, next }) => {
+    if (!ctx.userId) {
+      throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Sign in required.' });
+    }
+    const now = Date.now();
+    const key = authedKey('q', procedure, ctx.userId, QUERY_WINDOW_SEC, now);
+    const result = await checkAndIncrementSingle(
+      ctx.redis,
+      key,
+      opts.perMin,
+      QUERY_WINDOW_SEC,
+      /* failOpen */ true,
+    );
+    if (result.redisDown) {
+      // M-2(a): structured Upstash-outage warn enriched with fanOut +
+      // poolRisk so an outage that re-opens the high-fan-out read path
+      // (debates.getBattle 5q, battles.getBattle / user.me 3q) is
+      // queryable in logs. ADDITIVE — control flow is unchanged: we
+      // still `return next()` and the request proceeds. The log is the
+      // signal an operator queries during an outage to see exactly
+      // which query procedures are running uncapped. Round-3 follow-up
+      // (queued, not in scope here) is whether the high-risk
+      // procedures should fail-CLOSED instead.
+      const fanOut = QUERY_FAN_OUT[procedure] ?? 1;
+      console.warn(
+        JSON.stringify({
+          event: 'rate_limit.redis_down',
+          tier: 'q',
+          procedure,
+          posture: 'fail-open',
+          fanOut,
+          poolRisk: classifyPoolRisk(fanOut),
+        }),
+      );
+      return next();
+    }
+    if (!result.allowed) {
+      // Structured deny log so per-procedure deny frequency is observable
+      // in production. The wire message stays the redacted "Rate limit
+      // exceeded." (no budget value disclosed); only `retryAfterSec`
+      // lands server-side. Round-2 reviewer LOW-1: previously also logged
+      // `current: result.current` (copied from aiSpendLimit's pattern),
+      // dropped to match `mutationLimit` — counter visibility is lower
+      // value for a polling read tier and creates a calibrate-just-under-
+      // cap signal if logs ever land in a less-privileged sink.
+      console.warn(
+        JSON.stringify({
+          event: 'rate_limit.deny',
+          tier: 'q',
+          procedure,
+          retryAfterSec: result.retryAfterSec,
+        }),
+      );
       throw new TRPCError({
         code: 'TOO_MANY_REQUESTS',
         message: 'Rate limit exceeded.',

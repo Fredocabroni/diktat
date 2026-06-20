@@ -15,76 +15,87 @@
 import { TRPCError } from '@trpc/server';
 import { z } from 'zod';
 
-import { mutationLimit } from '../rate-limit.js';
+import { mutationLimit, queryLimit } from '../rate-limit.js';
 import { protectedProcedure, router } from '../trpc.js';
 
 const battleIdInput = z.object({ battleId: z.string().uuid() });
 
 export const battlesRouter = router({
-  getBattle: protectedProcedure.input(battleIdInput).query(async ({ ctx, input }) => {
-    const [battleRes, participantsRes, roundsRes] = await Promise.all([
-      ctx.db
-        .from('battles')
-        .select('id, mode, status, winner_user_id, ap_pot, started_at, ended_at')
-        .eq('id', input.battleId)
-        .maybeSingle(),
-      ctx.db
-        .from('battle_participants')
-        .select('user_id, seat, entry_ap, result, joined_at')
-        .eq('battle_id', input.battleId)
-        .order('seat', { ascending: true }),
-      ctx.db
-        .from('battle_rounds')
-        .select('id, round_no, payload, winner_user_id, created_at')
-        .eq('battle_id', input.battleId)
-        .order('round_no', { ascending: true }),
-    ]);
+  getBattle: protectedProcedure
+    // M5.1 — 60/min per user. Mount-only read (no client polling), but
+    // 3-query fan-out makes it worth a cap. 30s staleTime + per-page-
+    // visit cadence keep real usage well under this.
+    .use(queryLimit('battles.getBattle', { perMin: 60 }))
+    .input(battleIdInput)
+    .query(async ({ ctx, input }) => {
+      const [battleRes, participantsRes, roundsRes] = await Promise.all([
+        ctx.db
+          .from('battles')
+          .select('id, mode, status, winner_user_id, ap_pot, started_at, ended_at')
+          .eq('id', input.battleId)
+          .maybeSingle(),
+        ctx.db
+          .from('battle_participants')
+          .select('user_id, seat, entry_ap, result, joined_at')
+          .eq('battle_id', input.battleId)
+          .order('seat', { ascending: true }),
+        ctx.db
+          .from('battle_rounds')
+          .select('id, round_no, payload, winner_user_id, created_at')
+          .eq('battle_id', input.battleId)
+          .order('round_no', { ascending: true }),
+      ]);
 
-    if (battleRes.error) {
-      throw new TRPCError({
-        code: 'INTERNAL_SERVER_ERROR',
-        message: 'Failed to load battle.',
-        cause: battleRes.error,
-      });
-    }
-    if (!battleRes.data) {
-      throw new TRPCError({ code: 'NOT_FOUND', message: 'Battle not found.' });
-    }
-    if (participantsRes.error || roundsRes.error) {
-      throw new TRPCError({
-        code: 'INTERNAL_SERVER_ERROR',
-        message: 'Failed to load battle children.',
-        cause: participantsRes.error ?? roundsRes.error,
-      });
-    }
+      if (battleRes.error) {
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message: 'Failed to load battle.',
+          cause: battleRes.error,
+        });
+      }
+      if (!battleRes.data) {
+        throw new TRPCError({ code: 'NOT_FOUND', message: 'Battle not found.' });
+      }
+      if (participantsRes.error || roundsRes.error) {
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message: 'Failed to load battle children.',
+          cause: participantsRes.error ?? roundsRes.error,
+        });
+      }
 
-    const battle = battleRes.data;
-    return {
-      id: battle.id,
-      mode: battle.mode,
-      status: battle.status,
-      winnerUserId: battle.winner_user_id,
-      apPot: battle.ap_pot,
-      startedAt: battle.started_at,
-      endedAt: battle.ended_at,
-      participants: (participantsRes.data ?? []).map((p) => ({
-        userId: p.user_id,
-        seat: p.seat,
-        entryAp: p.entry_ap,
-        result: p.result,
-        joinedAt: p.joined_at,
-      })),
-      rounds: (roundsRes.data ?? []).map((r) => ({
-        id: r.id,
-        roundNo: r.round_no,
-        payload: r.payload,
-        winnerUserId: r.winner_user_id,
-        createdAt: r.created_at,
-      })),
-    };
-  }),
+      const battle = battleRes.data;
+      return {
+        id: battle.id,
+        mode: battle.mode,
+        status: battle.status,
+        winnerUserId: battle.winner_user_id,
+        apPot: battle.ap_pot,
+        startedAt: battle.started_at,
+        endedAt: battle.ended_at,
+        participants: (participantsRes.data ?? []).map((p) => ({
+          userId: p.user_id,
+          seat: p.seat,
+          entryAp: p.entry_ap,
+          result: p.result,
+          joinedAt: p.joined_at,
+        })),
+        rounds: (roundsRes.data ?? []).map((r) => ({
+          id: r.id,
+          roundNo: r.round_no,
+          payload: r.payload,
+          winnerUserId: r.winner_user_id,
+          createdAt: r.created_at,
+        })),
+      };
+    }),
 
   getRound: protectedProcedure
+    // M5.1 — 180/min per user. Polled at 1Hz from BattleClient = 60/min
+    // baseline; 3x headroom absorbs reconnects + the brief overlap
+    // window when a battle transitions live→settled without unmounting.
+    // Single-query call so the DB cost is bounded.
+    .use(queryLimit('battles.getRound', { perMin: 180 }))
     .input(
       battleIdInput.extend({
         sinceRoundNo: z.number().int().min(-1).default(-1),
