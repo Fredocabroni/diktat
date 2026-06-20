@@ -1,8 +1,9 @@
+import { TRPCError } from '@trpc/server';
 import { describe, expect, it } from 'vitest';
 
-import type { Context } from '../../src/context.js';
+import type { Context, RedisClient } from '../../src/context.js';
 import { appRouter } from '../../src/routers/index.js';
-import { makeCtx } from '../helpers.js';
+import { fakeRedis, makeCtx } from '../helpers.js';
 
 /**
  * Wallet router talks to two tables in `balance` (wallets + users), one
@@ -210,4 +211,117 @@ describe('walletRouter.ghostEarnings', () => {
 
     expect(await caller.wallet.ghostEarnings()).toEqual({ totalAp: 0 });
   });
+});
+
+// ---------------------------------------------------------------------------
+// M5.1 wallet read-tier wiring — fat-finger guard.
+//
+// Each test drives the live `walletRouter` via createCaller with a fakeRedis
+// whose Lua return value is fixed at (cap, ttl). The middleware computes
+// `allowed = current <= limit` JS-side from the returned cur, so a return
+// of `[cap, ttl]` → ALLOWED and `[cap+1, ttl]` → 429. By pinning the
+// boundary at the wired cap value (60 / 120 / 60), a fat-finger swap
+// (transactions wired at 60 instead of 120, balance wired at 120, etc.)
+// fails immediately: `[120, ttl]` against a 60-capped procedure denies
+// instead of allowing.
+//
+// Also asserts the rl:q:wallet.<proc>:u:user-123:<window> key shape so
+// a future refactor that drops the `q` tier label or misnames the
+// procedure slug breaks the test rather than silently reshaping the
+// counter namespace.
+// ---------------------------------------------------------------------------
+
+interface WiredCallSite {
+  readonly name: 'wallet.balance' | 'wallet.transactions' | 'wallet.ghostEarnings';
+  readonly cap: number;
+  readonly fire: (caller: ReturnType<typeof appRouter.createCaller>) => Promise<unknown>;
+  readonly buildDb: () => Context['db'];
+}
+
+function balanceDb(): Context['db'] {
+  return multiTableDb({
+    wallets: {
+      data: { usdc_balance_micro: 1_000_000, display_currency: 'USD', status: 'active' },
+      error: null,
+    },
+    users: { data: { current_ap: 100, tier_id: 0 }, error: null },
+  }).db;
+}
+function transactionsDb(): Context['db'] {
+  return multiTableDb({ ap_transactions: { data: [], error: null } }).db;
+}
+function ghostEarningsDb(): Context['db'] {
+  return multiTableDb({}, { wallet_ghost_earnings: { data: 0, error: null } }).db;
+}
+
+const WIRED: ReadonlyArray<WiredCallSite> = [
+  {
+    name: 'wallet.balance',
+    cap: 60,
+    fire: (c) => c.wallet.balance(),
+    buildDb: balanceDb,
+  },
+  {
+    name: 'wallet.transactions',
+    cap: 120,
+    fire: (c) => c.wallet.transactions({ limit: 50 }),
+    buildDb: transactionsDb,
+  },
+  {
+    name: 'wallet.ghostEarnings',
+    cap: 60,
+    fire: (c) => c.wallet.ghostEarnings(),
+    buildDb: ghostEarningsDb,
+  },
+];
+
+describe('walletRouter — M5.1 queryLimit wiring (fat-finger guard)', () => {
+  for (const site of WIRED) {
+    it(`${site.name} wired at exactly ${site.cap}/min — [cap] allowed, [cap+1] denied`, async () => {
+      // 1) At the cap → middleware allows; resolver runs to completion.
+      const redisAllow = fakeRedis();
+      redisAllow.evalReturn = [site.cap, 60];
+      const ctxAllow = makeCtx({
+        db: site.buildDb(),
+        redis: redisAllow as unknown as RedisClient,
+      });
+      const callerAllow = appRouter.createCaller(ctxAllow);
+      await expect(site.fire(callerAllow)).resolves.toBeDefined();
+
+      // 2) One over the cap → middleware throws TOO_MANY_REQUESTS.
+      //    If a fat-finger swap landed (e.g. wallet.transactions wired
+      //    at 60), this assertion flips: a [cap+1] of the EXPECTED cap
+      //    would slip through against the wrong wired value.
+      const redisDeny = fakeRedis();
+      redisDeny.evalReturn = [site.cap + 1, 60];
+      const ctxDeny = makeCtx({
+        db: site.buildDb(),
+        redis: redisDeny as unknown as RedisClient,
+      });
+      const callerDeny = appRouter.createCaller(ctxDeny);
+      await expect(site.fire(callerDeny)).rejects.toBeInstanceOf(TRPCError);
+      await expect(site.fire(callerDeny)).rejects.toMatchObject({ code: 'TOO_MANY_REQUESTS' });
+    });
+
+    it(`${site.name} emits the rl:q:${site.name}:u:user-123:<window> key shape`, async () => {
+      const redis = fakeRedis();
+      redis.evalReturn = [1, 60];
+      const ctx = makeCtx({
+        db: site.buildDb(),
+        redis: redis as unknown as RedisClient,
+      });
+      const caller = appRouter.createCaller(ctx);
+      await site.fire(caller);
+
+      // The very first eval on this fakeRedis must be the queryLimit
+      // gate (no upstream middleware on these procedures touches Redis
+      // pre-resolver). Pin both the tier and the procedure slug.
+      expect(redis.evalCalls.length).toBeGreaterThanOrEqual(1);
+      const key = redis.evalCalls[0]!.keys[0]!;
+      const expected = new RegExp(`^rl:q:${site.name.replace('.', '\\.')}:u:user-123:\\d+$`);
+      expect(key).toMatch(expected);
+      // Cross-tier guard: never the mut/ai/pub/global namespaces.
+      expect(key).not.toMatch(/^rl:(mut|ai|pub|global):/);
+    });
+  }
 });

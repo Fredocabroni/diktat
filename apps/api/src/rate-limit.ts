@@ -363,6 +363,9 @@ const QUERY_FAN_OUT: Record<string, number> = {
   'feed.list': 1,
   'factCheck.getVerdict': 1, // defensive default; no client caller today
   'pushSubscriptions.listMine': 1, // defensive default; no client caller today
+  'wallet.balance': 2, // wallets + users in parallel
+  'wallet.transactions': 1, // single keyset seek (index-only)
+  'wallet.ghostEarnings': 1, // single SECURITY INVOKER aggregate RPC
 };
 
 function classifyPoolRisk(fanOut: number): 'low' | 'medium' | 'high' {
@@ -430,17 +433,19 @@ export function queryLimit(procedure: string, opts: QueryOpts) {
       return next();
     }
     if (!result.allowed) {
-      // LOW-1: structured deny log mirroring `aiSpendLimit`'s pattern
-      // so per-procedure deny frequency is observable in production.
-      // The wire message stays the redacted "Rate limit exceeded."
-      // (no budget value disclosed); the numeric `current` + the
-      // `retryAfterSec` land server-side only.
+      // Structured deny log so per-procedure deny frequency is observable
+      // in production. The wire message stays the redacted "Rate limit
+      // exceeded." (no budget value disclosed); only `retryAfterSec`
+      // lands server-side. Round-2 reviewer LOW-1: previously also logged
+      // `current: result.current` (copied from aiSpendLimit's pattern),
+      // dropped to match `mutationLimit` — counter visibility is lower
+      // value for a polling read tier and creates a calibrate-just-under-
+      // cap signal if logs ever land in a less-privileged sink.
       console.warn(
         JSON.stringify({
           event: 'rate_limit.deny',
           tier: 'q',
           procedure,
-          current: result.current,
           retryAfterSec: result.retryAfterSec,
         }),
       );
