@@ -24,6 +24,28 @@ describe('buildOuterHookBlockedBody — MEDIUM-3 regression guard', () => {
     expect(Object.keys(body).sort()).toEqual(['error', 'window']);
   });
 
+  it('retains the public response contract — error + window both present and non-empty', () => {
+    // The 429 body is a public response contract; clients can depend
+    // on `error` (rendered as a user-facing string) and `window` (used
+    // to set retry timing UX). The `toEqual` above already pins the
+    // shape, but per-field assertions name each field explicitly so a
+    // future refactor that drops `error` or `window` fails with a
+    // clearer message ("expected body.window to be '60s'") than a
+    // structural toEqual diff. Two failure modes are guarded
+    // independently:
+    //   - drop a field entirely (e.g. ship `{ error }`)
+    //   - shorten a field to empty string (e.g. ship `{ error: '' }`)
+    const body = buildOuterHookBlockedBody();
+
+    expect(body.error).toBe('Too many requests.');
+    expect(typeof body.error).toBe('string');
+    expect(body.error.length).toBeGreaterThan(0);
+
+    expect(body.window).toBe('60s');
+    expect(typeof body.window).toBe('string');
+    expect(body.window.length).toBeGreaterThan(0);
+  });
+
   it('does NOT include the numeric rate-limit ceiling (calibration oracle)', () => {
     const body = buildOuterHookBlockedBody();
     // Defense-in-depth: catch any future revival of the field, however
