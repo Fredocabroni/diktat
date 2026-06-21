@@ -1,13 +1,61 @@
 // Internal-only surface for the M5 rate limiter. Production code MUST
 // NOT import from this file — only `rate-limit.test.ts` and the dev
 // probe (`scripts/probe-m5-rate-limit-runtime.ts`, gitignored) should.
-// The `.internal.ts` naming convention signals intent; a future lint
-// rule can enforce it at the boundary.
+// The `.internal.ts` naming convention signals intent; the
+// `no-restricted-imports` rule in the repo's flat ESLint config now
+// enforces it at the boundary (PR with the typed-cause + ESLint
+// boundary hardening bundle; rule scope: `apps/api/src/**/*.ts`
+// excluding the barrel + test/script carve-outs).
 //
 // PR #56 r2 security-reviewer L-internals: prevents the Lua scripts +
 // key-builder functions from being trivially importable from the
 // `rate-limit` module. The middleware factories remain the only
 // public surface from `rate-limit.ts`.
+//
+// ---------------------------------------------------------------------------
+// SHARD-MODE ASSUMPTION — load-bearing for COMBINED_ATOMIC_LUA atomicity.
+// ---------------------------------------------------------------------------
+//
+// The Lua scripts below assume Upstash REST runs in SINGLE-SHARD mode
+// (the current dev + prod posture). Under single-shard, EVAL runs on
+// one Redis node and the GET / check / INCR / INCR sequence in
+// `COMBINED_ATOMIC_LUA` is fully atomic — no concurrent caller can
+// interleave between the daily/burst GETs and their corresponding
+// INCRs.
+//
+// Under Upstash CLUSTER mode the two keys (`KEYS[1]` daily,
+// `KEYS[2]` burst) may hash to DIFFERENT shards. EVAL across cross-
+// shard keys is not atomic in cluster Redis — two concurrent callers
+// could both pass the daily check and then both INCR, exceeding the
+// daily budget by 1 per concurrent racer. The AI-spend ledger budget
+// gate then under-counts and the per-task USD cap leaks proportional
+// to concurrency.
+//
+// Cluster-mode migration path — pick ONE:
+//   (a) Hash-tag the two keys so they land on the same shard. Rewrite
+//       `authedKey('ai', ...)` to wrap the procedure slug in `{...}`
+//       so Redis cluster sharding hashes only the bracketed portion.
+//       Keys become `rl:ai:{<procedure>:<userId>}:<windowStart>` and
+//       both daily + burst share the same hash slot. Lua semantics
+//       unchanged; `COMBINED_ATOMIC_LUA` stays atomic.
+//   (b) Replace `COMBINED_ATOMIC_LUA` with a Redis WATCH/MULTI/EXEC
+//       optimistic-concurrency block in the TS caller. More round
+//       trips per call (worse latency) but explicit serializability
+//       semantics that don't depend on key co-location.
+//   (c) Serialize to one Redis key with an embedded counter pair
+//       (e.g. JSON `{d, b, dExpAt, bExpAt}` parsed in Lua). Single
+//       key by definition, but loses fixed-window TTL ergonomics and
+//       requires manual expiration accounting.
+//
+// (a) is the minimal-diff path and the default recommendation; (b)
+// is the safest in heterogeneous deployments; (c) trades semantic
+// clarity for absolute serializability. The choice should be made
+// in the same PR that flips Upstash to cluster mode, with a
+// regression test that asserts the daily counter stays accurate
+// under concurrent load.
+//
+// PR #62 round-3 leftover #7 (COMBINED_ATOMIC_LUA single-shard
+// atomicity assumption).
 
 // ---------------------------------------------------------------------------
 // Lua scripts
@@ -35,6 +83,12 @@ return {cur, ttl}
 // EXPIRE-only-on-first-INCR is intentional fixed-window: each new
 // windowStart minted by the TS caller is a new key. Refreshing TTL
 // on later INCRs would defeat rollover.
+//
+// ATOMICITY ASSUMES SINGLE-SHARD UPSTASH. See the file header for
+// the cluster-mode migration paths — the GET / check / INCR / INCR
+// sequence below is only atomic when `KEYS[1]` (daily) and `KEYS[2]`
+// (burst) reside on the same Redis node. Cluster mode breaks this
+// without a hash-tag rewrite of the key shape.
 export const COMBINED_ATOMIC_LUA = `
 local d = tonumber(redis.call('GET', KEYS[1]) or '0')
 local b = tonumber(redis.call('GET', KEYS[2]) or '0')
