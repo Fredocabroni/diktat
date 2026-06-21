@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildOuterHookBlockedBody } from '../src/outer-hook.js';
+import { buildOuterHookBlockedBody, OUTER_HOOK_WINDOW_SEC } from '../src/outer-hook.js';
 
 // ---------------------------------------------------------------------------
 // PR #65 round-3 MEDIUM-3 — outer-hook 429 body no longer leaks limit.
@@ -20,7 +20,7 @@ import { buildOuterHookBlockedBody } from '../src/outer-hook.js';
 describe('buildOuterHookBlockedBody — MEDIUM-3 regression guard', () => {
   it('returns exactly { error, window } with no limit field', () => {
     const body = buildOuterHookBlockedBody();
-    expect(body).toEqual({ error: 'Too many requests.', window: '60s' });
+    expect(body).toEqual({ error: 'Too many requests.', window: `${OUTER_HOOK_WINDOW_SEC}s` });
     expect(Object.keys(body).sort()).toEqual(['error', 'window']);
   });
 
@@ -41,9 +41,33 @@ describe('buildOuterHookBlockedBody — MEDIUM-3 regression guard', () => {
     expect(typeof body.error).toBe('string');
     expect(body.error.length).toBeGreaterThan(0);
 
-    expect(body.window).toBe('60s');
+    expect(body.window).toBe(`${OUTER_HOOK_WINDOW_SEC}s`);
     expect(typeof body.window).toBe('string');
     expect(body.window.length).toBeGreaterThan(0);
+  });
+
+  it('derives window from OUTER_HOOK_WINDOW_SEC — no magic literal', () => {
+    // LOW-4 regression guard: the body's `window` field MUST be derived
+    // from the same `OUTER_HOOK_WINDOW_SEC` constant that server.ts's
+    // responseMeta uses as the Retry-After fallback. A future change to
+    // the constant must propagate to the body string; a future refactor
+    // that re-introduces a hardcoded `'60s'` (or any other literal) and
+    // happens to match the constant today would still drift the moment
+    // someone tunes the window. This test fires loud either way:
+    //
+    //   - constant changed but body not updated → body.window !==
+    //     `${OUTER_HOOK_WINDOW_SEC}s`, fails.
+    //   - body string hardcoded back to a literal that happens to
+    //     match → still passes today, but the next constant tune
+    //     surfaces the drift via the same assertion.
+    const body = buildOuterHookBlockedBody();
+    expect(body.window).toBe(`${OUTER_HOOK_WINDOW_SEC}s`);
+
+    // Belt-and-suspenders: confirm the constant is what we think it is
+    // at test time. A future bump to e.g. 30s should require a
+    // deliberate update here as a checkpoint that the change went
+    // through review (not a silent drift).
+    expect(OUTER_HOOK_WINDOW_SEC).toBe(60);
   });
 
   it('does NOT include the numeric rate-limit ceiling (calibration oracle)', () => {
