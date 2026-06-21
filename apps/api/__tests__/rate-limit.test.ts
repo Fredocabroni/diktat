@@ -10,6 +10,7 @@ import {
   mutationLimit,
   publicLimit,
   queryLimit,
+  RateLimitCause,
 } from '../src/rate-limit.js';
 
 import { fakeRedis, makeCtx } from './helpers.js';
@@ -366,12 +367,17 @@ describe('queryLimit (M5.1 read-tier, single-gate, fail-open)', () => {
   });
 
   it('threads TTL-based Retry-After through TRPCError.cause on deny', async () => {
-    // Lua returns [cur=181, ttl=42] on deny; cause carries 42.
+    // Lua returns [cur=181, ttl=42] on deny; cause carries 42 via the
+    // typed RateLimitCause (PR #62 round-3 leftover #8). Reading via
+    // `instanceof` instead of a duck-typed cast keeps both sides of the
+    // contract honest — a future regression where the throw site stops
+    // wrapping with `new RateLimitCause(...)` fails this assertion loudly.
     const { ctx } = withRedis([181, 42]);
     const mw = queryLimit('debates.getBattle', { perMin: 90 });
     const r = await runMiddleware(mw, ctx);
-    const cause = (r.error as TRPCError).cause as { retryAfterSec?: number } | undefined;
-    expect(cause?.retryAfterSec).toBe(42);
+    const { cause } = r.error as TRPCError;
+    expect(cause).toBeInstanceOf(RateLimitCause);
+    expect((cause as RateLimitCause).retryAfterSec).toBe(42);
   });
 
   it('fail-OPEN on Redis throw — proceeds without erroring', async () => {

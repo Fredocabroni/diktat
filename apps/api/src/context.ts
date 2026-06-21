@@ -63,6 +63,24 @@ export function getOrBuildRedis(env: Env): Redis {
   return cachedRedis;
 }
 
+/**
+ * Test-only escape hatch — clear the module-level Redis singleton so the
+ * next `getOrBuildRedis(env)` call reconstructs from scratch. Unit
+ * tests today bypass the singleton entirely by passing a `fakeRedis()`
+ * through `makeCtx` overrides, but any future integration test that
+ * calls `buildContext` directly would otherwise inherit a stale singleton
+ * across files. Wire this into test teardown wherever an integration
+ * test path may have populated the cache.
+ *
+ * Production code MUST NOT call this — the singleton's purpose is the
+ * exact-once HTTP-client construction at boot; resetting it mid-process
+ * would orphan the prior reference held by server.ts's outer hook.
+ * PR #62 round-3 leftover #4.
+ */
+export function resetRedisCache(): void {
+  cachedRedis = null;
+}
+
 function extractBearer(header: unknown): string | null {
   if (typeof header !== 'string') return null;
   if (!header.toLowerCase().startsWith('bearer ')) return null;
