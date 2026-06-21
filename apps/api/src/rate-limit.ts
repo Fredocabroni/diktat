@@ -216,6 +216,48 @@ export async function checkAndIncrementCombined(
 }
 
 // ---------------------------------------------------------------------------
+// Typed cause for TRPCError — eliminates the `as unknown as Error` casts.
+//
+// Before: throw sites wrote `cause: { retryAfterSec } as unknown as Error`
+// and the `responseMeta` consumer in server.ts read it back via
+// `cause as { retryAfterSec?: number } | undefined`. Two unsafe casts
+// at opposite ends of a string-typed contract — a rename or shape drift
+// on either side silently fell through to a hardcoded 60s Retry-After
+// fallback with no compile-time signal.
+//
+// After: `RateLimitCause` is a real Error subclass (satisfies tRPC's
+// `TRPCError.cause: Error | undefined` requirement legitimately) and
+// `extractRetryAfterSec` does an `instanceof RateLimitCause` check at
+// the consumer site — typed both ways, zero casts. PR #62 round-3
+// leftover #8.
+// ---------------------------------------------------------------------------
+
+export class RateLimitCause extends Error {
+  readonly retryAfterSec: number;
+  constructor(retryAfterSec: number) {
+    super(`rate-limit retry-after ${retryAfterSec}s`);
+    this.name = 'RateLimitCause';
+    this.retryAfterSec = retryAfterSec;
+  }
+}
+
+/**
+ * Read the rate-limit `Retry-After` value from a TRPCError's `cause`.
+ * Falls back to `fallbackSec` when the cause is absent, of the wrong
+ * type, or carries a non-positive `retryAfterSec`. The fallback is
+ * EXPLICIT — if a future refactor swaps the cause shape without
+ * updating both ends, `instanceof RateLimitCause` returns false and
+ * the fallback fires loudly (logged via the consumer's own
+ * observability), not silently.
+ */
+export function extractRetryAfterSec(cause: unknown, fallbackSec: number): number {
+  if (cause instanceof RateLimitCause && cause.retryAfterSec > 0) {
+    return cause.retryAfterSec;
+  }
+  return fallbackSec;
+}
+
+// ---------------------------------------------------------------------------
 // Middleware factories
 // ---------------------------------------------------------------------------
 
@@ -289,7 +331,7 @@ export function aiSpendLimit(procedure: string, opts: AiSpendOpts) {
       throw new TRPCError({
         code: 'TOO_MANY_REQUESTS',
         message: 'Rate limit unavailable. Try again shortly.',
-        cause: { retryAfterSec: BURST_WINDOW_SEC } as unknown as Error,
+        cause: new RateLimitCause(BURST_WINDOW_SEC),
       });
     }
     if (!result.allowed) {
@@ -316,7 +358,7 @@ export function aiSpendLimit(procedure: string, opts: AiSpendOpts) {
         // Carries retryAfterSec through to responseMeta in server.ts
         // so the Retry-After header reflects the ACTUAL window of the
         // denying gate — 86400s for daily, 60s for burst.
-        cause: { retryAfterSec: result.retryAfterSec } as unknown as Error,
+        cause: new RateLimitCause(result.retryAfterSec),
       });
     }
     return next();
@@ -371,7 +413,7 @@ export function mutationLimit(procedure: string, opts: MutationOpts) {
       throw new TRPCError({
         code: 'TOO_MANY_REQUESTS',
         message: 'Rate limit exceeded.',
-        cause: { retryAfterSec: result.retryAfterSec } as unknown as Error,
+        cause: new RateLimitCause(result.retryAfterSec),
       });
     }
     return next();
@@ -486,7 +528,7 @@ export function queryLimit(procedure: string, opts: QueryOpts) {
       throw new TRPCError({
         code: 'TOO_MANY_REQUESTS',
         message: 'Rate limit exceeded.',
-        cause: { retryAfterSec: result.retryAfterSec } as unknown as Error,
+        cause: new RateLimitCause(result.retryAfterSec),
       });
     }
     return next();
@@ -529,7 +571,7 @@ export function publicLimit(procedure: string, opts: PublicOpts) {
       throw new TRPCError({
         code: 'TOO_MANY_REQUESTS',
         message: 'Rate limit exceeded.',
-        cause: { retryAfterSec: result.retryAfterSec } as unknown as Error,
+        cause: new RateLimitCause(result.retryAfterSec),
       });
     }
     return next();

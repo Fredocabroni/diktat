@@ -5,7 +5,7 @@ import Fastify from 'fastify';
 import { buildContext, getOrBuildRedis, normalizeIpToCidr, type RedisClient } from './context.js';
 import { loadEnv } from './env.js';
 import { buildOuterHookBlockedBody, OUTER_HOOK_WINDOW_SEC } from './outer-hook.js';
-import { checkGlobalOuterHook } from './rate-limit.js';
+import { checkGlobalOuterHook, extractRetryAfterSec } from './rate-limit.js';
 import { appRouter, type AppRouter } from './routers/index.js';
 
 const env = loadEnv();
@@ -131,16 +131,15 @@ await app.register(fastifyTRPCPlugin, {
     responseMeta({ errors }) {
       // Find any TOO_MANY_REQUESTS error and read its retryAfterSec
       // from `cause`. The rate-limit middleware in `rate-limit.ts`
-      // threads the denying gate's TTL through `cause` so this header
-      // is accurate for both 60s windows AND the daily 86400s window.
-      // Fall back to 60 if cause is missing or malformed.
+      // threads the denying gate's TTL through a typed `RateLimitCause`
+      // so this header is accurate for both 60s windows AND the daily
+      // 86400s window. `extractRetryAfterSec` does the instanceof check
+      // at the consumer site — typed both ends, zero casts. Fallback
+      // is OUTER_HOOK_WINDOW_SEC when the cause is absent, of the wrong
+      // type, or carries a non-positive retryAfterSec.
       for (const err of errors) {
         if (err.code !== 'TOO_MANY_REQUESTS') continue;
-        const cause = err.cause as { retryAfterSec?: number } | undefined;
-        const retryAfter =
-          cause && typeof cause.retryAfterSec === 'number' && cause.retryAfterSec > 0
-            ? cause.retryAfterSec
-            : OUTER_HOOK_WINDOW_SEC;
+        const retryAfter = extractRetryAfterSec(err.cause, OUTER_HOOK_WINDOW_SEC);
         return { headers: new Headers({ 'retry-after': String(retryAfter) }) };
       }
       return {};
