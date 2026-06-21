@@ -219,6 +219,28 @@ export async function checkAndIncrementCombined(
 // Middleware factories
 // ---------------------------------------------------------------------------
 
+// Allowlist regex for the `procedure` argument embedded into Redis keys
+// at `rl:${tier}:${procedure}:u:${userId}:${windowStart}`. All current
+// call sites pass hard-coded string literals — not exploitable today —
+// but a future caller passing a dynamic or slash-containing string
+// could corrupt the Redis key namespace (e.g. inject a `:` and silently
+// redirect counter increments to another tier or user). The factory
+// throws at MODULE-LOAD time when the router files import this file
+// and wire their procedures, so a malformed slug is a fail-fast boot
+// error rather than a runtime data-shape bug — symmetric guard to the
+// UUID validation `subjectSchema.parse()` applies on `userId`. PR #65
+// round-3 reviewer MEDIUM-2.
+const PROCEDURE_RE = /^[a-zA-Z][a-zA-Z0-9._-]*$/;
+
+function assertProcedureSlug(factory: string, slug: string): void {
+  if (!PROCEDURE_RE.test(slug)) {
+    throw new Error(
+      `${factory}: invalid procedure slug ${JSON.stringify(slug)} — ` +
+        `must match ${PROCEDURE_RE.source}`,
+    );
+  }
+}
+
 interface AiSpendOpts {
   /** Daily call budget. Rolls over on UTC day boundary. */
   readonly daily: number;
@@ -310,6 +332,11 @@ interface MutationOpts {
 
 export function mutationLimit(procedure: string, opts: MutationOpts) {
   const counterName = opts.sharedKey ?? procedure;
+  // Validate the value that actually hits the Redis key — `counterName`
+  // resolves to either `sharedKey` (when two procedures share a budget,
+  // e.g. matchmaking.enqueue + cancel) or `procedure`. Whichever lands
+  // in `rl:mut:<X>:u:...` must clear the allowlist.
+  assertProcedureSlug('mutationLimit', counterName);
   return middleware(async ({ ctx, next }) => {
     if (!ctx.userId) {
       throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Sign in required.' });
@@ -396,6 +423,7 @@ interface QueryOpts {
 }
 
 export function queryLimit(procedure: string, opts: QueryOpts) {
+  assertProcedureSlug('queryLimit', procedure);
   return middleware(async ({ ctx, next }) => {
     if (!ctx.userId) {
       throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Sign in required.' });

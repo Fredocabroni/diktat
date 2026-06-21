@@ -410,3 +410,99 @@ describe('queryLimit (M5.1 read-tier, single-gate, fail-open)', () => {
     expect((r.error as TRPCError).code).toBe('UNAUTHORIZED');
   });
 });
+
+// ---------------------------------------------------------------------------
+// PR #65 round-3 MEDIUM-2 — procedure-arg allowlist guard.
+//
+// `queryLimit` and `mutationLimit` embed the `procedure` string directly
+// into the Redis key. A future caller passing a slash, colon, or
+// whitespace-containing slug could silently redirect counter increments
+// to a different tier/user namespace. The factory now throws at module-
+// load time (when router files import + wire) if the slug doesn't match
+// `/^[a-zA-Z][a-zA-Z0-9._-]*$/` — fail-fast at boot, never a malformed
+// key at runtime. Symmetric to the UUID validation already applied to
+// `userId` via `subjectSchema.parse()`.
+//
+// The factory body throws synchronously (Error, not TRPCError) — these
+// asserts run before the returned middleware closure exists, so a bad
+// slug never reaches the per-request path. Tests invoke the factories
+// directly and assert throw/no-throw.
+// ---------------------------------------------------------------------------
+describe('PROCEDURE_RE allowlist — queryLimit / mutationLimit factory guard', () => {
+  // Valid slugs accepted today by every wired call site.
+  const VALID_SLUGS = [
+    'wallet.balance',
+    'wallet.transactions',
+    'wallet.ghostEarnings',
+    'debates.getBattle',
+    'battles.getRound',
+    'matchmaking.getStatus',
+    'user.me',
+    'feed.list',
+    'factCheck.getVerdict',
+    'pushSubscriptions.listMine',
+    'pushSubs', // shared-key shape (no dot)
+    'a',
+    'A.b_C-d.1',
+  ];
+
+  // Each pattern targets a specific injection / corruption vector.
+  const INVALID_SLUGS: Array<{ slug: string; reason: string }> = [
+    { slug: '', reason: 'empty string — match-everything in patterns' },
+    { slug: '1leadingDigit', reason: 'starts with digit' },
+    { slug: '.leadingDot', reason: 'starts with dot' },
+    { slug: '_leadingUnderscore', reason: 'starts with underscore (not in [a-zA-Z])' },
+    { slug: 'has space', reason: 'whitespace' },
+    {
+      slug: 'tier:injection',
+      reason: 'embedded colon — would corrupt rl:{tier}:{procedure}:... shape',
+    },
+    { slug: 'has/slash', reason: 'embedded slash' },
+    { slug: 'wallet.balance\n', reason: 'trailing newline (log injection class)' },
+    { slug: '*wildcard', reason: 'glob char — KEYS pattern hazard' },
+  ];
+
+  describe('queryLimit', () => {
+    for (const slug of VALID_SLUGS) {
+      it(`accepts valid slug "${slug}"`, () => {
+        expect(() => queryLimit(slug, { perMin: 60 })).not.toThrow();
+      });
+    }
+
+    for (const { slug, reason } of INVALID_SLUGS) {
+      it(`rejects ${reason} (${JSON.stringify(slug)})`, () => {
+        expect(() => queryLimit(slug, { perMin: 60 })).toThrow(/invalid procedure slug/);
+      });
+    }
+  });
+
+  describe('mutationLimit', () => {
+    for (const slug of VALID_SLUGS) {
+      it(`accepts valid slug "${slug}"`, () => {
+        expect(() => mutationLimit(slug, { perMin: 10 })).not.toThrow();
+      });
+    }
+
+    for (const { slug, reason } of INVALID_SLUGS) {
+      it(`rejects ${reason} (${JSON.stringify(slug)})`, () => {
+        expect(() => mutationLimit(slug, { perMin: 10 })).toThrow(/invalid procedure slug/);
+      });
+    }
+
+    // sharedKey is the value that actually hits the Redis key when set —
+    // the guard validates sharedKey precedence over procedure, not the
+    // other way around. A clean procedure + bad sharedKey must still
+    // throw; otherwise the injection survives via the shared-counter path.
+    it('validates sharedKey precedence: clean procedure + malformed sharedKey throws', () => {
+      expect(() =>
+        mutationLimit('matchmaking.enqueue', { perMin: 20, sharedKey: 'bad:slug' }),
+      ).toThrow(/invalid procedure slug/);
+    });
+
+    it('validates sharedKey precedence: clean procedure + clean sharedKey passes', () => {
+      expect(() =>
+        mutationLimit('matchmaking.enqueue', { perMin: 20, sharedKey: 'matchmaking' }),
+      ).not.toThrow();
+    });
+  });
+});

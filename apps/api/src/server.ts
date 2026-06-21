@@ -4,6 +4,7 @@ import Fastify from 'fastify';
 
 import { buildContext, getOrBuildRedis, normalizeIpToCidr, type RedisClient } from './context.js';
 import { loadEnv } from './env.js';
+import { buildOuterHookBlockedBody, OUTER_HOOK_WINDOW_SEC } from './outer-hook.js';
 import { checkGlobalOuterHook } from './rate-limit.js';
 import { appRouter, type AppRouter } from './routers/index.js';
 
@@ -18,7 +19,10 @@ const outerRedis = getOrBuildRedis(env) as unknown as RedisClient;
 // generous human-burst per /24 NAT block. Tighten in M6 if real abuse
 // shows up post-launch.
 const OUTER_HOOK_PER_MIN = 1_200;
-const OUTER_HOOK_WINDOW_SEC = 60;
+// OUTER_HOOK_WINDOW_SEC moved to ./outer-hook.ts so the body builder
+// derives `window: '${N}s'` from the same single source of truth that
+// `responseMeta`'s Retry-After fallback below uses. PR #67 round-1
+// reviewer LOW-4. One-way import: server.ts → outer-hook.ts; no cycle.
 
 // Paths exempt from the outer hook. Container / k8s / Railway health
 // checks fire often and would otherwise consume the IP-keyed budget.
@@ -99,10 +103,16 @@ app.addHook('onRequest', async (request, reply) => {
     // the checkGlobalOuterHook result (now threaded through the
     // single-gate helper) — accurate to the second instead of the
     // round window value.
+    // Body shape lives in `outer-hook.ts` so it's unit-testable without
+    // booting the Fastify app. The `limit` field was deliberately
+    // dropped — it disclosed the numeric ceiling (1200/min) and let an
+    // adversary calibrate just under it. RFC 6585 §4: Retry-After is
+    // sufficient; the limit value adds no signal a legitimate client
+    // needs. PR #65 round-3 reviewer MEDIUM-3.
     return reply
       .code(429)
       .header('Retry-After', String(result.retryAfterSec))
-      .send({ error: 'Too many requests.', limit: OUTER_HOOK_PER_MIN, window: '60s' });
+      .send(buildOuterHookBlockedBody());
   }
 });
 
