@@ -249,6 +249,12 @@ interface AiSpendOpts {
 }
 
 export function aiSpendLimit(procedure: string, opts: AiSpendOpts) {
+  // PR #67 round-2 reviewer LOW-3 (INFO-1 in round-1). Symmetric guard
+  // to queryLimit/mutationLimit. aiSpendLimit's slug embeds into BOTH
+  // the daily and burst counters; a malformed slug here would corrupt
+  // the AI spend ledger keys, not just a rate-limit counter — higher
+  // ledger-integrity impact than the other tiers.
+  assertProcedureSlug('aiSpendLimit', procedure);
   return middleware(async ({ ctx, next }) => {
     if (!ctx.userId) {
       // Should be unreachable — aiSpendLimit only chains after
@@ -492,6 +498,12 @@ interface PublicOpts {
 }
 
 export function publicLimit(procedure: string, opts: PublicOpts) {
+  // PR #67 round-2 reviewer LOW-2 (round-1 too). Closes the asymmetry
+  // PR #67 commit ef0186f created when adding the guard to queryLimit
+  // and mutationLimit only. publicLimit's slug embeds into the
+  // IP-keyed Redis key the same way — a malformed slug would corrupt
+  // its key namespace identically.
+  assertProcedureSlug('publicLimit', procedure);
   return middleware(async ({ ctx, next }) => {
     const now = Date.now();
     const key = publicKey(procedure, ctx.clientIpCidr, PUBLIC_WINDOW_SEC, now);

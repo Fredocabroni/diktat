@@ -505,4 +505,52 @@ describe('PROCEDURE_RE allowlist — queryLimit / mutationLimit factory guard', 
       ).not.toThrow();
     });
   });
+
+  describe('publicLimit', () => {
+    for (const slug of VALID_SLUGS) {
+      it(`accepts valid slug "${slug}"`, () => {
+        expect(() => publicLimit(slug, { perMin: 600 })).not.toThrow();
+      });
+    }
+
+    for (const { slug, reason } of INVALID_SLUGS) {
+      it(`rejects ${reason} (${JSON.stringify(slug)})`, () => {
+        expect(() => publicLimit(slug, { perMin: 600 })).toThrow(/invalid procedure slug/);
+      });
+    }
+
+    // The two live publicLimit call sites must remain accepting.
+    // Asserts the guard doesn't accidentally reject anything currently
+    // in production wiring (regression-safety for the live PR shape).
+    it('accepts the live `auth.session` call site', () => {
+      expect(() => publicLimit('auth.session', { perMin: 600 })).not.toThrow();
+    });
+
+    it('accepts the live `tribes.list` call site', () => {
+      expect(() => publicLimit('tribes.list', { perMin: 300 })).not.toThrow();
+    });
+  });
+
+  describe('aiSpendLimit', () => {
+    for (const slug of VALID_SLUGS) {
+      it(`accepts valid slug "${slug}"`, () => {
+        expect(() => aiSpendLimit(slug, { daily: 20, burst: 3 })).not.toThrow();
+      });
+    }
+
+    for (const { slug, reason } of INVALID_SLUGS) {
+      it(`rejects ${reason} (${JSON.stringify(slug)})`, () => {
+        expect(() => aiSpendLimit(slug, { daily: 20, burst: 3 })).toThrow(/invalid procedure slug/);
+      });
+    }
+
+    // The lone live aiSpendLimit call site must remain accepting.
+    // aiSpendLimit has higher ledger-integrity impact than the other
+    // tiers (corrupt slug would mis-key BOTH daily and burst counters
+    // for the AI spend ledger), so an extra regression-safety check on
+    // the production wiring is warranted.
+    it('accepts the live `factCheck.enqueue` call site', () => {
+      expect(() => aiSpendLimit('factCheck.enqueue', { daily: 20, burst: 3 })).not.toThrow();
+    });
+  });
 });
