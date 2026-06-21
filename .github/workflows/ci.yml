@@ -19,17 +19,35 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      # actions/checkout@v4.2.2 — SHA-pinned. PR #70 round-1 reviewer
+      # HIGH. Even though ci.yml does not inject ANTHROPIC_API_KEY,
+      # it holds GITHUB_TOKEN (implicit, contents-read+) and runs
+      # `pnpm turbo test` on every push to main — a test runner
+      # with full working-tree + node_modules access. A moved `v4`
+      # tag could exfiltrate the token or inject malicious code into
+      # the install layer before any subsequent step runs its pinned
+      # content. Same SHA as the four workflows pinned in PR #68 for
+      # repo-wide consistency.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
 
+      # pnpm/action-setup@v4.4.0 — SHA-pinned. Same threat model:
+      # runs before Node + npm cache exist, has read access to the
+      # working tree and the lockfile, configures the package manager
+      # subsequent steps trust. PR #70 round-1 reviewer HIGH.
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
         with:
           version: 9.15.9
 
+      # actions/setup-node@v4.4.0 — SHA-pinned. Same threat model:
+      # `cache: pnpm` enables a post-job cache-save hook with write
+      # access to the GitHub Actions cache layer. A tag-move that
+      # injects code at node-setup runs before the cache key is
+      # scoped. PR #70 round-1 reviewer HIGH.
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: .nvmrc
           cache: pnpm
