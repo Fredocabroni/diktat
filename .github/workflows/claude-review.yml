@@ -22,8 +22,9 @@ jobs:
   # Pin posture: dorny/paths-filter is SHA-pinned because it's the
   # action that decides whether the security reviewer runs — a moved
   # tag could reclassify a code diff as docs-only and suppress the
-  # review. Trust-boundary action; utility actions
-  # (actions/checkout / setup-node) keep the floating major tag.
+  # review. Trust-boundary action. actions/checkout + actions/setup-node
+  # are also SHA-pinned (PR #68 / PR #67 round-2 reviewer MEDIUM-3) —
+  # see the comment block at each step for the threat model.
   changes:
     name: classify-diff
     runs-on: ubuntu-latest
@@ -33,7 +34,11 @@ jobs:
       code: ${{ steps.filter.outputs.code }}
       docs: ${{ steps.filter.outputs.docs }}
     steps:
-      - uses: actions/checkout@v4
+      # actions/checkout@v4.2.2 — SHA-pinned. The `changes` classifier
+      # output gates whether the agent runs at all, so the checkout is
+      # part of the trust boundary that determines the review surface.
+      # PR #67 round-2 reviewer MEDIUM-3.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
       - id: filter
@@ -88,7 +93,11 @@ jobs:
           - name: addiction-auditor
             prompt: "Run the addiction-auditor subagent on engagement-mechanic changes in this PR. Output ONLY the review report in markdown — no preamble, no commentary, no closing remarks. Do not attempt to post it or run any shell command."
     steps:
-      - uses: actions/checkout@v4
+      # actions/checkout@v4.2.2 — SHA-pinned. The agent runs against
+      # whatever ends up in the working tree; a moved `v4` tag could
+      # substitute a modified diff and shape what the reviewer sees.
+      # PR #67 round-2 reviewer MEDIUM-3.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
 
@@ -105,8 +114,14 @@ jobs:
       # succeeded (see PR investigation of #38 reviewer failures).
       # Adding a `pnpm install` purely to populate a cache the reviews
       # don't use would be wasteful — drop the cache input instead.
+      # actions/setup-node@v4.4.0 — SHA-pinned. Same threat model: this
+      # job has access to GITHUB_TOKEN (write scope per the job's
+      # permissions block) and later receives ANTHROPIC_API_KEY in the
+      # reviewer step's env. A tag-move that injects code at node-setup
+      # time runs before either credential is scoped down. PR #67 round-2
+      # reviewer MEDIUM-3.
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: .nvmrc
 
