@@ -10,6 +10,16 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Least-privilege token scope. The verify job runs lint + typecheck +
+# test + the reviewer gate-integrity script — none post PR comments,
+# write statuses, or call any GitHub API mutation. `contents: read` is
+# the minimum needed to fetch the repo via actions/checkout. PR #71
+# round-1 reviewer MED. Audited 2026-06-22: if a future step needs
+# write access (e.g. status post, PR comment, package publish), declare
+# it at the JOB level — not workflow level — and re-review.
+permissions:
+  contents: read
+
 env:
   TURBO_TELEMETRY_DISABLED: 1
 
@@ -28,9 +38,15 @@ jobs:
       # the install layer before any subsequent step runs its pinned
       # content. Same SHA as the four workflows pinned in PR #68 for
       # repo-wide consistency.
+      # Default shallow clone (depth 1) — the verify job runs vanilla
+      # `pnpm turbo {lint,typecheck,test}` invocations with NO
+      # `--affected` / `--filter=...[main]` / changeset flags and the
+      # reviewer gate-integrity test script uses no git-history refs.
+      # PR #71 round-1 reviewer MED. If a future step needs ancestry
+      # (Turbo affected-detection, coverage-diff, Changesets, etc.),
+      # add `fetch-depth: 2` (or the minimum required) explicitly with
+      # a comment.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          fetch-depth: 0
 
       # pnpm/action-setup@v4.4.0 — SHA-pinned. Same threat model:
       # runs before Node + npm cache exist, has read access to the
