@@ -75,22 +75,31 @@ jobs:
       - name: Apply all migrations from empty
         run: supabase db reset
 
-      # First behavioral-DB-test step in this repo. The stack is still up
-      # from `supabase start`; Postgres on 127.0.0.1:54322 with default
-      # supabase local creds (postgres:postgres). `psql` is preinstalled
-      # on the ubuntu-latest runner. Connection is the postgres superuser
-      # → RLS is BYPASSED, which is the entire point: tests under
-      # `supabase/tests/sql/**` prove DB-layer enforcement (triggers,
-      # constraints) independent of RLS and the app layer.
+      # Behavioral DB tests under `supabase/tests/sql/**.test.sql`.
+      # The stack is still up from `supabase start`; Postgres on
+      # 127.0.0.1:54322 with default supabase local creds
+      # (postgres:postgres). `psql` is preinstalled on the
+      # ubuntu-latest runner.
+      #
+      # Default connection is the postgres superuser, which BYPASSES
+      # RLS — that's the right starting posture for trigger /
+      # constraint tests that prove DB-layer enforcement independent
+      # of RLS. RLS tests opt INTO RLS by `set local role
+      # authenticated` + `set local request.jwt.claims` mid-script
+      # (see `battle_participants_rls.test.sql` for the pattern).
       #
       # `ON_ERROR_STOP=1` makes any sqlstate that escapes a DO-block's
-      # exception handler abort the whole step. The test files use
-      # `raise notice` for PASS markers and `raise exception` for FAIL.
-      # See `supabase/tests/sql/debate_votes_participation.test.sql` for
-      # the canonical pattern (begin / fixtures / A1..An assertions /
-      # rollback / final \echo).
-      - name: Behavioral DB tests (triggers / constraints)
+      # exception handler abort the script. GHA bash defaults to
+      # `bash --noprofile --norc -eo pipefail` — a non-zero psql exit
+      # aborts the loop and fails the step. Adding a new test is a
+      # one-file drop into `supabase/tests/sql/`; no workflow edit
+      # needed. Test files follow the canonical
+      # begin / fixtures / A1..An assertions / rollback / final \echo
+      # pattern (see `debate_votes_participation.test.sql`).
+      - name: Behavioral DB tests (triggers / constraints / RLS)
         run: |
-          psql "postgresql://postgres:postgres@127.0.0.1:54322/postgres" \
-            -v ON_ERROR_STOP=1 \
-            -f supabase/tests/sql/debate_votes_participation.test.sql
+          for f in supabase/tests/sql/*.test.sql; do
+            echo "─── $f ───"
+            psql "postgresql://postgres:postgres@127.0.0.1:54322/postgres" \
+              -v ON_ERROR_STOP=1 -f "$f"
+          done
