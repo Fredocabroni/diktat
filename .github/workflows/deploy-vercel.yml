@@ -3,6 +3,17 @@ name: deploy-vercel
 # TODO(vercel): activates only when VERCEL_TOKEN secret AND VERCEL_PROJECT_ID secret
 # are present in repo settings. Until then this workflow is a no-op stub and does
 # NOT fail CI. Per Phase 0 instruction: skip Vercel until account exists.
+#
+# Activation safety (do NOT flip ENABLE_VERCEL_DEPLOY=true without checking):
+#   - All `uses:` action refs MUST stay SHA-pinned. Floating @vN tags would
+#     re-introduce a tag-move exfil vector on VERCEL_TOKEN (in scope across
+#     three steps: pull, build, deploy).
+#   - The Vercel CLI install MUST stay version-pinned (npm vercel@<X>).
+#     `@latest` reopens the unpinned-CLI hazard the bundle PR closed.
+# Both constraints are mechanically enforced by
+# `.github/scripts/check-activation-safety.sh`, invoked from `ci.yml`'s
+# `verify` job — that script fails the build red when
+# vars.ENABLE_VERCEL_DEPLOY == 'true' and this file regresses on either.
 
 on:
   push:
@@ -34,13 +45,35 @@ jobs:
     timeout-minutes: 10
     if: ${{ vars.ENABLE_VERCEL_DEPLOY == 'true' }}
     steps:
-      - uses: actions/checkout@v4
+      # actions/checkout@v4.2.2 — SHA-pinned. VERCEL_TOKEN is in env on
+      # three subsequent steps (pull / build / deploy); a tag-move at
+      # checkout would inject code into the working tree before any of
+      # them ran. Activation-bundle hardening (P0-with-deploy-activation).
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - uses: pnpm/action-setup@v4
+      # In-job activation-safety re-check (PR #78 round-1 security-reviewer
+      # LOW#5). The ci.yml-level gate only consults `vars.ENABLE_*`; a
+      # `workflow_dispatch` (or any other future trigger that bypasses the
+      # ENABLE_* flag) would deploy without the pin check ever firing. This
+      # step runs the same script with the flag FORCED to 'true' so the
+      # pin check fires unconditionally whenever a deploy job actually
+      # executes, regardless of trigger.
+      - name: Activation-safety re-check (in-job)
+        env:
+          ENABLE_VERCEL_DEPLOY: 'true'
+        run: bash .github/scripts/check-activation-safety.sh
+
+      # pnpm/action-setup@v4.4.0 — SHA-pinned. Same threat model: configures
+      # the package manager that the install layer trusts before any
+      # VERCEL_TOKEN-bearing step runs.
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
         with:
           version: 9.15.9
 
-      - uses: actions/setup-node@v4
+      # actions/setup-node@v4.4.0 — SHA-pinned. `cache: pnpm` writes to the
+      # GitHub Actions cache layer in a post-job hook; a tag-move at
+      # node-setup runs before that scope is bounded.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: .nvmrc
           cache: pnpm
@@ -48,8 +81,12 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
+      # Pin vercel CLI to an exact version (NOT `@latest`). A compromised
+      # publish to the `latest` dist-tag would inject code into the three
+      # VERCEL_TOKEN-bearing steps below. Bump deliberately via the
+      # activation-bundle / Renovate cadence.
       - name: Install Vercel CLI
-        run: npm i -g vercel@latest
+        run: npm i -g vercel@54.14.5
 
       - name: Pull Vercel env
         env:

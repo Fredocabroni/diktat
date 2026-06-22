@@ -233,7 +233,7 @@ describe('mutationLimit (single-gate, fail-open)', () => {
   });
 });
 
-describe('publicLimit (IP-keyed, fail-open)', () => {
+describe('publicLimit (hybrid IP+userId, fail-open)', () => {
   it('passes at the limit', async () => {
     const { ctx } = withRedis(600);
     const mw = publicLimit('auth.session', { perMin: 600 });
@@ -263,6 +263,68 @@ describe('publicLimit (IP-keyed, fail-open)', () => {
     const r = await runMiddleware(mw, ctx);
     expect(r.error).toBe(null);
     expect(r.proceeded).toBe(true);
+  });
+
+  // -------------------------------------------------------------------------
+  // Activation-bundle hybrid keying — closes the M5 round-3 leftovers #2 + #6
+  // co-NAT vectors. The bundled trustProxy + deploy-activation PR rewires
+  // `publicLimit` to use `hybridPublicKey()`: authed callers get a
+  // user-keyed counter, anonymous callers stay on the legacy IP-keyed shape
+  // (byte-identical). The two assertions below pin BOTH directions of the
+  // switch — a future regression that drops the userId branch (collapsing
+  // back to pure-IP) OR drifts the anonymous-path key string (breaking any
+  // pre-bundle counter alignment in Redis) fails one of the two tests
+  // explicitly with a clear message.
+  // -------------------------------------------------------------------------
+
+  it('authed caller → key is user-keyed (`:u:<userId>:`), NOT IP-keyed', async () => {
+    const { ctx, redis } = withRedis(1, { userId: 'user-AUTHED' });
+    const mw = publicLimit('auth.session', { perMin: 600 });
+    await runMiddleware(mw, ctx);
+    expect(redis.evalCalls.length).toBe(1);
+    const key = redis.evalCalls[0]!.keys[0]!;
+    // Shape: rl:pub:auth.session:u:user-AUTHED:<windowStart>
+    expect(key).toMatch(/^rl:pub:auth\.session:u:user-AUTHED:\d+$/);
+    // Negative: must NOT carry the legacy IP-keyed segment.
+    expect(key).not.toContain(':ip:');
+    expect(key).not.toContain(ctx.clientIpCidr);
+  });
+
+  it('anonymous caller (userId=null) → key is IP-keyed, byte-identical to the legacy publicKey shape', async () => {
+    const { ctx, redis } = withRedis(1, {
+      userId: null,
+      clientIpCidr: '203.0.113.0/24',
+    });
+    const mw = publicLimit('auth.session', { perMin: 600 });
+    await runMiddleware(mw, ctx);
+    expect(redis.evalCalls.length).toBe(1);
+    const key = redis.evalCalls[0]!.keys[0]!;
+    // Legacy pre-bundle shape was `rl:pub:auth.session:ip:203.0.113.0/24:<windowStart>`.
+    // Byte-identical preservation is the contract — any pre-bundle counter
+    // that happened to exist in Redis must continue keyed by the same string.
+    expect(key).toMatch(/^rl:pub:auth\.session:ip:203\.0\.113\.0\/24:\d+$/);
+    expect(key).not.toContain(':u:');
+  });
+
+  it('two authed users on the same NAT/CIDR get DIFFERENT keys (co-NAT isolation)', async () => {
+    const { ctx: ctxA, redis: redisA } = withRedis(1, {
+      userId: 'user-A',
+      clientIpCidr: '198.51.100.0/24',
+    });
+    const { ctx: ctxB, redis: redisB } = withRedis(1, {
+      userId: 'user-B',
+      clientIpCidr: '198.51.100.0/24', // same /24 — co-NAT
+    });
+    const mw = publicLimit('tribes.list', { perMin: 300 });
+    await runMiddleware(mw, ctxA);
+    await runMiddleware(mw, ctxB);
+    const keyA = redisA.evalCalls[0]!.keys[0]!;
+    const keyB = redisB.evalCalls[0]!.keys[0]!;
+    expect(keyA).toMatch(/^rl:pub:tribes\.list:u:user-A:\d+$/);
+    expect(keyB).toMatch(/^rl:pub:tribes\.list:u:user-B:\d+$/);
+    expect(keyA).not.toBe(keyB);
+    // The exact thing the M5 round-3 leftover #2 / #6 hybrid-keying fix
+    // delivers: user-A's burst cannot deny user-B sharing the same NAT.
   });
 });
 

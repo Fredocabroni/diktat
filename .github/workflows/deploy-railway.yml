@@ -3,6 +3,17 @@ name: deploy-railway
 # TODO(railway): activates only when RAILWAY_TOKEN secret is present AND repo
 # variable ENABLE_RAILWAY_DEPLOY=true. Until then this workflow is a no-op stub
 # and does NOT fail CI.
+#
+# Activation safety (do NOT flip ENABLE_RAILWAY_DEPLOY=true without checking):
+#   - All `uses:` action refs MUST stay SHA-pinned. Floating @vN tags would
+#     re-introduce a tag-move exfil vector on RAILWAY_TOKEN.
+#   - The Railway CLI install MUST stay version-pinned (npm @railway/cli@<X>).
+#     Replacing it with `curl | sh` or `@latest` reopens the unpinned-script
+#     hazard the bundle PR closed.
+# Both constraints are mechanically enforced by
+# `.github/scripts/check-activation-safety.sh`, invoked from `ci.yml`'s
+# `verify` job — that script fails the build red when
+# vars.ENABLE_RAILWAY_DEPLOY == 'true' and this file regresses on either.
 
 on:
   push:
@@ -40,12 +51,47 @@ jobs:
       matrix:
         service: [api, workers, bots]
     steps:
-      - uses: actions/checkout@v4
+      # actions/checkout@v4.2.2 — SHA-pinned. Same threat model as ci.yml +
+      # claude-review.yml: this job receives RAILWAY_TOKEN in the Deploy
+      # step; a tag-move on `v4` would inject attacker-controlled code into
+      # the checkout layer that runs before the credential is scoped.
+      # Activation-bundle hardening (queue entry "Deploy-workflow hardening
+      # bundle" in TYRION_BUILD_QUEUE.md, P0-with-deploy-activation).
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
+      # In-job activation-safety re-check (PR #78 round-1 security-reviewer
+      # LOW#5). The ci.yml-level gate only consults `vars.ENABLE_*`; a
+      # `workflow_dispatch` (or any other future trigger that bypasses the
+      # ENABLE_* flag) would deploy without the pin check ever firing. This
+      # step runs the same script with the flag FORCED to 'true' so the
+      # pin check fires unconditionally whenever a deploy job actually
+      # executes, regardless of trigger. The ci.yml invocation remains the
+      # signal that an operator armed the flag — this is the belt-and-
+      # suspenders that catches every other execution path.
+      - name: Activation-safety re-check (in-job)
+        env:
+          ENABLE_RAILWAY_DEPLOY: 'true'
+        run: bash .github/scripts/check-activation-safety.sh
+
+      # actions/setup-node@v4.4.0 — SHA-pinned. Needed by the `npm i -g`
+      # below; the @latest hazard the bundle closed was specifically about
+      # the CLI version, but the setup-node step itself must also stay
+      # pinned for the same trust-boundary reason (it configures the npm
+      # registry that the subsequent install trusts).
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+
+      # Pin @railway/cli to an exact version (NOT `@latest`). A compromised
+      # publish to the `latest` dist-tag would inject code into the Deploy
+      # step that has RAILWAY_TOKEN in env. Replaces the previous
+      # `curl -fsSL https://railway.app/install.sh | sh` which was both
+      # unpinned (no checksum) and ran an arbitrary remote script — the
+      # bundle PR closed both surfaces in one swap. Bump deliberately via
+      # the activation-bundle / Renovate cadence. Setup-node's global bin
+      # is on PATH so no PATH munging needed.
       - name: Install Railway CLI
-        run: |
-          curl -fsSL https://railway.app/install.sh | sh
-          echo "$HOME/.railway/bin" >> "$GITHUB_PATH"
+        run: npm i -g @railway/cli@5.20.0
 
       - name: Deploy
         env:
