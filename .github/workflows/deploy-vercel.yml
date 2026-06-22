@@ -51,6 +51,18 @@ jobs:
       # them ran. Activation-bundle hardening (P0-with-deploy-activation).
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
+      # In-job activation-safety re-check (PR #78 round-1 security-reviewer
+      # LOW#5). The ci.yml-level gate only consults `vars.ENABLE_*`; a
+      # `workflow_dispatch` (or any other future trigger that bypasses the
+      # ENABLE_* flag) would deploy without the pin check ever firing. This
+      # step runs the same script with the flag FORCED to 'true' so the
+      # pin check fires unconditionally whenever a deploy job actually
+      # executes, regardless of trigger.
+      - name: Activation-safety re-check (in-job)
+        env:
+          ENABLE_VERCEL_DEPLOY: 'true'
+        run: bash .github/scripts/check-activation-safety.sh
+
       # pnpm/action-setup@v4.4.0 — SHA-pinned. Same threat model: configures
       # the package manager that the install layer trusts before any
       # VERCEL_TOKEN-bearing step runs.

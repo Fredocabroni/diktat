@@ -155,6 +155,47 @@ YAML
   printf '%s' "$out"
 }
 
+# PR #78 round-1 security-reviewer LOW#6 — tightened detector must
+# reject every floating dist-tag, not just @latest. Two new fixtures
+# cover @beta and @next; the prior shape would have passed both
+# silently because `grep -vE '@[0-9]'` only filtered out
+# digit-prefixed versions, leaving any alphabetic dist-tag through.
+write_railway_cli_beta() {
+  local out="$FIX_DIR/railway-cli-beta.yml"
+  cat > "$out" <<'YAML'
+name: deploy-railway
+on:
+  push:
+    branches: [main]
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install Railway CLI
+        run: npm i -g @railway/cli@beta
+YAML
+  printf '%s' "$out"
+}
+
+write_railway_cli_next() {
+  local out="$FIX_DIR/railway-cli-next.yml"
+  cat > "$out" <<'YAML'
+name: deploy-railway
+on:
+  push:
+    branches: [main]
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install Railway CLI
+        run: npm i -g @railway/cli@next
+YAML
+  printf '%s' "$out"
+}
+
 write_railway_curl_sh() {
   local out="$FIX_DIR/railway-curl-sh.yml"
   cat > "$out" <<'YAML'
@@ -224,6 +265,8 @@ RAILWAY_PINNED=$(write_railway_pinned)
 VERCEL_PINNED=$(write_vercel_pinned)
 RAILWAY_FLOATING_USES=$(write_railway_floating_uses)
 RAILWAY_CLI_LATEST=$(write_railway_cli_latest)
+RAILWAY_CLI_BETA=$(write_railway_cli_beta)
+RAILWAY_CLI_NEXT=$(write_railway_cli_next)
 RAILWAY_CURL_SH=$(write_railway_curl_sh)
 RAILWAY_BARE_NPM=$(write_railway_bare_npm)
 RAILWAY_COMMENTS=$(write_railway_comments_only_describing_closed_surfaces)
@@ -273,6 +316,22 @@ run_case \
   "railway armed + CLI @latest → exit 1" \
   "true" "" \
   "$RAILWAY_CLI_LATEST" "$VERCEL_PINNED" \
+  1 \
+  "unpinned CLI install"
+
+# LOW#6 — tightened positive allowlist. @beta and @next would have
+# silently passed the prior `grep -vE '@[0-9]'` filter.
+run_case \
+  "railway armed + CLI @beta → exit 1 (dist-tag, not semver)" \
+  "true" "" \
+  "$RAILWAY_CLI_BETA" "$VERCEL_PINNED" \
+  1 \
+  "unpinned CLI install"
+
+run_case \
+  "railway armed + CLI @next → exit 1 (dist-tag, not semver)" \
+  "true" "" \
+  "$RAILWAY_CLI_NEXT" "$VERCEL_PINNED" \
   1 \
   "unpinned CLI install"
 
@@ -330,6 +389,35 @@ run_case \
   "$RAILWAY_PINNED" "$VERCEL_FLOATING" \
   1 \
   "floating \`uses:\` action ref"
+
+echo ""
+echo "=== In-job re-check path (LOW#5) ==="
+# The deploy workflows pass `env: ENABLE_RAILWAY_DEPLOY: 'true'` (literal)
+# regardless of the upstream `vars.ENABLE_*` state, so the pin check fires
+# on every deploy job execution — including workflow_dispatch and any
+# other future trigger that bypasses the upstream ENABLE_* variable.
+# These assertions pin both directions of that contract: the script
+# behaves identically whether the 'true' arrived via vars.ENABLE_* or via
+# the in-job env override; pin regressions are caught either way.
+
+run_case \
+  "in-job ENABLE_RAILWAY_DEPLOY='true' + pinned → exit 0 (GREEN)" \
+  "true" "" \
+  "$RAILWAY_PINNED" "$VERCEL_PINNED" \
+  0
+
+run_case \
+  "in-job ENABLE_RAILWAY_DEPLOY='true' + @beta CLI → exit 1 (RED, dist-tag bypass closed)" \
+  "true" "" \
+  "$RAILWAY_CLI_BETA" "$VERCEL_PINNED" \
+  1 \
+  "unpinned CLI install"
+
+run_case \
+  "in-job ENABLE_VERCEL_DEPLOY='true' + pinned → exit 0 (GREEN)" \
+  "" "true" \
+  "$RAILWAY_PINNED" "$VERCEL_PINNED" \
+  0
 
 echo ""
 echo "----------------------------------------"

@@ -10,13 +10,29 @@ const envSchema = z.object({
   // server.ts wires `trustProxy: <this number>` into the Fastify
   // constructor so `request.ip` resolves to the real client IP via the
   // `X-Forwarded-For` chain instead of the immediate TCP peer.
+  //
   // UNSET in local dev (no proxy, request.ip = TCP peer = correct).
   // REQUIRED in production: server.ts asserts at boot and refuses to
   // start if NODE_ENV='production' but this is unset, because every
   // IP-keyed rate-limit counter would otherwise collapse to the proxy
   // IP and bypass the public-tier budgets. See the M5 trustProxy gate
   // in docs/TYRION_BUILD_QUEUE.md.
-  TRUSTED_PROXY_HOPS: z.coerce.number().int().min(0).optional(),
+  //
+  // Bounds (PR #78 round-1 security-reviewer MED + LOW#1):
+  //   - `.min(1)`: NOT `.min(0)`. Fastify treats `trustProxy: 0` as
+  //     `false` — it does not walk the X-Forwarded-For chain at all,
+  //     so request.ip resolves back to the TCP peer (the proxy) and
+  //     the boot gate silently fails to protect. The value 0 has no
+  //     meaningful production use-case; if there is genuinely no
+  //     proxy, leave this UNSET. The boot gate's undefined-check then
+  //     fires correctly in production.
+  //   - `.max(10)`: bounds the X-Forwarded-For walk depth. If the hop
+  //     count is over-stated (e.g. 999), Fastify trusts more forwarder
+  //     entries than actually exist, and a client can spoof their IP
+  //     by injecting XFF entries before the real proxy entry. 10 is a
+  //     generous ceiling for any plausible deployment topology
+  //     (Railway = 1, +1 per CDN like Cloudflare).
+  TRUSTED_PROXY_HOPS: z.coerce.number().int().min(1).max(10).optional(),
 
   SUPABASE_URL: z.string().url(),
   SUPABASE_ANON_KEY: z.string().min(1),

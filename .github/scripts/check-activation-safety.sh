@@ -103,11 +103,19 @@ floating_uses() {
 
 unpinned_cli() {
   local file="$1"
-  # Two failure shapes:
-  #   (a) `npm i -g <pkg>@latest`   — explicit floating tag
-  #   (b) `npm i -g <pkg>` (no `@`) — implicit latest
-  # The deploy workflows do NOT use `curl | sh` anymore (that surface was
-  # closed by the bundle), but we still grep for it as a regression guard.
+  # Positive allowlist for CLI installs — flips the earlier negative-list
+  # shape that only rejected known-bad patterns (PR #78 round-1
+  # security-reviewer LOW#6). A CLI install is OK only when the version
+  # suffix matches semver: `<pkg>@<MAJOR>.<MINOR>...` where MAJOR and MINOR
+  # are numeric. Anything else fails:
+  #   - `<pkg>@latest`  — floating dist-tag (caught by prior shape)
+  #   - `<pkg>@beta`    — floating dist-tag (NOT caught by prior shape)
+  #   - `<pkg>@next`    — floating dist-tag (NOT caught by prior shape)
+  #   - `<pkg>@canary`  — floating dist-tag (NOT caught by prior shape)
+  #   - bare `<pkg>`    — implicit @latest (caught by prior shape)
+  # `curl | sh` is also caught as a regression guard — the deploy workflows
+  # no longer use it but the detector remains in case a future edit
+  # re-introduces it.
   # Comments are stripped first via strip_yaml_comments (this file's docs
   # explain the closed surfaces in plain English, which would otherwise
   # self-match).
@@ -115,16 +123,29 @@ unpinned_cli() {
   stripped="$(strip_yaml_comments "$file")"
   local violations=""
   local m
-  m=$(printf '%s\n' "$stripped" \
-        | grep -nE 'npm[[:space:]]+i(nstall)?[[:space:]]+-g[[:space:]]+[^[:space:]]+@latest' \
+  # Match every `npm i[nstall] -g <something>` line. The trailing capture
+  # is whatever comes after `-g `: a pkg name optionally followed by
+  # `@<version-or-tag>`, then end-of-line / whitespace / shell-redirect
+  # boundary. We then check each match against the positive semver
+  # allowlist; anything that doesn't match fails.
+  local installs
+  installs=$(printf '%s\n' "$stripped" \
+        | grep -nE 'npm[[:space:]]+i(nstall)?[[:space:]]+-g[[:space:]]+[^[:space:]]+' \
         || true)
-  [ -n "$m" ] && violations+="$m"$'\n'
-  # Detect `npm i -g <pkg>` with no `@<version>` after the package name.
-  m=$(printf '%s\n' "$stripped" \
-        | grep -nE 'npm[[:space:]]+i(nstall)?[[:space:]]+-g[[:space:]]+[a-zA-Z0-9_/.@-]+[[:space:]]*$' \
-        | grep -vE '@[0-9]' \
-        || true)
-  [ -n "$m" ] && violations+="$m"$'\n'
+  if [ -n "$installs" ]; then
+    while IFS= read -r line; do
+      # Extract the package spec after `-g `. Stops at whitespace or
+      # end-of-line so trailing flags / comments don't pollute the spec.
+      local spec
+      spec=$(printf '%s' "$line" | sed -E 's/.*-g[[:space:]]+([^[:space:]]+).*/\1/')
+      # Positive allowlist: <pkg>@<digits>.<digits>... (semver-pinned).
+      # The leading <pkg> permits scoped packages (`@scope/name`) and
+      # the version anchor is `@` followed by digits + dot + digit.
+      if ! printf '%s' "$spec" | grep -qE '@[0-9]+\.[0-9]'; then
+        violations+="$line"$'\n'
+      fi
+    done <<<"$installs"
+  fi
   # `curl | sh` regression guard.
   m=$(printf '%s\n' "$stripped" \
         | grep -nE 'curl[[:space:]]+.*\|[[:space:]]*sh\b' \
