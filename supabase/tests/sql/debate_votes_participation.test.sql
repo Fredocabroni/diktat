@@ -11,11 +11,17 @@
 --   user   c3, d4     : non-participants (eligible voters)
 --   user   e5         : non-participant (used as an INVALID vote target)
 --
--- Side-step: public.users.id has an FK to auth.users(id) that the migration set
--- enforces via an internal RI trigger. We `disable trigger all` on public.users
--- for the duration of the fixture insert, then re-enable. This is superuser-
--- scoped, transaction-rolled-back regardless, and does NOT affect the trigger
--- under test (which lives on public.debate_votes, not public.users).
+-- Fixture user creation uses the canonical Supabase pattern: insert into
+-- auth.users and let the `handle_new_user()` SECURITY DEFINER trigger
+-- (migration 0009) auto-create the public.users / streaks / wallets /
+-- ap_transactions rows. The trigger reads only `new.id` and
+-- `new.raw_app_meta_data->>'is_bot'` — no JWT or request context required.
+-- Earlier attempt used `ALTER TABLE public.users DISABLE TRIGGER ALL` to
+-- bypass the FK to auth.users, but that requires the SUPERUSER role
+-- attribute (the supabase local `postgres` role does NOT have it; system
+-- triggers like RI constraint triggers can only be disabled by a
+-- superuser). The auth.users insert path is RLS-bypassed by the postgres
+-- role's grants and works cleanly inside a bare begin/rollback.
 
 begin;
 
@@ -23,14 +29,15 @@ begin;
 -- Fixtures
 -- ---------------------------------------------------------------------------
 
-alter table public.users disable trigger all;
-insert into public.users (id, handle) values
-  ('00000000-0000-0000-0000-0000000000a1', 'test_a1_participant'),
-  ('00000000-0000-0000-0000-0000000000b2', 'test_b2_participant'),
-  ('00000000-0000-0000-0000-0000000000c3', 'test_c3_voter'),
-  ('00000000-0000-0000-0000-0000000000d4', 'test_d4_voter'),
-  ('00000000-0000-0000-0000-0000000000e5', 'test_e5_outsider');
-alter table public.users enable trigger all;
+-- Robust, version-tolerant column set: covers the historically-NOT-NULL
+-- columns across GoTrue/Supabase auth schema versions. `id` is the only
+-- column the trigger needs; the rest defend against schema drift.
+insert into auth.users (instance_id, id, aud, role, email, created_at, updated_at) values
+  ('00000000-0000-0000-0000-000000000000', '00000000-0000-0000-0000-0000000000a1', 'authenticated', 'authenticated', 'a1@test.local', now(), now()),
+  ('00000000-0000-0000-0000-000000000000', '00000000-0000-0000-0000-0000000000b2', 'authenticated', 'authenticated', 'b2@test.local', now(), now()),
+  ('00000000-0000-0000-0000-000000000000', '00000000-0000-0000-0000-0000000000c3', 'authenticated', 'authenticated', 'c3@test.local', now(), now()),
+  ('00000000-0000-0000-0000-000000000000', '00000000-0000-0000-0000-0000000000d4', 'authenticated', 'authenticated', 'd4@test.local', now(), now()),
+  ('00000000-0000-0000-0000-000000000000', '00000000-0000-0000-0000-0000000000e5', 'authenticated', 'authenticated', 'e5@test.local', now(), now());
 
 insert into public.battles (id, mode) values
   ('00000000-0000-0000-0000-0000000000bb', 'open_debate');
