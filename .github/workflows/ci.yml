@@ -91,3 +91,22 @@ jobs:
       # they ship.
       - name: Verify reviewer gate-integrity script
         run: bash .github/scripts/__tests__/check-review-output.test.sh
+
+      # Activation-safety gate. Fails the build red when an ENABLE_*
+      # deploy flag is set to 'true' on the repo while the corresponding
+      # deploy workflow file regresses on its pin requirements (floating
+      # `uses:@vN` tags, `@latest` CLI installs, or `curl | sh`). While
+      # the flags stay unset (the dominant case today) the script is
+      # a trivial green-pass — see the activation-bundle queue entry
+      # in docs/TYRION_BUILD_QUEUE.md for the full design rationale.
+      # The test suite that follows proves both RED and GREEN directions
+      # of the detectors so future regressions in the gate itself are
+      # caught before they ship.
+      - name: Verify activation-safety gate (RED+GREEN)
+        run: bash .github/scripts/__tests__/check-activation-safety.test.sh
+
+      - name: Activation-safety gate
+        env:
+          ENABLE_RAILWAY_DEPLOY: ${{ vars.ENABLE_RAILWAY_DEPLOY }}
+          ENABLE_VERCEL_DEPLOY: ${{ vars.ENABLE_VERCEL_DEPLOY }}
+        run: bash .github/scripts/check-activation-safety.sh
