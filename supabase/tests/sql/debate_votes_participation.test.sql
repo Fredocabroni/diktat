@@ -33,18 +33,18 @@ begin;
 -- columns across GoTrue/Supabase auth schema versions. `id` is the only
 -- column the trigger needs; the rest defend against schema drift.
 insert into auth.users (instance_id, id, aud, role, email, created_at, updated_at) values
-  ('00000000-0000-0000-0000-000000000000', '00000000-0000-0000-0000-0000000000a1', 'authenticated', 'authenticated', 'a1@test.local', now(), now()),
-  ('00000000-0000-0000-0000-000000000000', '00000000-0000-0000-0000-0000000000b2', 'authenticated', 'authenticated', 'b2@test.local', now(), now()),
-  ('00000000-0000-0000-0000-000000000000', '00000000-0000-0000-0000-0000000000c3', 'authenticated', 'authenticated', 'c3@test.local', now(), now()),
-  ('00000000-0000-0000-0000-000000000000', '00000000-0000-0000-0000-0000000000d4', 'authenticated', 'authenticated', 'd4@test.local', now(), now()),
-  ('00000000-0000-0000-0000-000000000000', '00000000-0000-0000-0000-0000000000e5', 'authenticated', 'authenticated', 'e5@test.local', now(), now());
+  ('00000000-0000-0000-0000-000000000000', 'a1111111-1111-1111-1111-111111111111', 'authenticated', 'authenticated', 'a1@test.local', now(), now()),
+  ('00000000-0000-0000-0000-000000000000', 'b2222222-2222-2222-2222-222222222222', 'authenticated', 'authenticated', 'b2@test.local', now(), now()),
+  ('00000000-0000-0000-0000-000000000000', 'c3333333-3333-3333-3333-333333333333', 'authenticated', 'authenticated', 'c3@test.local', now(), now()),
+  ('00000000-0000-0000-0000-000000000000', 'd4444444-4444-4444-4444-444444444444', 'authenticated', 'authenticated', 'd4@test.local', now(), now()),
+  ('00000000-0000-0000-0000-000000000000', 'e5555555-5555-5555-5555-555555555555', 'authenticated', 'authenticated', 'e5@test.local', now(), now());
 
 insert into public.battles (id, mode) values
   ('00000000-0000-0000-0000-0000000000bb', 'open_debate');
 
 insert into public.battle_participants (battle_id, user_id, seat, entry_ap) values
-  ('00000000-0000-0000-0000-0000000000bb', '00000000-0000-0000-0000-0000000000a1', 0, 100),
-  ('00000000-0000-0000-0000-0000000000bb', '00000000-0000-0000-0000-0000000000b2', 1, 100);
+  ('00000000-0000-0000-0000-0000000000bb', 'a1111111-1111-1111-1111-111111111111', 0, 100),
+  ('00000000-0000-0000-0000-0000000000bb', 'b2222222-2222-2222-2222-222222222222', 1, 100);
 
 -- ---------------------------------------------------------------------------
 -- A1 GREEN: non-participant c3 votes for participant a1 → succeeds.
@@ -53,8 +53,8 @@ insert into public.battle_participants (battle_id, user_id, seat, entry_ap) valu
 insert into public.debate_votes (battle_id, voter_user_id, vote_for_user_id, ap_at_vote_time)
 values (
   '00000000-0000-0000-0000-0000000000bb',
-  '00000000-0000-0000-0000-0000000000c3',
-  '00000000-0000-0000-0000-0000000000a1',
+  'c3333333-3333-3333-3333-333333333333',
+  'a1111111-1111-1111-1111-111111111111',
   10
 );
 \echo 'A1 PASS'
@@ -68,8 +68,8 @@ begin
   insert into public.debate_votes (battle_id, voter_user_id, vote_for_user_id, ap_at_vote_time)
   values (
     '00000000-0000-0000-0000-0000000000bb',
-    '00000000-0000-0000-0000-0000000000a1',
-    '00000000-0000-0000-0000-0000000000b2',
+    'a1111111-1111-1111-1111-111111111111',
+    'b2222222-2222-2222-2222-222222222222',
     10
   );
   raise exception 'A2 FAIL: participant voter not blocked (expected DK001)';
@@ -86,8 +86,8 @@ begin
   insert into public.debate_votes (battle_id, voter_user_id, vote_for_user_id, ap_at_vote_time)
   values (
     '00000000-0000-0000-0000-0000000000bb',
-    '00000000-0000-0000-0000-0000000000d4',
-    '00000000-0000-0000-0000-0000000000e5',
+    'd4444444-4444-4444-4444-444444444444',
+    'e5555555-5555-5555-5555-555555555555',
     10
   );
   raise exception 'A3 FAIL: non-participant target not blocked (expected DK002)';
@@ -106,8 +106,8 @@ begin
   insert into public.debate_votes (battle_id, voter_user_id, vote_for_user_id, ap_at_vote_time)
   values (
     '00000000-0000-0000-0000-0000000000bb',
-    '00000000-0000-0000-0000-0000000000c3',
-    '00000000-0000-0000-0000-0000000000b2',
+    'c3333333-3333-3333-3333-333333333333',
+    'b2222222-2222-2222-2222-222222222222',
     10
   );
   raise exception 'A4 FAIL: duplicate vote not blocked (expected 23505)';
