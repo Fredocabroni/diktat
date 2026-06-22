@@ -151,6 +151,34 @@ export function publicKey(
   return `rl:pub:${procedure}:ip:${cidr}:${windowStart(nowMs, windowSec)}`;
 }
 
+/**
+ * Hybrid public-tier key — user-keyed for authenticated callers,
+ * IP-keyed for anonymous callers. Closes the two co-NAT vectors from
+ * the M5 round-3 leftovers (#2 INCR-then-check counter inflation +
+ * #6 co-NAT denial-of-service): an aggressive client in a CGNAT /24
+ * can no longer inflate the shared counter against authed co-NAT
+ * victims, because each authed user gets their own counter keyspace.
+ *
+ * Anonymous callers (pre-sign-in `auth.session` polling, anonymous
+ * `tribes.list` reads) keep IP-keyed counters with the EXACT key
+ * shape that `publicKey()` produced — byte-identical so any pre-bundle
+ * counters in Redis continue to be the same key. That's covered by a
+ * dedicated test in `rate-limit.test.ts` ("anonymous key shape is
+ * byte-identical to the legacy publicKey shape").
+ */
+export function hybridPublicKey(
+  procedure: string,
+  userId: string | null,
+  cidr: string,
+  windowSec: number,
+  nowMs: number,
+): string {
+  if (userId !== null) {
+    return `rl:pub:${procedure}:u:${userId}:${windowStart(nowMs, windowSec)}`;
+  }
+  return publicKey(procedure, cidr, windowSec, nowMs);
+}
+
 // ---------------------------------------------------------------------------
 // Aggregated test-fixture surface (mirrors the old `__internals` shape).
 // ---------------------------------------------------------------------------
@@ -161,6 +189,7 @@ export const __internals = {
   windowStart,
   authedKey,
   publicKey,
+  hybridPublicKey,
   DAILY_WINDOW_SEC,
   BURST_WINDOW_SEC,
   MUTATION_WINDOW_SEC,

@@ -72,6 +72,7 @@ import {
   DAILY_WINDOW_SEC,
   GLOBAL_PROCEDURE_NAME,
   GLOBAL_WINDOW_SEC,
+  hybridPublicKey,
   MUTATION_WINDOW_SEC,
   publicKey,
   PUBLIC_WINDOW_SEC,
@@ -548,7 +549,15 @@ export function publicLimit(procedure: string, opts: PublicOpts) {
   assertProcedureSlug('publicLimit', procedure);
   return middleware(async ({ ctx, next }) => {
     const now = Date.now();
-    const key = publicKey(procedure, ctx.clientIpCidr, PUBLIC_WINDOW_SEC, now);
+    // Hybrid IP+userId keying. When ctx.userId is non-null (the bearer
+    // verified), each authed user gets their own counter — closes the
+    // co-NAT counter-inflation + denial-of-service vectors from the M5
+    // round-3 leftovers (#2 + #6 in TYRION_BUILD_QUEUE.md). When userId
+    // is null (anonymous traffic, e.g. pre-sign-in auth.session polling,
+    // anonymous tribes.list reads), it falls back to the legacy
+    // IP-keyed shape — byte-identical key string, pinned by a dedicated
+    // test in rate-limit.test.ts.
+    const key = hybridPublicKey(procedure, ctx.userId, ctx.clientIpCidr, PUBLIC_WINDOW_SEC, now);
     const result = await checkAndIncrementSingle(
       ctx.redis,
       key,
@@ -593,6 +602,17 @@ export function publicLimit(procedure: string, opts: PublicOpts) {
  *
  * `nowMs` parameter allows deterministic testing; production passes
  * `Date.now()`.
+ *
+ * Why IP-only (not hybrid IP+userId): this helper runs from Fastify's
+ * `onRequest` hook BEFORE the tRPC plugin builds the per-request
+ * context. The bearer token hasn't been verified yet at this layer —
+ * there is no `ctx.userId` to switch on. Doing a second JWT verify here
+ * would duplicate the per-request cost that `buildContext` already pays
+ * a few microseconds later. The outer hook keeps the legacy IP-keyed
+ * shape (and a global 1200/min ceiling that's generous enough that
+ * co-NAT inflation is not the load-bearing concern at this layer);
+ * co-NAT mitigation lives one layer down in `publicLimit`, which DOES
+ * have `ctx.userId` and switches via `hybridPublicKey()`.
  */
 export async function checkGlobalOuterHook(opts: {
   redis: RedisClient;
