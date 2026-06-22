@@ -106,37 +106,57 @@ end $$;
 -- ===========================================================================
 set local request.jwt.claims = '{"sub":"c3333333-3333-3333-3333-333333333333","role":"authenticated"}';
 
--- A3: c3 sees BOTH participant rows in B_obs via the observer policy
+-- A3 (bypass-mechanics proof): the SECURITY DEFINER helper
+-- `public.is_battle_open_debate_observable(uuid)` (migration 20260622164814)
+-- MUST read public.battles with RLS bypassed. If owner-bypass does NOT hold
+-- in this environment (e.g. a future migration adds FORCE ROW LEVEL
+-- SECURITY to battles without updating the helper), this call re-enters
+-- battles' policies → battle_participants' policies → 42P17, and reds HERE
+-- in isolation rather than ambiguously inside A4. Proves the fix's
+-- mechanism, not just its effect. Runs as `role=authenticated` (NOT
+-- postgres), so it exercises the exact DEFINER-bypass path the observer
+-- policy depends on at every authenticated query.
+do $$
+declare v boolean;
+begin
+  select public.is_battle_open_debate_observable('bb000001-0000-0000-0000-000000000001') into v;
+  if v is not true then
+    raise exception 'A3 FAIL: helper returned % for live open_debate battle (expected true) — owner-bypass premise broken', v;
+  end if;
+  raise notice 'A3 PASS';
+end $$;
+
+-- A4: c3 sees BOTH participant rows in B_obs via the observer policy
 -- (mode=open_debate AND status=live → admits).
 do $$
 declare n int;
 begin
   select count(*) into n from public.battle_participants
     where battle_id = 'bb000001-0000-0000-0000-000000000001';
-  if n <> 2 then raise exception 'A3 FAIL: observer expected 2 rows in B_obs, got %', n; end if;
-  raise notice 'A3 PASS';
+  if n <> 2 then raise exception 'A4 FAIL: observer expected 2 rows in B_obs, got %', n; end if;
+  raise notice 'A4 PASS';
 end $$;
 
--- A4: c3 sees NOTHING in B_queued (open_debate but status=queued — status
+-- A5: c3 sees NOTHING in B_queued (open_debate but status=queued — status
 -- boundary; observer policy does NOT admit; c3 is not a participant).
 do $$
 declare n int;
 begin
   select count(*) into n from public.battle_participants
     where battle_id = 'bb000002-0000-0000-0000-000000000002';
-  if n <> 0 then raise exception 'A4 FAIL: status boundary leaked in B_queued, got %', n; end if;
-  raise notice 'A4 PASS';
+  if n <> 0 then raise exception 'A5 FAIL: status boundary leaked in B_queued, got %', n; end if;
+  raise notice 'A5 PASS';
 end $$;
 
--- A5: c3 sees NOTHING in B_nonmode (trivia + live — mode boundary; observer
+-- A6: c3 sees NOTHING in B_nonmode (trivia + live — mode boundary; observer
 -- policy does NOT admit; c3 is not a participant).
 do $$
 declare n int;
 begin
   select count(*) into n from public.battle_participants
     where battle_id = 'bb000003-0000-0000-0000-000000000003';
-  if n <> 0 then raise exception 'A5 FAIL: mode boundary leaked in B_nonmode, got %', n; end if;
-  raise notice 'A5 PASS';
+  if n <> 0 then raise exception 'A6 FAIL: mode boundary leaked in B_nonmode, got %', n; end if;
+  raise notice 'A6 PASS';
 end $$;
 
 -- ===========================================================================
@@ -144,23 +164,23 @@ end $$;
 -- ===========================================================================
 set local request.jwt.claims = '{"sub":"d4444444-4444-4444-4444-444444444444","role":"authenticated"}';
 
--- A6: d4 inserts ITSELF into B_queued (self-join). `bp_insert_self`
+-- A7: d4 inserts ITSELF into B_queued (self-join). `bp_insert_self`
 -- with check (is_self(user_id)) admits.
 insert into public.battle_participants (battle_id, user_id, seat, entry_ap)
   values ('bb000002-0000-0000-0000-000000000002', 'd4444444-4444-4444-4444-444444444444', 2, 100);
-\echo 'A6 PASS'
+\echo 'A7 PASS'
 
--- A7: d4 tries to insert e5 (cross-user). `bp_insert_self`'s with-check
+-- A8: d4 tries to insert e5 (cross-user). `bp_insert_self`'s with-check
 -- denies; PG raises 42501 (insufficient_privilege — the RLS-policy
 -- violation sqlstate for INSERT/UPDATE).
 do $$
 begin
   insert into public.battle_participants (battle_id, user_id, seat, entry_ap)
     values ('bb000002-0000-0000-0000-000000000002', 'e5555555-5555-5555-5555-555555555555', 3, 100);
-  raise exception 'A7 FAIL: cross-user insert not blocked (expected 42501)';
+  raise exception 'A8 FAIL: cross-user insert not blocked (expected 42501)';
 exception when sqlstate '42501' then
-  raise notice 'A7 PASS';
+  raise notice 'A8 PASS';
 end $$;
 
 rollback;
-\echo 'ALL RLS ASSERTIONS PASSED'
+\echo 'ALL RLS ASSERTIONS PASSED (A1-A8)'
