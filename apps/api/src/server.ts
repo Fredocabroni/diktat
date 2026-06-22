@@ -11,38 +11,60 @@ import { appRouter, type AppRouter } from './routers/index.js';
 const env = loadEnv();
 
 // ---------------------------------------------------------------------------
-// Activation-safety: production must declare its trusted-proxy hop count.
+// Activation-safety: any non-dev/test environment must declare its
+// trusted-proxy hop count.
 //
 // Fastify's `request.ip` returns the immediate TCP peer when `trustProxy`
-// is unset. In local dev that's correct (no proxy in front). In production
-// behind Railway / Vercel / Cloudflare the immediate peer is the edge
-// proxy, NOT the real client; every IP-keyed rate-limit counter then
-// collapses to a single proxy IP and the public-tier budgets are
-// effectively bypassed (M5 trustProxy gate, docs/TYRION_BUILD_QUEUE.md).
+// is unset. In local dev that's correct (no proxy in front). Behind
+// Railway / Vercel / Cloudflare / any other reverse proxy the immediate
+// peer is the edge proxy, NOT the real client; every IP-keyed rate-limit
+// counter then collapses to a single proxy IP and the public-tier
+// budgets are effectively bypassed (M5 trustProxy gate, docs/TYRION_BUILD_QUEUE.md).
 //
-// The hard gate: if NODE_ENV='production' but TRUSTED_PROXY_HOPS is unset,
-// refuse to boot. A misconfigured deploy crashes loud at startup instead
-// of silently collapsing rate limiting. This is the real fail-fast — the
-// earlier ENABLE_RAILWAY_DEPLOY-based assertion that lived in the queue
-// entry could not work because that flag is a GHA-only variable, never in
-// process.env at API runtime, so the check would read `undefined` and
-// always pass. TRUSTED_PROXY_HOPS is a runtime env var (set on the
-// Railway service) and therefore actually observable here.
+// The hard gate: if NODE_ENV is anything OTHER than 'development' or
+// 'test' (so production today, AND any future staging/preview value if
+// the Zod enum is later widened) and TRUSTED_PROXY_HOPS is unset, refuse
+// to boot. A misconfigured deploy crashes loud at startup instead of
+// silently collapsing rate limiting.
+//
+// Exclusion list, NOT `=== 'production'` — PR #78 round-2 security-reviewer
+// MED #1. The earlier `=== 'production'` shape was fragile: today's Zod
+// enum (`development | test | production`) rejects e.g. `'staging'` at
+// parse-time so the gate was functionally safe, but if anyone ever
+// widens the enum to add `'staging'` / `'preview'` (a common Railway
+// pattern), the gate would silently fail open on those values with no
+// compiler signal. Inverting to an exclusion list makes the production-
+// safe path the default and the local-dev path the explicit exception
+// — the gate now fails CLOSED on unknown environments rather than
+// failing open.
+//
+// Design corrigendum (recon): the original queue-entry assertion
+// (`throw if env.ENABLE_RAILWAY_DEPLOY === 'true' && !trustProxy`)
+// could not work — `ENABLE_RAILWAY_DEPLOY` is a GHA repository variable,
+// never in process.env at API runtime, so the check would read
+// `undefined` and always pass. `TRUSTED_PROXY_HOPS` is a real runtime
+// env var (set on the Railway service) and therefore actually observable
+// here.
 // ---------------------------------------------------------------------------
-if (env.NODE_ENV === 'production' && env.TRUSTED_PROXY_HOPS === undefined) {
+if (
+  env.NODE_ENV !== 'development' &&
+  env.NODE_ENV !== 'test' &&
+  env.TRUSTED_PROXY_HOPS === undefined
+) {
   // Use console.error rather than app.log because Fastify isn't constructed
   // yet; we exit before any logger is wired.
 
   console.error(
     JSON.stringify({
       event: 'boot.activation_safety_failed',
-      reason: 'TRUSTED_PROXY_HOPS_unset_in_production',
+      reason: 'TRUSTED_PROXY_HOPS_unset_in_non_dev_test_env',
+      nodeEnv: env.NODE_ENV,
       message:
-        'Refusing to start: NODE_ENV=production requires TRUSTED_PROXY_HOPS to be set. ' +
-        'Without trustProxy, every IP-keyed rate-limit counter collapses to the proxy ' +
-        'IP and the public-tier budgets are bypassed. Set TRUSTED_PROXY_HOPS to the ' +
-        'reverse-proxy chain depth (Railway edge = 1, +1 per CDN). See the M5 trustProxy ' +
-        'gate in docs/TYRION_BUILD_QUEUE.md.',
+        `Refusing to start: NODE_ENV='${env.NODE_ENV}' is not a local dev/test environment ` +
+        'and requires TRUSTED_PROXY_HOPS to be set. Without trustProxy, every IP-keyed ' +
+        'rate-limit counter collapses to the proxy IP and the public-tier budgets are ' +
+        'bypassed. Set TRUSTED_PROXY_HOPS to the reverse-proxy chain depth (Railway edge ' +
+        '= 1, +1 per CDN). See the M5 trustProxy gate in docs/TYRION_BUILD_QUEUE.md.',
     }),
   );
   process.exit(1);
