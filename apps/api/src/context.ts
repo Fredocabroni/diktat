@@ -102,14 +102,14 @@ function extractBearer(header: unknown): string | null {
  * NOT the actual client IP. Every IP-keyed counter would then aggregate
  * to a single proxy IP and the rate limit would become a global cap.
  *
- * Today (`apps/api/src/server.ts:11`) the Fastify constructor has NO
- * `trustProxy` option — appropriate for local dev where there is no
- * proxy. The api is not yet on a public DNS (`deploy-railway.yml` is a
- * no-op stub gated on `ENABLE_RAILWAY_DEPLOY`), so the constraint is
- * dormant. Queued as a Phase-4 follow-up item that MUST land in the
- * same commit as the Railway deploy activation: set `trustProxy: 1`
- * (or the exact known-proxy hop count for the deployment topology).
- * See queue entry "M5 trust-proxy config — must land with Railway".
+ * `server.ts` wires `trustProxy: <env.TRUSTED_PROXY_HOPS>` conditionally:
+ * unset in local dev (correct — no proxy), required in production
+ * (boot-time assertion refuses to start if NODE_ENV='production' and
+ * TRUSTED_PROXY_HOPS is unset). When the API is exposed publicly via
+ * Railway, set TRUSTED_PROXY_HOPS to the chain depth (Railway edge = 1,
+ * +1 per CDN like Cloudflare). Confirm empirically by curling /health
+ * and reading the boot log's `request.ip` echo — it MUST show the real
+ * public client IP, not the proxy.
  *
  * IPv6 handling: Upstash sometimes returns Fastify a synthetic
  * v4-mapped v6 like `::ffff:192.0.2.1`. Strip the prefix so the v4

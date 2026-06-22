@@ -9,6 +9,45 @@ import { checkGlobalOuterHook, extractRetryAfterSec } from './rate-limit.js';
 import { appRouter, type AppRouter } from './routers/index.js';
 
 const env = loadEnv();
+
+// ---------------------------------------------------------------------------
+// Activation-safety: production must declare its trusted-proxy hop count.
+//
+// Fastify's `request.ip` returns the immediate TCP peer when `trustProxy`
+// is unset. In local dev that's correct (no proxy in front). In production
+// behind Railway / Vercel / Cloudflare the immediate peer is the edge
+// proxy, NOT the real client; every IP-keyed rate-limit counter then
+// collapses to a single proxy IP and the public-tier budgets are
+// effectively bypassed (M5 trustProxy gate, docs/TYRION_BUILD_QUEUE.md).
+//
+// The hard gate: if NODE_ENV='production' but TRUSTED_PROXY_HOPS is unset,
+// refuse to boot. A misconfigured deploy crashes loud at startup instead
+// of silently collapsing rate limiting. This is the real fail-fast — the
+// earlier ENABLE_RAILWAY_DEPLOY-based assertion that lived in the queue
+// entry could not work because that flag is a GHA-only variable, never in
+// process.env at API runtime, so the check would read `undefined` and
+// always pass. TRUSTED_PROXY_HOPS is a runtime env var (set on the
+// Railway service) and therefore actually observable here.
+// ---------------------------------------------------------------------------
+if (env.NODE_ENV === 'production' && env.TRUSTED_PROXY_HOPS === undefined) {
+  // Use console.error rather than app.log because Fastify isn't constructed
+  // yet; we exit before any logger is wired.
+
+  console.error(
+    JSON.stringify({
+      event: 'boot.activation_safety_failed',
+      reason: 'TRUSTED_PROXY_HOPS_unset_in_production',
+      message:
+        'Refusing to start: NODE_ENV=production requires TRUSTED_PROXY_HOPS to be set. ' +
+        'Without trustProxy, every IP-keyed rate-limit counter collapses to the proxy ' +
+        'IP and the public-tier budgets are bypassed. Set TRUSTED_PROXY_HOPS to the ' +
+        'reverse-proxy chain depth (Railway edge = 1, +1 per CDN). See the M5 trustProxy ' +
+        'gate in docs/TYRION_BUILD_QUEUE.md.',
+    }),
+  );
+  process.exit(1);
+}
+
 // Reuse the same Upstash client the per-request tRPC contexts use. The
 // prior shape constructed a separate `new Redis({...})` here, doubling
 // the credential surface in memory for no functional gain (Upstash REST
@@ -46,7 +85,28 @@ const app = Fastify({
     },
   },
   maxParamLength: 5_000,
+  // Conditional trustProxy: when TRUSTED_PROXY_HOPS is set, Fastify
+  // consults the `X-Forwarded-For` chain (right-to-left, N hops in) when
+  // building `request.ip`. When unset (local dev), trustProxy stays off
+  // and `request.ip` is the immediate TCP peer — the byte-identical
+  // pre-bundle shape. The production-must-be-set check fires above; here
+  // we just wire the value when it's been declared.
+  ...(env.TRUSTED_PROXY_HOPS !== undefined ? { trustProxy: env.TRUSTED_PROXY_HOPS } : {}),
 });
+
+// Echo the resolved listen target + trustProxy posture at boot. The
+// `request.ip` recovery check the queue describes (curl /health, read
+// the boot log, verify the public client IP shows up) reads this line.
+app.log.info(
+  {
+    event: 'boot.started',
+    host: env.HOST,
+    port: env.PORT,
+    nodeEnv: env.NODE_ENV,
+    trustProxyHops: env.TRUSTED_PROXY_HOPS ?? null,
+  },
+  'diktat-api booting',
+);
 
 await app.register(cors, {
   origin: (origin, cb) => {
@@ -67,11 +127,12 @@ await app.register(cors, {
 // primary gate. The per-procedure tiers handle their own posture.
 //
 // Body bytes are not parsed yet at this hook layer; Fastify guarantees
-// `request.ip` is populated. Without `trustProxy` (currently NOT set;
-// see context.ts:normalizeIpToCidr() topology note), `request.ip` is
-// the immediate TCP peer. Local dev: 127.0.0.1. Behind Railway/Vercel:
-// must wire trustProxy at Fastify construction or every IP-keyed
-// counter pools to the proxy IP.
+// `request.ip` is populated. `trustProxy` is set conditionally above from
+// `env.TRUSTED_PROXY_HOPS`: unset in local dev (request.ip = TCP peer)
+// and required in production (asserted at boot). Behind Railway/Vercel
+// with TRUSTED_PROXY_HOPS wired, `request.ip` resolves to the real
+// client via the X-Forwarded-For chain. See context.ts:normalizeIpToCidr
+// for the IP-to-CIDR normalization the keys then use.
 app.addHook('onRequest', async (request, reply) => {
   // Exact-match exemption ONLY. The prior `startsWith('/health?')`
   // would have exempted paths like `/health/../../etc` too. Fastify's

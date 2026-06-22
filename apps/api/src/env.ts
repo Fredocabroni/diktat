@@ -6,6 +6,18 @@ const envSchema = z.object({
   PORT: z.coerce.number().int().positive().default(4000),
   HOST: z.string().default('0.0.0.0'),
 
+  // Number of trusted reverse-proxy hops in front of this API. When set,
+  // server.ts wires `trustProxy: <this number>` into the Fastify
+  // constructor so `request.ip` resolves to the real client IP via the
+  // `X-Forwarded-For` chain instead of the immediate TCP peer.
+  // UNSET in local dev (no proxy, request.ip = TCP peer = correct).
+  // REQUIRED in production: server.ts asserts at boot and refuses to
+  // start if NODE_ENV='production' but this is unset, because every
+  // IP-keyed rate-limit counter would otherwise collapse to the proxy
+  // IP and bypass the public-tier budgets. See the M5 trustProxy gate
+  // in docs/TYRION_BUILD_QUEUE.md.
+  TRUSTED_PROXY_HOPS: z.coerce.number().int().min(0).optional(),
+
   SUPABASE_URL: z.string().url(),
   SUPABASE_ANON_KEY: z.string().min(1),
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
