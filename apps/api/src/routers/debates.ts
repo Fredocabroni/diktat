@@ -358,6 +358,25 @@ export const debatesRouter = router({
             message: 'You have already voted on this debate.',
           });
         }
+        // DK001 / DK002 are the DB-layer TOCTOU backstop for the two
+        // participant invariants checked resolver-side in step 2 — the
+        // BEFORE INSERT trigger on debate_votes (migration
+        // 20260622141706) fires the same predicates atomically with the
+        // insert. Wire messages stay byte-identical to step 2's so a
+        // race that the resolver narrowly missed is reported as the
+        // same user-facing error rather than a generic 500.
+        if (error.code === 'DK001') {
+          throw new TRPCError({
+            code: 'FORBIDDEN',
+            message: 'Participants cannot vote on their own debate.',
+          });
+        }
+        if (error.code === 'DK002') {
+          throw new TRPCError({
+            code: 'BAD_REQUEST',
+            message: 'vote_for_user_id is not a participant in this debate.',
+          });
+        }
         throw new TRPCError({
           code: 'INTERNAL_SERVER_ERROR',
           message: 'Failed to save vote.',
