@@ -87,11 +87,11 @@ jobs:
       matrix:
         reviewer:
           - name: security-reviewer
-            prompt: "Run the security-reviewer subagent on this PR's diff. Output ONLY the review report in markdown — no preamble, no commentary, no closing remarks. Do not attempt to post it or run any shell command."
+            prompt: "Run the security-reviewer subagent on this PR's diff. Output ONLY the review report in markdown, beginning with a markdown header (e.g. '# Security Review'). Do NOT edit files, request write or file permissions, run shell commands, or take any tool action of any kind. You are a read-only reviewer: if the diff has defects, name them and recommend the fix IN THE REPORT — never apply or offer to apply changes yourself. A human approves every change."
           - name: copy-linter
-            prompt: "Run the copy-linter subagent on apps/web/**/*.tsx, apps/bots/**/templates/**, and any packages/ai-fabric/src/prompts/* files changed in this PR. Output ONLY the review report in markdown — no preamble, no commentary, no closing remarks. Do not attempt to post it or run any shell command."
+            prompt: "Run the copy-linter subagent on apps/web/**/*.tsx, apps/bots/**/templates/**, and any packages/ai-fabric/src/prompts/* files changed in this PR. Output ONLY the review report in markdown, beginning with a markdown header (e.g. '# Copy Review'). Do NOT edit files, request write or file permissions, run shell commands, or take any tool action of any kind. You are a read-only reviewer: if the diff has defects, name them and recommend the fix IN THE REPORT — never apply or offer to apply changes yourself. A human approves every change."
           - name: addiction-auditor
-            prompt: "Run the addiction-auditor subagent on engagement-mechanic changes in this PR. Output ONLY the review report in markdown — no preamble, no commentary, no closing remarks. Do not attempt to post it or run any shell command."
+            prompt: "Run the addiction-auditor subagent on engagement-mechanic changes in this PR. Output ONLY the review report in markdown, beginning with a markdown header (e.g. '# Addiction Audit'). Do NOT edit files, request write or file permissions, run shell commands, or take any tool action of any kind. You are a read-only reviewer: if the diff has defects, name them and recommend the fix IN THE REPORT — never apply or offer to apply changes yourself. A human approves every change."
     steps:
       # actions/checkout@v4.2.2 — SHA-pinned. The agent runs against
       # whatever ends up in the working tree; a moved `v4` tag could
@@ -131,9 +131,13 @@ jobs:
         with:
           node-version-file: .nvmrc
 
+      # Pinned to the stable channel (not floating latest) — this is a
+      # key-bearing review step; the gate should not track npm's
+      # default-pull velocity. Bump deliberately via the stable
+      # promotion cadence. PR #71 round-2 MED.
       - name: Install Claude Code
         if: ${{ needs.changes.outputs.code == 'true' || needs.changes.outputs.docs == 'false' }}
-        run: npm i -g @anthropic-ai/claude-code
+        run: npm i -g @anthropic-ai/claude-code@2.1.176
 
       # The reviewer step CAPTURES agent stdout to a file and does NOT
       # have GH_TOKEN in its env. The Post step (next) reads the file
