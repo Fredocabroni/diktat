@@ -10,16 +10,6 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-# Least-privilege token scope. The verify job runs lint + typecheck +
-# test + the reviewer gate-integrity script — none post PR comments,
-# write statuses, or call any GitHub API mutation. `contents: read` is
-# the minimum needed to fetch the repo via actions/checkout. PR #71
-# round-1 reviewer MED. Audited 2026-06-22: if a future step needs
-# write access (e.g. status post, PR comment, package publish), declare
-# it at the JOB level — not workflow level — and re-review.
-permissions:
-  contents: read
-
 env:
   TURBO_TELEMETRY_DISABLED: 1
 
@@ -28,6 +18,19 @@ jobs:
     name: lint · typecheck · test
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Least-privilege token scope, declared at the JOB level (not the
+    # workflow level) so any future job added to this workflow defaults
+    # to `{}` and must opt in to its own permissions explicitly. PR #71
+    # round-2 reviewer LOW. Audited 2026-06-22: this job runs lint +
+    # typecheck + test + the reviewer gate-integrity script — none post
+    # PR comments, write statuses, create check-runs, or call any
+    # GitHub API mutation. `contents: read` is the minimum needed for
+    # actions/checkout. If a future step in THIS job needs broader
+    # scope (status post, PR comment, package publish), tighten this
+    # block to name only the additional permission explicitly and
+    # re-review the threat model — do not widen wholesale.
+    permissions:
+      contents: read
     steps:
       # actions/checkout@v4.2.2 — SHA-pinned. PR #70 round-1 reviewer
       # HIGH. Even though ci.yml does not inject ANTHROPIC_API_KEY,
