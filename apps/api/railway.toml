@@ -4,7 +4,14 @@
 
 [build]
 builder = "NIXPACKS"
-buildCommand = "pnpm install --frozen-lockfile && pnpm turbo build --filter=@diktat/api"
+# --prod=false forces devDependencies to install during the build. Without it,
+# NODE_ENV=production (set in [env] below) propagates into the build step and
+# pnpm skips devDeps — including `turbo` itself, the build orchestrator. The
+# build then fails at `pnpm turbo build` with "turbo: command not found".
+# Runtime is unaffected: this flag only changes the install layer; once the
+# build emits dist/, the runtime container ships only what `node` actually
+# imports.
+buildCommand = "pnpm install --frozen-lockfile --prod=false && pnpm turbo build --filter=@diktat/api"
 
 [deploy]
 startCommand = "node apps/api/dist/server.js"
