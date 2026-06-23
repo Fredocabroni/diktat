@@ -4,14 +4,13 @@
 
 [build]
 builder = "NIXPACKS"
-# --prod=false forces devDependencies to install during the build. Without it,
-# NODE_ENV=production (set in [env] below) propagates into the build step and
-# pnpm skips devDeps — including `turbo` itself, the build orchestrator. The
-# build then fails at `pnpm turbo build` with "turbo: command not found".
-# Runtime is unaffected: this flag only changes the install layer; once the
-# build emits dist/, the runtime container ships only what `node` actually
-# imports.
-buildCommand = "pnpm install --frozen-lockfile --prod=false && pnpm turbo build --filter=@diktat/api"
+# Nixpacks runs its own implicit `pnpm install --frozen-lockfile` install
+# phase BEFORE this buildCommand fires. With no NODE_ENV in [env] below,
+# that implicit install runs in default (non-production) mode, so devDeps
+# — including `turbo` (a root devDep) — are installed and present on
+# $PATH for the buildCommand to use. The buildCommand therefore needs
+# only the build step itself; no second install required.
+buildCommand = "pnpm turbo build --filter=@diktat/api"
 
 [deploy]
 startCommand = "node apps/api/dist/server.js"
@@ -20,6 +19,14 @@ healthcheckTimeout = 30
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
 
+# NODE_ENV is intentionally NOT set here. Railway's [env] applies to BOTH
+# build and runtime; setting NODE_ENV=production here would propagate to
+# Nixpacks's implicit install phase and silently skip every devDep
+# (turbo, typescript, etc.), then the buildCommand would either fail with
+# "turbo: command not found" or stall on pnpm's interactive "reinstall
+# from scratch?" prompt. Runtime NODE_ENV=production is supplied
+# separately by the Railway dashboard service env (set out-of-band) so
+# the build environment and the runtime environment are correctly
+# decoupled.
 [env]
-NODE_ENV = "production"
 PORT = "${{PORT}}"
