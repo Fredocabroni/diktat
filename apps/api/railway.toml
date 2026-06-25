@@ -13,20 +13,27 @@ builder = "NIXPACKS"
 buildCommand = "pnpm turbo build --filter=@diktat/api"
 
 [deploy]
-startCommand = "node apps/api/dist/server.js"
+# NODE_ENV=production is prefixed inline on startCommand — applies ONLY at
+# runtime (the moment Railway exec's this string), never to the build
+# phase or Nixpacks's implicit install. The earlier shape that set
+# NODE_ENV=production via Railway dashboard service env (or via
+# `[env] NODE_ENV = "production"` here) leaked into the build phase:
+# Railway's env vars apply to BOTH build and runtime, so Nixpacks's
+# implicit `pnpm install --frozen-lockfile` would silently skip every
+# devDep (turbo, typescript, etc.) and `buildCommand` would fail with
+# "turbo: command not found". Inline-on-startCommand is the only place
+# you can set runtime NODE_ENV without it bleeding into the build.
+# Important: REMOVE NODE_ENV from the Railway dashboard service vars
+# before deploying — dashboard env vars apply to build too.
+startCommand = "NODE_ENV=production node apps/api/dist/server.js"
 healthcheckPath = "/health"
 healthcheckTimeout = 30
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
 
-# NODE_ENV is intentionally NOT set here. Railway's [env] applies to BOTH
-# build and runtime; setting NODE_ENV=production here would propagate to
-# Nixpacks's implicit install phase and silently skip every devDep
-# (turbo, typescript, etc.), then the buildCommand would either fail with
-# "turbo: command not found" or stall on pnpm's interactive "reinstall
-# from scratch?" prompt. Runtime NODE_ENV=production is supplied
-# separately by the Railway dashboard service env (set out-of-band) so
-# the build environment and the runtime environment are correctly
-# decoupled.
+# NODE_ENV is intentionally NOT set here for the same reason — Railway's
+# [env] applies to BOTH build and runtime, and we need build to run in
+# default (non-production) mode so Nixpacks's implicit install includes
+# devDeps. Runtime NODE_ENV is set inline on startCommand above.
 [env]
 PORT = "${{PORT}}"
