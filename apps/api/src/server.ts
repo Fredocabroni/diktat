@@ -172,7 +172,7 @@ app.addHook('onRequest', async (request, reply) => {
   }
   const ipCidr = normalizeIpToCidr(request.ip ?? '');
   request.log.info(
-    { event: 'outer_hook.resolved_ip', ip: request.ip, cidr: ipCidr, path: pathOnly },
+    { event: 'outer_hook.resolved_ip', cidr: ipCidr, path: pathOnly },
     'outer-hook resolved client IP',
   );
   const result = await checkGlobalOuterHook({
