@@ -232,9 +232,21 @@ await app.register(fastifyTRPCPlugin, {
       return {};
     },
     onError({ error, path }) {
-      // Log only the shape we control. `error.cause` holds raw Supabase
-      // errors that we never want echoed into structured logs.
-      app.log.error({ code: error.code, path, message: error.message }, 'tRPC error');
+      // Log the shape we control plus the underlying PostgREST/PG error
+      // `code` only. `error.cause` holds raw Supabase errors whose
+      // message/details/hint may carry SQL text or row data — those three
+      // subfields are stripped by the Pino `redact` config above. The
+      // `code` (e.g. `42501`, `PGRST202`) is not redacted: it is the
+      // diagnostic needle for DB grant/migration failures and is PII-free.
+      app.log.error(
+        {
+          code: error.code,
+          causeCode: (error.cause as { code?: string } | undefined)?.code,
+          path,
+          message: error.message,
+        },
+        'tRPC error',
+      );
     },
   } satisfies FastifyTRPCPluginOptions<AppRouter>['trpcOptions'],
 });
