@@ -74,6 +74,9 @@ describe('applyDrafts (RPC adapter)', () => {
           balance_after: 2030,
           capped_delta: 30,
           skipped_reason: null,
+          tier_before: 4,
+          tier_after: 4,
+          tier_changed: false,
         },
         {
           idempotency_key: drafts[1]!.idempotencyKey,
@@ -81,6 +84,9 @@ describe('applyDrafts (RPC adapter)', () => {
           balance_after: 1970,
           capped_delta: -30,
           skipped_reason: null,
+          tier_before: 4,
+          tier_after: 4,
+          tier_changed: false,
         },
       ],
     });
@@ -105,6 +111,9 @@ describe('applyDrafts (RPC adapter)', () => {
       applied: true,
       balanceAfter: 2030,
       cappedDelta: 30,
+      tierBefore: 4,
+      tierAfter: 4,
+      tierChanged: false,
     });
     expect(result[1]!.applied).toBe(true);
   });
@@ -163,6 +172,9 @@ describe('applyDrafts (RPC adapter)', () => {
       balanceAfter: null,
       cappedDelta: 0,
       skippedReason: 'user_not_found',
+      tierBefore: null,
+      tierAfter: null,
+      tierChanged: false,
     });
   });
 
@@ -189,5 +201,77 @@ describe('applyDrafts (RPC adapter)', () => {
     const { client } = buildClient({ error: { message: 'pg down' } });
 
     await expect(applyDrafts(client, drafts)).rejects.toThrow(/apply_ap_drafts failed: pg down/);
+  });
+
+  it('maps the tier crossing fields from an applied row', async () => {
+    const drafts = buildDrafts();
+    const { client } = buildClient({
+      data: [
+        {
+          idempotency_key: drafts[0]!.idempotencyKey,
+          applied: true,
+          balance_after: 750,
+          capped_delta: 1,
+          skipped_reason: null,
+          // 749 -> 750 crosses Partisan(2) -> Operative(3).
+          tier_before: 2,
+          tier_after: 3,
+          tier_changed: true,
+        },
+        {
+          idempotency_key: drafts[1]!.idempotencyKey,
+          applied: true,
+          balance_after: 1970,
+          capped_delta: -30,
+          skipped_reason: null,
+          tier_before: 4,
+          tier_after: 4,
+          tier_changed: false,
+        },
+      ],
+    });
+
+    const result = await applyDrafts(client, drafts);
+
+    expect(result[0]!.tierBefore).toBe(2);
+    expect(result[0]!.tierAfter).toBe(3);
+    expect(result[0]!.tierChanged).toBe(true);
+    expect(result[1]!.tierChanged).toBe(false);
+  });
+
+  it('maps a duplicate row to no crossing (tierChanged=false, tiers null)', async () => {
+    const drafts = buildDrafts();
+    const { client } = buildClient({
+      data: [
+        {
+          idempotency_key: drafts[0]!.idempotencyKey,
+          applied: false,
+          balance_after: 750,
+          capped_delta: 0,
+          skipped_reason: 'duplicate',
+          // Contract: a replay signals no crossing.
+          tier_before: null,
+          tier_after: null,
+          tier_changed: false,
+        },
+        {
+          idempotency_key: drafts[1]!.idempotencyKey,
+          applied: false,
+          balance_after: 1970,
+          capped_delta: 0,
+          skipped_reason: 'duplicate',
+          tier_before: null,
+          tier_after: null,
+          tier_changed: false,
+        },
+      ],
+    });
+
+    const result = await applyDrafts(client, drafts);
+
+    expect(result[0]!.skippedReason).toBe('duplicate');
+    expect(result[0]!.tierChanged).toBe(false);
+    expect(result[0]!.tierBefore).toBeNull();
+    expect(result[0]!.tierAfter).toBeNull();
   });
 });
