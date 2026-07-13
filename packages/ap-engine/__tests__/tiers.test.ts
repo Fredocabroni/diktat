@@ -18,7 +18,22 @@ describe('tierFromAp', () => {
   it('returns Mythic for very large AP including MAX_SAFE_INTEGER', () => {
     expect(tierFromAp(75_000)).toBe(11);
     expect(tierFromAp(74_999)).toBe(10);
+    expect(tierFromAp(120_000)).toBe(11); // open-top Mythic interior (ap_max is null)
     expect(tierFromAp(Number.MAX_SAFE_INTEGER)).toBe(11);
+  });
+
+  // Explicit crossing boundaries the settlement SQL band-lookup must mirror
+  // 1:1 (migration 20260713120000). The 749->750 line is load-bearing: it is
+  // where tiers.payout_eligible flips false->true (Partisan -> Operative), so
+  // real payouts unlock exactly here.
+  it('locks the exact crossing boundaries the SQL recompute mirrors', () => {
+    expect(tierFromAp(0)).toBe(0);
+    expect(tierFromAp(99)).toBe(0);
+    expect(tierFromAp(100)).toBe(1);
+    expect(tierFromAp(749)).toBe(2);
+    expect(tierFromAp(750)).toBe(3); // payout_eligible flips true here
+    expect(tierFromAp(74_999)).toBe(10);
+    expect(tierFromAp(75_000)).toBe(11);
   });
 
   it('throws on negative or non-finite AP', () => {

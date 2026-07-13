@@ -38,6 +38,16 @@ export interface ApplyResult {
   /** Delta actually credited — may differ from draft.delta when the practice cap kicks in. */
   readonly cappedDelta: number;
   readonly skippedReason?: 'duplicate' | 'user_not_found';
+  /**
+   * Tier crossing for this apply, recomputed inside `apply_ap_drafts` from the
+   * before/after balance. CONTRACT: on a duplicate or user_not_found result,
+   * `tierBefore` and `tierAfter` are null and `tierChanged` is false — a replay
+   * signals NO crossing, so a celebration consumer must gate on `tierChanged`
+   * and never fall back to `tierAfter` when it is null.
+   */
+  readonly tierBefore: number | null;
+  readonly tierAfter: number | null;
+  readonly tierChanged: boolean;
 }
 
 interface RpcDraftPayload {
@@ -57,6 +67,9 @@ interface RpcResultRow {
   balance_after: number | null;
   capped_delta: number;
   skipped_reason: 'duplicate' | 'user_not_found' | null;
+  tier_before: number | null;
+  tier_after: number | null;
+  tier_changed: boolean;
 }
 
 function toRpcPayload(draft: ApTransactionDraft): RpcDraftPayload {
@@ -116,13 +129,21 @@ export async function applyDrafts(
         balanceAfter: null,
         cappedDelta: 0,
         skippedReason: 'user_not_found',
+        tierBefore: null,
+        tierAfter: null,
+        tierChanged: false,
       };
     }
+    // The three tier fields go on `base` so they survive BOTH the plain return
+    // and the `{ ...base, skippedReason }` spread below.
     const base: ApplyResult = {
       idempotencyKey: row.idempotency_key,
       applied: row.applied,
       balanceAfter: row.balance_after,
       cappedDelta: row.capped_delta,
+      tierBefore: row.tier_before,
+      tierAfter: row.tier_after,
+      tierChanged: row.tier_changed,
     };
     return row.skipped_reason ? { ...base, skippedReason: row.skipped_reason } : base;
   });
