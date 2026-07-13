@@ -6,6 +6,7 @@
 
 'use client';
 
+import { m, useReducedMotion } from 'framer-motion';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
@@ -16,6 +17,9 @@ export default function OnboardTribePage() {
   const router = useRouter();
   const tribes = trpc.tribes.list.useQuery();
   const [selected, setSelected] = useState<string | null>(null);
+  // Respect the OS "reduce motion" setting — collapse the entrance to a
+  // plain fade with no rise/stagger. (Framer Motion PoC — DESIGN PASS step 1.)
+  const reduceMotion = useReducedMotion();
 
   const join = trpc.tribes.join.useMutation({
     onSuccess: () => router.push('/onboard/preview'),
@@ -43,10 +47,19 @@ export default function OnboardTribePage() {
           Array.from({ length: 5 }).map((_, i) => (
             <li key={i} className="h-24 animate-pulse rounded-2xl bg-surface-card/60" />
           ))}
-        {tribes.data?.map((tribe) => {
+        {tribes.data?.map((tribe, i) => {
           const isPending = join.isPending && selected === tribe.id;
           return (
-            <li key={tribe.id}>
+            <m.li
+              key={tribe.id}
+              initial={{ opacity: 0, y: reduceMotion ? 0 : 12 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{
+                duration: 0.3,
+                ease: [0.2, 0, 0, 1], // motion token: easing.standard
+                delay: reduceMotion ? 0 : i * 0.06, // staggered rise
+              }}
+            >
               <button
                 type="button"
                 onClick={() => pick(tribe.id)}
@@ -59,7 +72,7 @@ export default function OnboardTribePage() {
                 )}
                 {isPending && <p className="mt-2 text-xs text-text-tertiary">Joining…</p>}
               </button>
-            </li>
+            </m.li>
           );
         })}
       </ul>
