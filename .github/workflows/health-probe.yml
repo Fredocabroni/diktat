@@ -1,0 +1,27 @@
+name: health-probe
+
+# Auth-free production health probe. Catches deploy-less config drift
+# (bad key, unapplied migration/grant, dead route) that a build-time CI
+# cannot see. No secrets — all endpoints are public.
+on:
+  schedule:
+    # Every 30 minutes. NOTE: GitHub throttles/skips frequent schedules under
+    # load and only runs schedules from the default branch (main) — so this
+    # file must land on main to fire. 30 min is ample for config-drift.
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+jobs:
+  probe:
+    name: production health probe
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Read-only, no writes, no secrets. Least-privilege at the job level.
+    permissions:
+      contents: read
+    steps:
+      # SHA-pinned to the same ref as ci.yml (v4.2.2) for repo consistency.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      # jq is preinstalled on ubuntu-latest; no install step needed.
+      - name: Probe production
+        run: bash .github/scripts/check-prod-health.sh
