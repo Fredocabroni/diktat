@@ -6,6 +6,7 @@
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { httpBatchLink, loggerLink } from '@trpc/client';
+import { LazyMotion, domAnimation } from 'framer-motion';
 import { useState } from 'react';
 import superjson from 'superjson';
 
@@ -55,7 +56,21 @@ export function Providers({ children }: { children: React.ReactNode }) {
 
   return (
     <trpc.Provider client={trpcClient} queryClient={queryClient}>
-      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+      <QueryClientProvider client={queryClient}>
+        {/*
+          LazyMotion loads Framer Motion's animation features once, lazily,
+          instead of the full `motion` bundle per component. Wraps the whole
+          app (both the (app) shell and the onboarding/login routes, which
+          live outside it) since Providers is the single root client boundary.
+          `strict` makes `motion.*` throw — every animated element must use the
+          lightweight `m.*` component, keeping the per-route bundle small.
+          domAnimation = animations + variants + exit (no drag/layout); bump to
+          domMax when swipe/drag gestures land.
+        */}
+        <LazyMotion features={domAnimation} strict>
+          {children}
+        </LazyMotion>
+      </QueryClientProvider>
     </trpc.Provider>
   );
 }
