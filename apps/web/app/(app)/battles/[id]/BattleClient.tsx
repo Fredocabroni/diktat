@@ -41,6 +41,7 @@ export function BattleClient({ battleId }: BattleClientProps): React.JSX.Element
     },
   );
   const submitAnswer = trpc.battles.submitAnswer.useMutation();
+  const utils = trpc.useUtils();
 
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [revealedCorrectIndex, setRevealedCorrectIndex] = useState<number | null>(null);
@@ -82,6 +83,16 @@ export function BattleClient({ battleId }: BattleClientProps): React.JSX.Element
   const isPracticeMatch = useMemo(() => {
     return battle?.participants.some((p) => /^bot[_-]/i.test(p.userId)) ?? false;
   }, [battle?.participants]);
+
+  // On settle, refresh user.me once so the app-shell tier-up detector sees the
+  // freshly-persisted tier and can celebrate a crossing.
+  const settleInvalidatedRef = useRef(false);
+  useEffect(() => {
+    if (battle?.status === 'settled' && !settleInvalidatedRef.current) {
+      settleInvalidatedRef.current = true;
+      void utils.user.me.invalidate();
+    }
+  }, [battle?.status, utils]);
 
   if (battleQuery.isLoading || !battle) {
     return <Status text="Loading battle…" />;

@@ -12,7 +12,7 @@
 
 'use client';
 
-import { useMemo } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 
 import { trpc } from '../../lib/trpc';
 
@@ -69,9 +69,20 @@ export function OpenDebateClient({
     },
   );
 
+  const utils = trpc.useUtils();
   const isLoading = battleQuery.isLoading;
   const error = battleQuery.error;
   const data = battleQuery.data;
+
+  // On settle, refresh user.me once so the app-shell tier-up detector sees the
+  // freshly-persisted tier and can celebrate a crossing.
+  const settleInvalidatedRef = useRef(false);
+  useEffect(() => {
+    if (data?.battle.status === 'settled' && !settleInvalidatedRef.current) {
+      settleInvalidatedRef.current = true;
+      void utils.user.me.invalidate();
+    }
+  }, [data?.battle.status, utils]);
 
   const currentState = useMemo(() => {
     if (!data) return null;

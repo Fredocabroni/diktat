@@ -3,6 +3,9 @@ export type { TierBadgeProps, TierNumber, TierSize } from './TierBadge.types.js'
 export { TIER_SIZE_PX } from './TierBadge.types.js';
 export { TierUpAnimation } from './TierUpAnimation.js';
 export type { TierUpAnimationProps, TierUpSeverity } from './TierUpAnimation.js';
+export { tierUpSeverity } from './tierUpSeverity.js';
+export { decideTierUp } from './decideTierUp.js';
+export type { TierUpDecision } from './decideTierUp.js';
 export { TIERS, tierByNumber } from './tiers.config.js';
 export type { TierConfigEntry } from './tiers.config.js';
 export { EMBLEMS } from './emblems/index.js';
