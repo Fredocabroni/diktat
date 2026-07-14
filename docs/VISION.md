@@ -17,8 +17,8 @@ logic, structure, responsiveness — not being loud, popular, or on the "right"
 side.
 
 The bet: online political discourse is broken because it rewards outrage,
-tribalism, and volume over reasoning. Diktat rewards *rigor* and confers
-*status* for it — channeling political energy into something that rewards being
+tribalism, and volume over reasoning. Diktat rewards _rigor_ and confers
+_status_ for it — channeling political energy into something that rewards being
 good at making a case.
 
 One line: **the combat sport where you win by arguing well, own your identity
@@ -51,10 +51,10 @@ Meta-goal: a user leaves each session feeling **sharper and more engaged**, not
 Replace the pick-from-a-list tribe selection with a short **placement quiz**:
 answers place the user into the tribe they lean toward, with a clear **override**
 if they disagree. Lower friction, more engaging, teaches the tribes by example,
-and fits the combat-sport feel (you get *scouted* into a starting faction).
+and fits the combat-sport feel (you get _scouted_ into a starting faction).
 Override is mandatory so it never feels like it boxes anyone in.
 
-*This is a pre-ship product improvement — no crypto, builds in the current app.*
+_This is a pre-ship product improvement — no crypto, builds in the current app._
 
 ---
 
@@ -76,7 +76,7 @@ originally stubbed as if **AP itself becomes cashable at tier 3**. That model is
 **rejected** — AP never cashes out.
 
 Its **correct** meaning under this vision: **tip-eligibility.** A user becomes
-able to *receive crypto tips* at tier 3 (see §5). Same gate, corrected
+able to _receive crypto tips_ at tier 3 (see §5). Same gate, corrected
 semantics — nothing to remove, just reinterpret. No code change required now;
 this note prevents anyone rebuilding the abandoned "AP = cashable" model.
 
@@ -87,7 +87,7 @@ this note prevents anyone rebuilding the abandoned "AP = cashable" model.
 Separate from AP. This is the money layer, and it is **tipping, not gambling.**
 
 - Users **tip each other crypto** when someone makes a genuinely good argument.
-- The **AI quality score + user appreciation** *surface* what's tip-worthy —
+- The **AI quality score + user appreciation** _surface_ what's tip-worthy —
   they help users find good arguments. **A human always chooses to send the
   tip.** The AI score does **not** auto-convert into an automatic payout.
   (Keeping the human in the loop is what keeps this clean "tipping," not a
@@ -105,14 +105,14 @@ Separate from AP. This is the money layer, and it is **tipping, not gambling.**
 ### Design tension to build against (noted, not solved)
 
 Tying earning capacity to tier (which comes from winning) incentivizes
-*tier-grinding* over *argument quality*. Partial self-correction: tips are a
+_tier-grinding_ over _argument quality_. Partial self-correction: tips are a
 human choice, so a high-tier user with weak arguments has a high ceiling they
-won't fill. Worth considering making the tip ceiling depend on *recent* argument
+won't fill. Worth considering making the tip ceiling depend on _recent_ argument
 quality, not just raw tier, so users must keep making good points.
 
 ### Why tipping (the light legal path)
 
-Tipping sidesteps the gambling/skill-gaming mountain that *staked* battles
+Tipping sidesteps the gambling/skill-gaming mountain that _staked_ battles
 (pay-to-enter, winner-takes-pot) would trigger. Nobody wagers or loses a stake on
 a contested outcome. Still not zero-compliance: money-transmission / payments
 care, **KYC at the tier-3 / money-out boundary**, tax reporting on earnings, and
@@ -124,8 +124,8 @@ operator.
 
 ## 6. Decentralization — The Mission Layer **[LATER]**
 
-Why it's core, not cosmetic: a platform whose whole purpose is *fair,
-unmanipulable political combat* undermines itself if it can secretly tune the
+Why it's core, not cosmetic: a platform whose whole purpose is _fair,
+unmanipulable political combat_ undermines itself if it can secretly tune the
 economy, seize balances, or ban a viewpoint. Decentralization is a **credibility
 requirement** for the mission.
 
@@ -140,12 +140,12 @@ Chosen axes:
   (avoids the "investment contract" shape). Trustless: balances live in
   contracts, not an editable database column.
 - **Content — censorship-resistant + user-controlled moderation.** The principle
-  is **"speech, not reach":** no central authority (including us) can *erase* a
+  is **"speech, not reach":** no central authority (including us) can _erase_ a
   user's identity or content for their politics; but clients/users choose what to
-  *display and amplify*, and unlawful content can be refused amplification /
+  _display and amplify_, and unlawful content can be refused amplification /
   removed where legally required. This delivers "no political deplatforming, you
   own your voice and your feed" **while staying lawful** — the constraint being
-  *no laws can be broken.* This is deliberately **not** "zero removal of anything
+  _no laws can be broken._ This is deliberately **not** "zero removal of anything
   ever," which would be both illegal (hosting illegal content) and fatal
   (app-store delisting, payment-rail loss).
 
@@ -160,7 +160,7 @@ Chosen axes:
 Explicit reminder: using crypto rails does **not** reduce legal obligations.
 Regulators treat a regulated activity the same whether it settles in dollars or
 tokens — and crypto adds token-as-security and AML scrutiny on top. Crypto is the
-right *substrate* for ownership/identity/rails; it is orthogonal to the legal
+right _substrate_ for ownership/identity/rails; it is orthogonal to the legal
 work, which remains fully intact.
 
 ---
@@ -179,12 +179,12 @@ Requirements for it to hold up:
 
 - **Viewpoint-neutral by construction.** Score evidence, logical validity,
   responsiveness, structure, factual accuracy — dimensions a rigorous argument
-  for *either* side can max out equally. If one political side systematically
+  for _either_ side can max out equally. If one political side systematically
   scores higher, the rubric is broken (and discoverable).
 - **Consistent.** Same debate → same result (determinism; temperature 0; possibly
   multi-model consensus). A staked or reputational outcome that changes on re-run
   is indefensible.
-- **Transparent.** The loser sees *why* they lost, per rubric dimension. No black
+- **Transparent.** The loser sees _why_ they lost, per rubric dimension. No black
   box.
 - **Ungameable.** Adversarially tested so users can't win by response length,
   keywords, or style tricks unrelated to merit.
@@ -205,7 +205,7 @@ core loop — especially the AI judge — is validated with real users):
 2. Tribe quiz onboarding (§3).
 3. Document the corrected tier-3 gate meaning (§4) — done here.
 4. Ship the app; validate: do people battle? Is the AI judge fun, fair,
-   ungameable? (Validates the product *and* the future legal foundation for free.)
+   ungameable? (Validates the product _and_ the future legal foundation for free.)
 
 **[LATER] — post-launch decentralization track (mapped, not started)**
 
