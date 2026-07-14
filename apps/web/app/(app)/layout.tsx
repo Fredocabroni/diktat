@@ -9,6 +9,7 @@ import type { ReactNode } from 'react';
 
 import { InstallPrompt } from '../../components/InstallPrompt';
 import { SessionLengthNudge } from '../../components/SessionLengthNudge';
+import { TierUpCelebration } from '../../components/tier-up/TierUpCelebration';
 import { getServerSupabaseClient } from '../../lib/supabase/server';
 
 const TABS = [
@@ -72,6 +73,7 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
       </main>
       <InstallPrompt />
       <SessionLengthNudge />
+      <TierUpCelebration />
       <nav
         aria-label="Primary"
         className="fixed inset-x-0 bottom-0 z-30 border-t border-ink-300 bg-surface-app/90 pb-[env(safe-area-inset-bottom)] backdrop-blur"
