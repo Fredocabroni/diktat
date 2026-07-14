@@ -109,4 +109,5 @@ jobs:
         env:
           ENABLE_RAILWAY_DEPLOY: ${{ vars.ENABLE_RAILWAY_DEPLOY }}
           ENABLE_VERCEL_DEPLOY: ${{ vars.ENABLE_VERCEL_DEPLOY }}
+          ENABLE_MIGRATION_DEPLOY: ${{ vars.ENABLE_MIGRATION_DEPLOY }}
         run: bash .github/scripts/check-activation-safety.sh

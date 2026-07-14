@@ -40,12 +40,17 @@ run_case() {
   local expected_exit="$6"
   local expected_stderr_substr="${7:-}" # optional
 
+  # Migration flag/file are optional overrides (MIG_ENABLE / MIG_FILE). They
+  # default OFF, so every existing case leaves the migration check skipped and
+  # is unaffected; migration cases set them inline before calling run_case.
   local actual_exit actual_stderr
   actual_stderr=$(
     ENABLE_RAILWAY_DEPLOY="$enable_railway" \
     ENABLE_VERCEL_DEPLOY="$enable_vercel" \
+    ENABLE_MIGRATION_DEPLOY="${MIG_ENABLE:-}" \
     RAILWAY_WORKFLOW_FILE="$railway_file" \
     VERCEL_WORKFLOW_FILE="$vercel_file" \
+    MIGRATION_WORKFLOW_FILE="${MIG_FILE:-$vercel_file}" \
       bash "$SCRIPT" 2>&1 >/dev/null
   ) && actual_exit=0 || actual_exit=$?
 
@@ -257,6 +262,50 @@ YAML
   printf '%s' "$out"
 }
 
+write_migration_pinned() {
+  # deploy-migrations shape: SHA-pinned uses + version-pinned setup-cli, no
+  # `npm i -g`. The GREEN baseline for the migration flag.
+  local out="$FIX_DIR/migration-pinned.yml"
+  cat > "$out" <<'YAML'
+name: deploy-migrations
+on:
+  workflow_dispatch:
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf # v2.1.1
+        with:
+          version: 2.107.0
+      - name: Apply
+        run: supabase db push --yes
+YAML
+  printf '%s' "$out"
+}
+
+write_migration_floating_uses() {
+  # Regress only the setup-cli ref to a floating @v2.1.1 tag — the detector
+  # must surface it once ENABLE_MIGRATION_DEPLOY=true.
+  local out="$FIX_DIR/migration-floating-uses.yml"
+  cat > "$out" <<'YAML'
+name: deploy-migrations
+on:
+  workflow_dispatch:
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: supabase/setup-cli@v2.1.1
+        with:
+          version: 2.107.0
+      - name: Apply
+        run: supabase db push --yes
+YAML
+  printf '%s' "$out"
+}
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -266,6 +315,8 @@ VERCEL_PINNED=$(write_vercel_pinned)
 RAILWAY_FLOATING_USES=$(write_railway_floating_uses)
 RAILWAY_CLI_LATEST=$(write_railway_cli_latest)
 RAILWAY_CLI_BETA=$(write_railway_cli_beta)
+MIGRATION_PINNED=$(write_migration_pinned)
+MIGRATION_FLOATING_USES=$(write_migration_floating_uses)
 RAILWAY_CLI_NEXT=$(write_railway_cli_next)
 RAILWAY_CURL_SH=$(write_railway_curl_sh)
 RAILWAY_BARE_NPM=$(write_railway_bare_npm)
@@ -418,6 +469,29 @@ run_case \
   "" "true" \
   "$RAILWAY_PINNED" "$VERCEL_PINNED" \
   0
+
+# --- Migration flag (deploy-migrations.yml) ---------------------------------
+# MIG_ENABLE / MIG_FILE feed the optional migration overrides in run_case.
+
+MIG_ENABLE="true" MIG_FILE="$MIGRATION_PINNED" run_case \
+  "ENABLE_MIGRATION_DEPLOY='true' + pinned migration workflow → exit 0 (GREEN)" \
+  "" "" \
+  "$RAILWAY_PINNED" "$VERCEL_PINNED" \
+  0
+
+MIG_ENABLE="true" MIG_FILE="$MIGRATION_FLOATING_USES" run_case \
+  "ENABLE_MIGRATION_DEPLOY='true' + floating uses: in migration workflow → exit 1 (RED)" \
+  "" "" \
+  "$RAILWAY_PINNED" "$VERCEL_PINNED" \
+  1 \
+  "floating"
+
+MIG_ENABLE="true" MIG_FILE="$FIX_DIR/does-not-exist.yml" run_case \
+  "ENABLE_MIGRATION_DEPLOY='true' + missing migration workflow → exit 1 (RED)" \
+  "" "" \
+  "$RAILWAY_PINNED" "$VERCEL_PINNED" \
+  1 \
+  "is missing"
 
 echo ""
 echo "----------------------------------------"
