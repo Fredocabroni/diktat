@@ -1,0 +1,170 @@
+name: deploy-migrations
+
+# Manual, gated, human-approved application of supabase/migrations to PROD.
+# Closes the silent-drift gap (prod ran 3 weeks behind main with nothing
+# auto-applying migrations) WITHOUT letting a migration auto-hit prod on merge.
+#
+# Flow: workflow_dispatch → validate (fresh-apply gate) → dry-run (print plan)
+#       → [prod-migrations environment: required-reviewer approval] → apply.
+#
+# HARD GATE: `apply` needs `dry-run` needs `validate`. If the migrations-from-
+# empty validation fails for the dispatched ref, dry-run + apply never run.
+#
+# Activation safety (do NOT flip ENABLE_MIGRATION_DEPLOY=true without checking):
+#   - All `uses:` refs MUST stay SHA-pinned (tag-move exfil vector on
+#     SUPABASE_ACCESS_TOKEN / SUPABASE_DB_PASSWORD).
+#   - The Supabase CLI MUST stay version-pinned (setup-cli `version:`).
+# Both are mechanically enforced by `.github/scripts/check-activation-safety.sh`
+# (run from ci.yml's verify job) whenever vars.ENABLE_MIGRATION_DEPLOY == 'true',
+# and re-checked in-job below with the flag forced true.
+#
+# Required repo config (see PR setup checklist):
+#   secret   SUPABASE_ACCESS_TOKEN   – account PAT (dashboard/account/tokens)
+#   secret   SUPABASE_DB_PASSWORD    – prod DB password (Settings→Database)
+#   variable SUPABASE_PROJECT_REF    – project ref (Settings→General→Reference ID)
+#   variable ENABLE_MIGRATION_DEPLOY – 'true' to arm; unset = no-op
+#   environment `prod-migrations` with a required reviewer (the human gate)
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type the Supabase project ref to confirm applying to PROD'
+        required: true
+    # To graduate to auto-on-merge later, add (the `prod-migrations` environment's
+    # required-reviewer gate on `apply` still forces human approval):
+    #   push:
+    #     branches: [main]
+    #     paths: ['supabase/migrations/**']
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1) HARD GATE — apply migrations from EMPTY on the dispatched ref. Local
+  #    stack only, NO prod credentials. Mirrors migrations.yml so the gate is
+  #    exactly the PR-time fresh-apply, run against the ref being deployed.
+  # ---------------------------------------------------------------------------
+  validate:
+    name: migrations from empty (gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install Supabase CLI
+        uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf # v2.1.1
+        with:
+          version: 2.107.0
+
+      - name: Start local supabase stack
+        run: supabase start
+
+      - name: Apply all migrations from empty
+        run: supabase db reset
+
+      - name: Behavioral DB tests (triggers / constraints / RLS)
+        run: |
+          for f in supabase/tests/sql/*.test.sql; do
+            echo "─── $f ───"
+            psql "postgresql://postgres:postgres@127.0.0.1:54322/postgres" \
+              -v ON_ERROR_STOP=1 -f "$f"
+          done
+
+  # ---------------------------------------------------------------------------
+  # 2) DRY-RUN — link prod, print the pending migrations. Read-only. Gated on
+  #    the ENABLE flag and the typed confirm input. Needs `validate` (HARD).
+  # ---------------------------------------------------------------------------
+  dry-run:
+    name: dry-run (print pending)
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: ${{ vars.ENABLE_MIGRATION_DEPLOY == 'true' }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # Fat-finger guard: the dispatched confirm input must equal the project
+      # ref. This is belt-and-suspenders atop the `prod-migrations` environment gate.
+      - name: Confirm input matches project ref
+        env:
+          CONFIRM: ${{ github.event.inputs.confirm }}
+          REF: ${{ vars.SUPABASE_PROJECT_REF }}
+        run: |
+          if [ -z "$REF" ]; then
+            echo "::error::SUPABASE_PROJECT_REF variable is not set"; exit 1
+          fi
+          if [ "$CONFIRM" != "$REF" ]; then
+            echo "::error::confirm input does not match SUPABASE_PROJECT_REF"; exit 1
+          fi
+
+      # In-job activation-safety re-check (flag forced true) so the pin check
+      # fires on any execution path, mirroring deploy-railway / deploy-vercel.
+      - name: Activation-safety re-check (in-job)
+        env:
+          ENABLE_MIGRATION_DEPLOY: 'true'
+        run: bash .github/scripts/check-activation-safety.sh
+
+      - name: Install Supabase CLI
+        uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf # v2.1.1
+        with:
+          version: 2.107.0
+
+      - name: Link project
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: supabase link --project-ref "${{ vars.SUPABASE_PROJECT_REF }}"
+
+      - name: Dry-run — print pending migrations (applies nothing)
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: supabase db push --dry-run
+
+  # ---------------------------------------------------------------------------
+  # 3) APPLY — the ONLY prod-mutating job. Gated by the `prod-migrations` GitHub
+  #    Environment (required reviewer): the run PAUSES here until a human
+  #    approves in the Actions UI, having read the dry-run plan above. Needs
+  #    `dry-run` (which needs `validate`) → HARD chain to the fresh-apply gate.
+  # ---------------------------------------------------------------------------
+  apply:
+    name: apply to prod
+    needs: dry-run
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: ${{ vars.ENABLE_MIGRATION_DEPLOY == 'true' }}
+    environment: prod-migrations
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Activation-safety re-check (in-job)
+        env:
+          ENABLE_MIGRATION_DEPLOY: 'true'
+        run: bash .github/scripts/check-activation-safety.sh
+
+      - name: Install Supabase CLI
+        uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf # v2.1.1
+        with:
+          version: 2.107.0
+
+      - name: Link project
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: supabase link --project-ref "${{ vars.SUPABASE_PROJECT_REF }}"
+
+      - name: Apply migrations to prod
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        # --yes: the human already approved via the `prod-migrations` environment
+        # gate; this only prevents the CLI's interactive prompt from hanging CI.
+        run: supabase db push --yes

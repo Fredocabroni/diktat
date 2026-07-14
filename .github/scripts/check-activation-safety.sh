@@ -34,9 +34,11 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # defaults take effect.
 RAILWAY_WORKFLOW="${RAILWAY_WORKFLOW_FILE:-${REPO_ROOT}/.github/workflows/deploy-railway.yml}"
 VERCEL_WORKFLOW="${VERCEL_WORKFLOW_FILE:-${REPO_ROOT}/.github/workflows/deploy-vercel.yml}"
+MIGRATION_WORKFLOW="${MIGRATION_WORKFLOW_FILE:-${REPO_ROOT}/.github/workflows/deploy-migrations.yml}"
 
 ENABLE_RAILWAY_DEPLOY="${ENABLE_RAILWAY_DEPLOY:-}"
 ENABLE_VERCEL_DEPLOY="${ENABLE_VERCEL_DEPLOY:-}"
+ENABLE_MIGRATION_DEPLOY="${ENABLE_MIGRATION_DEPLOY:-}"
 
 # Internal: flips to 1 on the first failure; the script exits with this
 # code at the end so all violations across both workflows surface in one
@@ -196,7 +198,8 @@ check_flag() {
   fi
 }
 
-check_flag "ENABLE_RAILWAY_DEPLOY" "$ENABLE_RAILWAY_DEPLOY" "$RAILWAY_WORKFLOW"
-check_flag "ENABLE_VERCEL_DEPLOY"  "$ENABLE_VERCEL_DEPLOY"  "$VERCEL_WORKFLOW"
+check_flag "ENABLE_RAILWAY_DEPLOY"   "$ENABLE_RAILWAY_DEPLOY"   "$RAILWAY_WORKFLOW"
+check_flag "ENABLE_VERCEL_DEPLOY"    "$ENABLE_VERCEL_DEPLOY"    "$VERCEL_WORKFLOW"
+check_flag "ENABLE_MIGRATION_DEPLOY" "$ENABLE_MIGRATION_DEPLOY" "$MIGRATION_WORKFLOW"
 
 exit "$exit_code"
