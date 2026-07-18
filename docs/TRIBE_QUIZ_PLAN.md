@@ -5,6 +5,14 @@
 > quiz replaces the _content_ of `/onboard/tribe`; the flow position (welcome →
 > tribe → preview) is unchanged, and the "skip" / optional-ness is preserved.
 >
+> **Rev 5 (2026-07-17):** length + punctuation pass over the rev 4 set. Each
+> scene is cut to one punchy line, each option to one tight sentence (manifesto
+> length), and em-dashes are stripped from all user-facing copy (house style).
+> Scenes, scores, and axis assignments are unchanged from rev 4 — this is a copy
+> pass, not a redesign, so §4/§5 and the resolver tests are untouched. (Q13-B was
+> also rewritten from a process-dunk into a positive accelerationist claim; score
+> unchanged at T +1.)
+>
 > **Rev 4 (2026-07-17):** v2 voice rewrite — 13 scene-driven questions (4 Change /
 > 5 Trust / 4 State), each a specific situation with stakes in the manifesto
 > register. Supersedes the v1 five-question set. Q13 (tech-elite fault line) is a
@@ -82,29 +90,31 @@ Content bars (non-negotiable):
   _substantive_ stance with a cost.)
 - **Viewpoint-neutral** — mirrors the AI-judge principle (VISION §7): the first
   thing a user touches cannot reveal a house lean.
+- **One-line scenes, one-sentence options, no em-dashes** (rev 5, house style).
 
 Tribe names are never shown during the quiz. Axis scores (right column) are
-hidden from the user.
+hidden from the user. Option order is A, B, C — the §5 canonical keys and the
+resolver test address options by that index, so the order is load-bearing.
 
 ### Q1 — Change
 
-**"For as long as anyone remembers, your town's fire company has run on volunteers and handshakes — no certifications, no county oversight, neighbors saving neighbors. After one bad night, the state says professionalize: certified crews and real rules, or get shut down."**
+**"Your town's volunteer fire company runs on trust and handshakes. The state says certify or shut down."**
 
-| Option                                                                                                                                                      | Score |
-| ----------------------------------------------------------------------------------------------------------------------------------------------------------- | ----- |
-| A. "Modernize it. 'We've always done it this way' is not a fire plan — bring in the standards, even if the old guard walks."                                | C +2  |
-| B. "Add the standards that save lives, keep the company that's always shown up. Reform it, don't replace it."                                               | C 0   |
-| C. "Keep it in the town's hands. Strip out what made it work — the trust, the belonging — and you'll have a compliant service nobody answers the call for." | C −2  |
+| Option                                                                   | Score |
+| ------------------------------------------------------------------------ | ----- |
+| A. "Certify it. 'We've always done it this way' never put out a fire."   | C +2  |
+| B. "Keep the company, add the standards that save lives."                | C 0   |
+| C. "Hands off. Kill the trust that runs it and nobody answers the call." | C −2  |
 
 ### Q2 — Trust
 
-**"For a decade the official guidance said one thing, and millions built their lives around it. This week the same agencies reversed it — the old advice was shaky — and they're backing the new rule with the exact certainty they had for the old one."**
+**"The agencies reversed a decade of official guidance overnight, with all the certainty they had before."**
 
-| Option                                                                                                                                                         | Score |
-| -------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----- |
-| A. "That's the tell. When the same credentialed voices are this certain both times, you're watching a guild defend its authority, not follow the evidence."    | T −2  |
-| B. "That's the process working — they moved when the data moved. Punish them for correcting course and you teach institutions to never admit they were wrong." | T +2  |
-| C. "Take the finding, skip the sermon. Trust what they measured; don't let them dictate what you do about it."                                                 | T −1  |
+| Option                                                                  | Score |
+| ----------------------------------------------------------------------- | ----- |
+| A. "That's a guild protecting its authority, not the evidence talking." | T −2  |
+| B. "That's the process working. They moved when the data moved."        | T +2  |
+| C. "Take the finding. Skip the orders about what to do with it."        | T −1  |
 
 _(C is a committed position, not a dodge: it accepts expert facts but rejects
 technocratic authority over values — which risks undervaluing expert policy
@@ -112,63 +122,63 @@ judgment.)_
 
 ### Q3 — Change
 
-**"The public high school that's anchored your town for a hundred years now graduates a third of its seniors reading at a sixth-grade level. Same building, same district, worse every year. What does it need:"**
+**"Your town's hundred-year-old high school graduates a third of its seniors barely able to read."**
 
-| Option                                                                                                                                             | Score |
-| -------------------------------------------------------------------------------------------------------------------------------------------------- | ----- |
-| A. "Replace it. Open the doors to new schools, new operators, new models — a century of tradition doesn't earn it one more failing class."         | C +2  |
-| B. "Overhaul it — new leadership, new curriculum, hard accountability — but keep the school the town built."                                       | C +1  |
-| C. "The school isn't the disease. Rebuild what collapsed around it — gut the institution and you tear out the neighborhood's last anchor with it." | C −2  |
+| Option                                                                      | Score |
+| --------------------------------------------------------------------------- | ----- |
+| A. "Replace it. A century of tradition doesn't buy one more failing class." | C +2  |
+| B. "Overhaul it. New leadership, hard accountability, same school."         | C +1  |
+| C. "The school isn't the disease. Rebuild what collapsed around it."        | C −2  |
 
 ### Q4 — Trust
 
-**"A family in your county is suing the hospital that three towns depend on — they say it botched a surgery and closed ranks. The hospital says the records show every protocol followed. The town is the jury pool, and honestly nobody knows."**
+**"A family sues the hospital three towns depend on. Botched surgery, or every protocol followed. Nobody knows."**
 
-| Option                                                                                                                                                                       | Score |
-| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----- |
-| A. "The family. The hospital has the lawyers, the records, and the reputation — the deck is stacked before anyone sits down. Institutions bury their mistakes for a living." | T −2  |
-| B. "The hospital. It carries the protocols and the expertise that keep the rest of us alive — one grieving family's certainty isn't evidence."                               | T +2  |
-| C. "The hospital — but open every record and let it be checked in daylight. Its word is worth exactly what it will let you verify."                                          | T +1  |
+| Option                                                          | Score |
+| --------------------------------------------------------------- | ----- |
+| A. "The family. Institutions bury their mistakes for a living." | T −2  |
+| B. "The hospital. One family's grief isn't evidence."           | T +2  |
+| C. "The hospital, if it opens every record to be checked."      | T +1  |
 
 ### Q5 — State
 
-**"The town's biggest employer shuts down overnight — hundreds lose their paycheck at once. The response you'd get behind:"**
+**"The town's biggest employer shuts down overnight. Hundreds lose their paycheck."**
 
-| Option                                                                                                        | Score |
-| ------------------------------------------------------------------------------------------------------------- | ----- |
-| A. "Clear the runway for what's next — cut the taxes and red tape so new employers move in and hire."         | S −2  |
-| B. "Put a real floor under them — retraining, benefits, direct support — so no family free-falls in the gap." | S +2  |
-| C. "Rally the town itself — local business, churches, neighbors — before any distant agency shows up."        | S 0   |
+| Option                                                               | Score |
+| -------------------------------------------------------------------- | ----- |
+| A. "Cut the taxes and red tape so new employers move in."            | S −2  |
+| B. "Put a floor under them. Retraining, benefits, direct support."   | S +2  |
+| C. "Rally the town. Local business and neighbors before any agency." | S 0   |
 
 ### Q6 — Change
 
-**"A new technology could save a lot of lives — and carries risks nobody can fully map yet. The right pace:"**
+**"A new technology could save thousands of lives and carries risks nobody can map."**
 
-| Option                                                                                              | Score |
-| --------------------------------------------------------------------------------------------------- | ----- |
-| A. "Ship it. People are dying on the waitlist while we hold hearings — delay has a body count too." | C +2  |
-| B. "Move, but with guardrails — limits and oversight locked in before it scales."                   | C 0   |
-| C. "Pump the brakes. Some doors don't close once they're open."                                     | C −2  |
+| Option                                                  | Score |
+| ------------------------------------------------------- | ----- |
+| A. "Ship it. Delay has a body count too."               | C +2  |
+| B. "Move, but lock in the guardrails before it scales." | C 0   |
+| C. "Slow down. Some doors don't close once they open."  | C −2  |
 
 ### Q7 — State
 
-**"A working family two towns over can't cover a hospital bill that would wipe out a year's savings. The fix that sits right with you:"**
+**"A working family can't cover a hospital bill that would wipe out a year's savings."**
 
-| Option                                                                                                                      | Score |
-| --------------------------------------------------------------------------------------------------------------------------- | ----- |
-| A. "Guarantee it collectively — some needs are too basic to leave to whether you can pay."                                  | S +2  |
-| B. "Open the market — real prices, real competition — so care costs what it should instead of whatever the cartel charges." | S −2  |
-| C. "Neither bureaucracy nor billing department — mutual aid, community funds, people covering their own."                   | S 0   |
+| Option                                                                          | Score |
+| ------------------------------------------------------------------------------- | ----- |
+| A. "Guarantee it. Some needs are too basic to price."                           | S +2  |
+| B. "Open the market so care costs what it should, not what the cartel charges." | S −2  |
+| C. "Mutual aid. Community funds, people covering their own."                    | S 0   |
 
 ### Q8 — Trust
 
-**"A man everyone knows is guilty walks free — police skipped a warrant, the evidence is thrown out. The system worked exactly as written."**
+**"A guilty man walks free. Police skipped a warrant, so the evidence is thrown out."**
 
-| Option                                                                                                                                                                                                           | Score |
-| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----- |
-| A. "The rules held, and that's the point — you trust the _process_ precisely because you can't trust the _people_ running it. Better a guilty man free than officials who decide the rules don't apply to them." | T −1  |
-| B. "A guilty man walks and the victim gets nothing. The rules aren't sacred — they're the fine print insiders hide behind while ordinary people eat the loss."                                                   | T −2  |
-| C. "The law has to hold even when it stings. An institution that bends its own rules for the mob's outrage is worth less than one that frees a guilty man on principle."                                         | T +2  |
+| Option                                                                               | Score |
+| ------------------------------------------------------------------------------------ | ----- |
+| A. "Good. Trust the rule precisely because you can't trust the people enforcing it." | T −1  |
+| B. "A guilty man walks and the victim eats it. The rules shield insiders."           | T −2  |
+| C. "The law has to hold even when it stings."                                        | T +2  |
 
 _(Rev 4 rescore: A previously smuggled an anti-state-power sentiment into a
 T-distrust score. It now earns `T−1` honestly — distrust of the officials, trust
@@ -177,43 +187,43 @@ splitter.)_
 
 ### Q9 — State
 
-**"A rural stretch of your region has no fast internet — too unprofitable to wire. Kids do homework in parking lots. The move:"**
+**"No company will wire the rural county. Kids do their homework in parking lots."**
 
-| Option                                                                                                                   | Score |
-| ------------------------------------------------------------------------------------------------------------------------ | ----- |
-| A. "Public build — some infrastructure only exists because we decide together to lay it; the market already said no."    | S +2  |
-| B. "Change the math for builders — clear the permits, hand over the spectrum, let a company find the profit and run it." | S −2  |
-| C. "Let the towns wire themselves — local co-ops, neighbors pooling to string their own line."                           | S 0   |
+| Option                                                            | Score |
+| ----------------------------------------------------------------- | ----- |
+| A. "Public build. The market already looked and walked away."     | S +2  |
+| B. "Clear the permits and let a company find the profit."         | S −2  |
+| C. "Let the towns wire themselves. Co-ops, neighbors pooling in." | S 0   |
 
 ### Q10 — State
 
-**"A neighbor's been on public support three years. Half the town calls it a lifeline; half calls it a trap that pays people to stay stuck. Your read on the program:"**
+**"Your neighbor's been on public support three years. Lifeline, or a trap that pays him to stay stuck."**
 
-| Option                                                                                                  | Score |
-| ------------------------------------------------------------------------------------------------------- | ----- |
-| A. "Fund it without flinching — letting people drown to 'motivate' them is cruelty with a spreadsheet." | S +2  |
-| B. "Shrink it to a floor — help that's easy to lean on forever stops being help and becomes a cage."    | S −2  |
-| C. "Tie it to the community — work he can do, people who know his name — not a check and not a cutoff." | S 0   |
+| Option                                                               | Score |
+| -------------------------------------------------------------------- | ----- |
+| A. "Fund it. Letting people drown to motivate them is just cruelty." | S +2  |
+| B. "Shrink it to a floor. Help you lean on forever becomes a cage."  | S −2  |
+| C. "Tie it to the community. Work he can do, people who know him."   | S 0   |
 
 ### Q11 — Trust
 
-**"The one institution you've always defended — your proof the system can work — quietly did something indefensible and buried it. It comes out. Where do you land:"**
+**"The one institution you always defended did something indefensible and buried it. It comes out."**
 
-| Option                                                                                                                                      | Score |
-| ------------------------------------------------------------------------------------------------------------------------------------------- | ----- |
-| A. "It's done. If even that one covered its own rot, the whole class of them runs on nerve and PR, not trust."                              | T −2  |
-| B. "One betrayal doesn't erase what it earned. Hold this to account, but don't torch an institution that's been right far more than wrong." | T +2  |
-| C. "Exactly why nothing gets a permanent pass — trust it only as far as it's audited, and audit it harder now."                             | T −1  |
+| Option                                                                              | Score |
+| ----------------------------------------------------------------------------------- | ----- |
+| A. "Done. If even that one hid its rot, they all run on PR."                        | T −2  |
+| B. "One betrayal doesn't erase what it earned. Hold it to account, don't torch it." | T +2  |
+| C. "Proof nothing gets a permanent pass. Audit it harder now."                      | T −1  |
 
 ### Q12 — Change
 
-**"Your city can bet its budget on one big swing — level the aging downtown and rebuild it from scratch as something new — or keep patching what's there, block by block, year by year. The council asks where you land:"**
+**"Your city can bet its whole budget on leveling downtown and building new, or keep patching what's there."**
 
-| Option                                                                                                                          | Score |
-| ------------------------------------------------------------------------------------------------------------------------------- | ----- |
-| A. "Swing big. A city that only ever patches just decays in slow motion — bet the budget and build something worth inheriting." | C +2  |
-| B. "One bold project the city can afford to lose, the rest kept in repair. Gamble a corner, not the whole treasury."            | C 0   |
-| C. "Patch and maintain. You don't stake a city's one budget on a blueprint nobody's ever built."                                | C −2  |
+| Option                                                                  | Score |
+| ----------------------------------------------------------------------- | ----- |
+| A. "Swing big. Cities that only patch decay in slow motion."            | C +2  |
+| B. "One bold project it can afford to lose, not the whole treasury."    | C 0   |
+| C. "Patch and maintain. Don't stake the city on an untested blueprint." | C −2  |
 
 _(Rev 4 replacement: the cut Q12 measured personal risk tolerance and mis-scored
 it on the Change axis. This is a **public** decision with **public** stakes —
@@ -221,19 +231,20 @@ same swing-vs-caution energy, correct construct.)_
 
 ### Q13 — Trust _(Populist ↔ Accelerationist fault line)_
 
-**"A founder almost nobody voted for now controls the tools half the country runs on — how they talk, pay, and get their news. He says he's dragging the future forward faster than any government ever could. He's not wrong that it works."**
+**"A founder nobody elected controls the tools half the country runs on. And it works."**
 
-| Option                                                                                                                                                                 | Score |
-| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----- |
-| A. "That's the oldest story there is, in a hoodie. Unelected power over millions is unelected power — a king is a king whether the crown is a server farm."            | T −2  |
-| B. "Good. Someone finally building instead of holding hearings — I'll take the person shipping the future over the committee that would still be studying it in 2040." | T +1  |
-| C. "Power's fine as long as you can walk away. The moment you can't switch off his tools without switching off your life, it's not a product — it's a sovereign."      | T −1  |
+| Option                                                                           | Score |
+| -------------------------------------------------------------------------------- | ----- |
+| A. "A king is a king, whether the crown is a server farm."                       | T −2  |
+| B. "Good. Whoever builds the future has earned the right to run it."             | T +1  |
+| C. "Fine, until you can't switch off his tools without switching off your life." | T −1  |
 
-_(Added in rev 4. Populist reads the builder as another insider (A, `T−2`);
-Accelerationist reveres the builder (B, `T+1`); the middle is a
-contestability/exit stance (C, `T−1`). This is the one question that pulls the
-tightest pair apart on the T axis — see §5. It does not raise the geometric
-ceiling; it reduces mis-placement of noisy real users on that boundary.)_
+_(Populist reads the builder as another insider (A, `T−2`); Accelerationist
+grants him legitimacy for building (B, `T+1`, a positive claim after the rev 5
+rewrite — no longer a dunk on process); the middle is a contestability/exit
+stance (C, `T−1`). This is the one question that pulls the tightest pair apart on
+the T axis — see §5. It does not raise the geometric ceiling; it reduces
+mis-placement of noisy real users on that boundary.)_
 
 **Axis coverage:** C = Q1, Q3, Q6, Q12 · T = Q2, Q4, Q8, Q11, Q13 · S = Q5, Q7, Q9, Q10.
 
