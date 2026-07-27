@@ -9,12 +9,12 @@ describe('tribesRouter.list', () => {
     const rows = [
       {
         id: 't-1',
-        slug: 'accelerationists',
-        name: 'Accelerationists',
+        slug: 'conservative',
+        name: 'Conservative',
         description: 'a',
         manifesto: 'm',
       },
-      { id: 't-2', slug: 'libertarians', name: 'Libertarians', description: 'b', manifesto: 'm' },
+      { id: 't-2', slug: 'nationalist', name: 'Nationalist', description: 'b', manifesto: 'm' },
     ];
     const { db, calls } = fakeDb('tribes', { data: rows, error: null });
     const caller = appRouter.createCaller(makeCtx({ db }));

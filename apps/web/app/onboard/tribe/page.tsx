@@ -1,7 +1,10 @@
 // Tribe placement quiz. A short set of concrete-tradeoff questions places the
-// user into the tribe they lean toward (see docs/TRIBE_QUIZ_PLAN.md), then offers
-// a mandatory override — pick any of the five, or skip. Nothing is locked:
-// ADDICTION_ARCHITECTURE §11 (no forced choice to proceed, no FOMO).
+// user into the tribe they lean toward (see docs/TRIBE_OVERHAUL_PLAN.md). When the
+// answers land between the two pairs that geometrically bleed (Progressive/Liberal
+// or Populist/Nationalist) a short tie-breaker runs; otherwise the result leads
+// with the nearest tribe. A mandatory override always lets the user pick any of
+// the seven, or skip — nothing is locked: ADDICTION_ARCHITECTURE §11 (no forced
+// choice to proceed, no FOMO).
 //
 // Pure frontend: the quiz content + scoring live in ./quiz; joining reuses the
 // existing trpc.tribes.list / trpc.tribes.join. No API/migration changes.
@@ -14,14 +17,26 @@ import { useRouter } from 'next/navigation';
 import { useMemo, useState } from 'react';
 
 import { trpc } from '../../../lib/trpc';
-import { QUIZ_QUESTIONS, resolveTribe } from './quiz';
+import {
+  CORE_QUESTIONS,
+  TIEBREAK_BANKS,
+  type TiebreakKey,
+  resolveCore,
+  resolveTiebreak,
+} from './quiz';
 
 // motion token: easing.standard — mutable 4-tuple so it satisfies Framer's
 // BezierDefinition (a `readonly` tuple is rejected by the `ease` prop type).
 const EASE_STANDARD: [number, number, number, number] = [0.2, 0, 0, 1];
 
 type Phase =
-  | { readonly kind: 'quiz'; readonly step: number }
+  | { readonly kind: 'core'; readonly step: number }
+  | {
+      readonly kind: 'tiebreak';
+      readonly branch: TiebreakKey;
+      readonly step: number;
+      readonly coreBest: string;
+    }
   | { readonly kind: 'result'; readonly slug: string; readonly showAll: boolean };
 
 interface TribeRow {
@@ -45,8 +60,9 @@ function TribeQuiz() {
   const reduceMotion = useReducedMotion();
   const tribes = trpc.tribes.list.useQuery();
 
-  const [answers, setAnswers] = useState<number[]>([]);
-  const [phase, setPhase] = useState<Phase>({ kind: 'quiz', step: 0 });
+  const [coreAnswers, setCoreAnswers] = useState<number[]>([]);
+  const [tiebreakAnswers, setTiebreakAnswers] = useState<number[]>([]);
+  const [phase, setPhase] = useState<Phase>({ kind: 'core', step: 0 });
 
   const bySlug = useMemo(() => {
     const map = new Map<string, TribeRow>();
@@ -58,18 +74,42 @@ function TribeQuiz() {
     onSuccess: () => router.push('/onboard/preview'),
   });
 
-  function choose(optionIndex: number) {
-    if (phase.kind !== 'quiz') return;
-    const next = [...answers];
-    next[phase.step] = optionIndex;
-    setAnswers(next);
+  function place(coreBest: string, tbAnswers: number[], branch: TiebreakKey) {
+    const slug = resolveTiebreak(branch, tbAnswers, coreBest);
+    setPhase({ kind: 'result', slug, showAll: false });
+  }
 
-    if (phase.step + 1 < QUIZ_QUESTIONS.length) {
-      setPhase({ kind: 'quiz', step: phase.step + 1 });
+  function chooseCore(optionIndex: number) {
+    if (phase.kind !== 'core') return;
+    const next = [...coreAnswers];
+    next[phase.step] = optionIndex;
+    setCoreAnswers(next);
+
+    if (phase.step + 1 < CORE_QUESTIONS.length) {
+      setPhase({ kind: 'core', step: phase.step + 1 });
+      return;
+    }
+    const result = resolveCore(next);
+    if (result.branch) {
+      setTiebreakAnswers([]);
+      setPhase({ kind: 'tiebreak', branch: result.branch, step: 0, coreBest: result.best });
     } else {
-      const result = resolveTribe(next);
-      // Low-confidence → open straight to the all-five override.
-      setPhase({ kind: 'result', slug: result.slug, showAll: !result.confident });
+      // Confident placement, or low-confidence/off-pair → open the override.
+      setPhase({ kind: 'result', slug: result.best, showAll: result.showOverride });
+    }
+  }
+
+  function chooseTiebreak(optionIndex: number) {
+    if (phase.kind !== 'tiebreak') return;
+    const next = [...tiebreakAnswers];
+    next[phase.step] = optionIndex;
+    setTiebreakAnswers(next);
+
+    const bank = TIEBREAK_BANKS[phase.branch];
+    if (phase.step + 1 < bank.questions.length) {
+      setPhase({ ...phase, step: phase.step + 1 });
+    } else {
+      place(phase.coreBest, next, phase.branch);
     }
   }
 
@@ -88,9 +128,23 @@ function TribeQuiz() {
 
   return (
     <main className="mx-auto flex min-h-dvh max-w-md flex-col px-6 py-10">
-      {phase.kind === 'quiz' ? (
-        <QuizStep step={phase.step} onChoose={choose} rise={rise} />
-      ) : (
+      {phase.kind === 'core' && (
+        <QuestionStep
+          eyebrow={`Question ${phase.step + 1} of ${CORE_QUESTIONS.length}`}
+          question={CORE_QUESTIONS[phase.step]!}
+          onChoose={chooseCore}
+          rise={rise}
+        />
+      )}
+      {phase.kind === 'tiebreak' && (
+        <QuestionStep
+          eyebrow="Just to be sure"
+          question={TIEBREAK_BANKS[phase.branch].questions[phase.step]!}
+          onChoose={chooseTiebreak}
+          rise={rise}
+        />
+      )}
+      {phase.kind === 'result' && (
         <ResultView
           slug={phase.slug}
           showAll={phase.showAll}
@@ -113,32 +167,35 @@ type RiseFn = (delay?: number) => {
   transition: { duration: number; ease: [number, number, number, number]; delay: number };
 };
 
-function QuizStep({
-  step,
+interface StepQuestion {
+  readonly id: string;
+  readonly prompt: string;
+  readonly options: readonly { readonly label: string }[];
+}
+
+function QuestionStep({
+  eyebrow,
+  question,
   onChoose,
   rise,
 }: {
-  step: number;
+  eyebrow: string;
+  question: StepQuestion;
   onChoose: (i: number) => void;
   rise: RiseFn;
 }) {
-  const q = QUIZ_QUESTIONS[step]!;
-  const total = QUIZ_QUESTIONS.length;
-
   return (
-    <div key={q.id}>
-      <p className="text-xs font-semibold uppercase tracking-wide text-text-tertiary">
-        Question {step + 1} of {total}
-      </p>
+    <div key={question.id}>
+      <p className="text-xs font-semibold uppercase tracking-wide text-text-tertiary">{eyebrow}</p>
       <m.h1
         {...rise()}
         className="mt-2 font-display text-2xl font-bold tracking-tight text-text-primary"
       >
-        {q.prompt}
+        {question.prompt}
       </m.h1>
 
       <ul className="mt-6 space-y-3">
-        {q.options.map((opt, i) => (
+        {question.options.map((opt, i) => (
           <m.li key={i} {...rise(0.05 + i * 0.05)}>
             <button
               type="button"
@@ -234,7 +291,7 @@ function ResultView({
             Pick your tribe
           </h1>
           <p className="mt-2 text-sm text-text-secondary">
-            These five. Choose the one that fits — you can change later.
+            Choose the one that fits. You can switch anytime.
           </p>
           <ul className="mt-6 space-y-3">
             {tribes.map((t, i) => (
