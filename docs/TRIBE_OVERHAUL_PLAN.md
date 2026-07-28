@@ -44,15 +44,15 @@ define them.
 Each is a distinct region of belief-space with a recognizable name. One-line
 definition each (full manifestos are build work — see §6):
 
-| Tribe (working slug)          | One-line definition                                                                                   |
-| ----------------------------- | ----------------------------------------------------------------------------------------------------- |
-| **Progressive** (`progressives`)   | Pro-change, pro-redistribution, secular; reform through institutions.                            |
-| **Socialist** (`socialists`)       | Worker power, anti-capitalist economics, egalitarian — left of the left.                         |
-| **Liberal** (`liberals`)           | Individual rights, market **plus** safety net, incremental, institutionalist.                    |
-| **Conservative** (`conservatives`) | Tradition, markets, faith-friendly, incremental change.                                          |
-| **Libertarian** (`libertarians`)   | Maximum individual freedom — economic **and** social — minimal state.                            |
-| **Populist** (`populists`)         | Anti-establishment, people-vs-elites, economically heterodox.                                    |
-| **Nationalist** (`nationalists`)   | Nation-first, sovereignty, cultural cohesion.                                                     |
+| Tribe (working slug)               | One-line definition                                                           |
+| ---------------------------------- | ----------------------------------------------------------------------------- |
+| **Progressive** (`progressives`)   | Pro-change, pro-redistribution, secular; reform through institutions.         |
+| **Socialist** (`socialists`)       | Worker power, anti-capitalist economics, egalitarian — left of the left.      |
+| **Liberal** (`liberals`)           | Individual rights, market **plus** safety net, incremental, institutionalist. |
+| **Conservative** (`conservatives`) | Tradition, markets, faith-friendly, incremental change.                       |
+| **Libertarian** (`libertarians`)   | Maximum individual freedom — economic **and** social — minimal state.         |
+| **Populist** (`populists`)         | Anti-establishment, people-vs-elites, economically heterodox.                 |
+| **Nationalist** (`nationalists`)   | Nation-first, sovereignty, cultural cohesion.                                 |
 
 **Nationalist — editorial guardrail (non-negotiable).** This tribe replaces the
 "fascist" idea from brainstorming. It is included _because_ it is a real,
@@ -87,13 +87,13 @@ dimensions.
 
 **Proposed axes for the new model (to be finalized in build, not here):**
 
-| Axis                     | − pole                          | + pole                                  | Chief discriminator for              |
-| ------------------------ | ------------------------------- | --------------------------------------- | ------------------------------------ |
-| **ECON — economics**     | market / private provision      | collective / redistribution             | Socialist ↔ Libertarian/Conservative |
-| **SOCIAL — values**      | tradition                       | progress                                | Conservative/Nationalist ↔ Progressive/Socialist |
-| **STATE — authority**    | minimal state / individual liberty | strong state over the person         | Libertarian ↔ Nationalist/Socialist  |
-| **ESTAB — establishment**| anti-establishment / populist   | institutionalist / defers to institutions | Populist ↔ Liberal/Progressive     |
-| **NATION — scope**       | cosmopolitan / globalist        | nation-first / sovereigntist            | Nationalist ↔ Progressive            |
+| Axis                      | − pole                             | + pole                                    | Chief discriminator for                          |
+| ------------------------- | ---------------------------------- | ----------------------------------------- | ------------------------------------------------ |
+| **ECON — economics**      | market / private provision         | collective / redistribution               | Socialist ↔ Libertarian/Conservative             |
+| **SOCIAL — values**       | tradition                          | progress                                  | Conservative/Nationalist ↔ Progressive/Socialist |
+| **STATE — authority**     | minimal state / individual liberty | strong state over the person              | Libertarian ↔ Nationalist/Socialist              |
+| **ESTAB — establishment** | anti-establishment / populist      | institutionalist / defers to institutions | Populist ↔ Liberal/Progressive                   |
+| **NATION — scope**        | cosmopolitan / globalist           | nation-first / sovereigntist              | Nationalist ↔ Progressive                        |
 
 That is **five candidate axes** (up from three). The open scoping question is
 whether all five are load-bearing or whether two correlate tightly enough in
@@ -105,15 +105,15 @@ coordinates — coordinates and weights are calibrated in build so each tribe's
 canonical answers self-place, exactly as TRIBE_QUIZ_PLAN §5 verified the old
 five):
 
-| Tribe          | ECON | SOCIAL | STATE | ESTAB | NATION |
-| -------------- | :--: | :----: | :---: | :---: | :----: |
-| Progressive    |  +   |   ++   |   +   |   +   |   −    |
-| Socialist      |  ++  |   +    |   +   |   −   |   −    |
-| Liberal        |  +   |   +    |   0   |  ++   |   −    |
-| Conservative   |  −   |   −−   |   0   |   +   |   +    |
-| Libertarian    |  −−  |   +    |  −−   |   −   |   −    |
-| Populist       |  0   |   −    |   0   |  −−   |   +    |
-| Nationalist    |  −   |   −    |   +   |   −   |   ++   |
+| Tribe        | ECON | SOCIAL | STATE | ESTAB | NATION |
+| ------------ | :--: | :----: | :---: | :---: | :----: |
+| Progressive  |  +   |   ++   |   +   |   +   |   −    |
+| Socialist    |  ++  |   +    |   +   |   −   |   −    |
+| Liberal      |  +   |   +    |   0   |  ++   |   −    |
+| Conservative |  −   |   −−   |   0   |   +   |   +    |
+| Libertarian  |  −−  |   +    |  −−   |   −   |   −    |
+| Populist     |  0   |   −    |   0   |  −−   |   +    |
+| Nationalist  |  −   |   −    |   +   |   −   |   ++   |
 
 This sketch is only to show the seven **are** separable given the richer axis set
 — it is the argument for five axes, not a spec. Whether the model needs all five,
@@ -165,6 +165,7 @@ losing its pure-function shape).
 Not a quiz edit. Everything the old five tribes touch:
 
 **Data / migrations**
+
 - **New seed migration** replacing `20260420090008` (the current 5-tribe seed).
   Goes through the **gated `deploy-migrations` pipeline** (not applied ad hoc).
   Use a full 14-char timestamp name (`YYYYMMDDHHMMSS_seed_seven_tribes.sql`) per
@@ -182,10 +183,12 @@ Not a quiz edit. Everything the old five tribes touch:
   ADDICTION §10 autonomy both bear on this — see open questions.**
 
 **Content**
+
 - **7 new manifestos** (drive the result screen and `tribes.list`). Nationalist
   per the §2 guardrail. All seven through `copy-linter` + neutrality review.
 
 **Quiz module (`apps/web/app/onboard/tribe/quiz.ts` — full rebuild)**
+
 - New `Axis` type (4–5 axes), new `TRIBE_TARGETS` (7 tribes × final axes), new
   question set (balanced across the new axes), new normalization/weights, new
   resolver **with the adaptive-branching flow** (no longer a single pure pass over
@@ -195,6 +198,7 @@ Not a quiz edit. Everything the old five tribes touch:
   the round cap, and the low-confidence override trigger.
 
 **UI**
+
 - Onboarding step machine: progress indicator can no longer count to a fixed 13 —
   it must handle a variable length (core pass + optional branch rounds).
 - Result screen + override card list now render **seven** tribes.
@@ -202,6 +206,7 @@ Not a quiz edit. Everything the old five tribes touch:
   analytics/events, seed fixtures, and docs.
 
 **Docs**
+
 - This doc supersedes the tribe direction in `TRIBE_QUIZ_PLAN.md` (add a
   superseded banner there when the build starts). Log the overhaul in
   `docs/TYRION_BUILD_QUEUE.md`.
@@ -242,4 +247,74 @@ scores; viewpoint-neutral scene principle.
 
 ---
 
-_Build happens in a fresh session against this doc. Nothing above is implemented._
+## 7. Rev 2 — concrete-issue questions (the built model)
+
+The abstract-axis questions (change-vs-continuity etc.) were replaced with **concrete
+issue questions** — the real political battlefield asked directly (the Pew approach).
+Abstract framing hoped positions would be _implied_; real placement needs the actual
+issues people hold opinions about. The 5 axes and 7 tribe coordinates are unchanged;
+only what the questions measure changed, then the deltas were recalibrated.
+
+- **12 core issue questions**, single-axis each: ECON (taxes, healthcare, welfare),
+  SOCIAL (abortion, LGBTQ, religion-in-public-life), STATE (guns, crime/policing),
+  NATION (immigration, foreign policy/allies), ESTAB (trust-in-experts, elites-vs-people).
+- **Forced-choice framing** (Pew): a standing intro line, "Pick the answer closest to
+  your view, even if neither is exactly right." Some questions are binary forced-lean
+  (where a middle is a dodge), some 3-option (where a tribe genuinely lives at the
+  midpoint, e.g. ECON-0 = Liberal/Populist/Nationalist; STATE-0 = Liberal/Conservative/
+  Populist). Guns and foreign policy carry **moderate** (±1) deltas so they tip only
+  the Libertarian/nationalist extremes, not partisan gun-culture or anti-interventionism.
+- **Balance bar (VISION §7):** every option is the strongest, most defensible form of
+  that position. No strawman, no house lean.
+
+### 7.1 Three tie-breaker banks (terminal, no cascade)
+
+Concrete issues cleanly separate 4 tribes but collapse **three issue-twin pairs** —
+tribes that answer loud issues nearly identically and differ only by intensity or
+temperament. Each collapse gets a 2-question runoff that probes the _distinguishing
+dimension_, not another loud issue:
+
+- **Progressive ↔ Socialist** — reform vs. replace (work within capitalism/institutions
+  vs. replace the system / organize outside it).
+- **Populist ↔ Nationalist** — object of grievance (domestic insider elites vs. foreign
+  forces / the nation).
+- **Conservative ↔ Populist** — institutions: defend and repair vs. demolish.
+
+**Mechanic:** core vector → nearest two tribes. If their `d²` gap is below the border
+threshold, fire **only** the bank matching that unordered pair (`{prog,soc}`→PS,
+`{pop,nat}`→PN, `{con,pop}`→CP); any other close pair, or a near-neutral vector, opens
+the all-seven override. The bank is a **terminal pairwise runoff** — one bank, one
+tally, assigned to one of those two tribes. The 7-way resolution never re-runs, so
+there is no cascade (important because Populist appears in two banks — the trigger keys
+off the actual nearest-two, never off "is Populist involved"). All 7 canonical
+answer-sets self-place (4 directly, Prog via PS, Pop via PN).
+
+### 7.2 DEFINITIONAL DECISION — do not "fix" this later
+
+**Conservative = traditional + institutionalist. An issue-conservative who is
+anti-establishment resolves to _Populist_, by design — not a bug.**
+
+Institutional trust (ESTAB) is a **primary placement dimension**, not a secondary
+flavor. On concrete issues, Conservative and right-Populist are nearly identical (both
+market-ish, socially traditional, nation-first, tough-on-crime); the _only_ thing that
+distinguishes them is trust in institutions. So ESTAB is deliberately weighted heavily
+enough that two anti-establishment answers move an otherwise-conservative respondent
+into Populist. That is the model correctly surfacing the real, defining split in
+current politics (institutionalist conservative vs. anti-establishment populist-right),
+the same way Pew's typology separates them.
+
+Consequence, stated plainly so future-me doesn't "correct" it: a Conservative/Populist
+tie-breaker **cannot** recover an anti-establishment issue-conservative to Conservative,
+because their core vector isn't near Conservative at all — it sits in the Populist/
+Nationalist cluster, and a runoff only chooses among the nearest two. This was
+evaluated and **accepted**. Do not down-weight ESTAB or add machinery to "rescue"
+issue-conservatives into Conservative; doing so would erase the institutionalist-vs-
+anti-establishment distinction that is the whole point of separating those two tribes.
+(The alternative — ESTAB as a secondary tiebreaker — was considered and rejected: see
+the Option A decision.)
+
+---
+
+_Rev 2 (issue-based questions + three terminal tie-breaker banks) is the model being
+built. §3–4's abstract-axis framing is superseded by §7 for question content; the axes
+and coordinates in §1–2 stand._

@@ -1,24 +1,33 @@
 // Tribe-placement quiz — pure content + scoring. No React, no network, so the
-// resolver is unit-testable in isolation. Design + verification table live in
-// docs/TRIBE_OVERHAUL_PLAN.md. Slugs must match the seed (migration
+// resolver is unit-testable in isolation. Design + verification live in
+// docs/TRIBE_OVERHAUL_PLAN.md (§7). Slugs match the seed (migration
 // 20260718120000_reseed_seven_tribes).
 //
-// 5 axes (all full-weight): ECON = market vs collective; SOCIAL = tradition vs
-// progress; ESTAB = anti-establishment vs institutionalist; STATE = individual
-// liberty vs strong state over the person; NATION = cosmopolitan vs nation-first.
-// Options never name a tribe and axis scores are hidden from the user — placement
-// stays viewpoint-neutral (VISION §7).
+// Rev 2: concrete ISSUE questions (the Pew approach) instead of abstract-axis
+// framing. 12 single-axis issue questions load onto the same 5 axes and 7 tribe
+// coordinates; only what the questions measure changed. Forced-choice: some
+// questions are binary (where a middle is a dodge), some 3-option (where a tribe
+// genuinely lives at the midpoint). Guns and foreign policy carry MODERATE (±1)
+// deltas so they tip only the extremes, not partisan gun-culture / anti-war.
 //
-// Flow: 13 core questions place a vector, then a TERMINAL two-bank tie-breaker for
-// the only two pairs that geometrically bleed (Progressive/Liberal, Populist/
-// Nationalist). A bank fires once, resolves that pair by a direct vote, and is
-// final — the 7-way resolution never re-runs (no border cascade). Everything else
-// that is ambiguous or near-neutral opens the mandatory all-seven override.
+// Axes: ECON = market vs collective; SOCIAL = tradition vs progress; ESTAB =
+// anti-establishment vs institutionalist; STATE = individual liberty vs strong
+// state over the person; NATION = cosmopolitan vs nation-first. Options never name
+// a tribe and axis scores are hidden (viewpoint-neutral, VISION §7).
+//
+// Twins: concrete issues cleanly separate 4 tribes but collapse 3 issue-twin pairs
+// (they answer loud issues alike, differ only by intensity/temperament). Each gets
+// a terminal 2-question runoff. IMPORTANT (see §7.2): an anti-establishment
+// issue-conservative resolves to Populist BY DESIGN — ESTAB is a primary placement
+// dimension, not a secondary flavor. Do not down-weight ESTAB to "rescue" them.
 
 export type Axis = 'ECON' | 'SOCIAL' | 'ESTAB' | 'STATE' | 'NATION';
 export type AxisScores = Partial<Record<Axis, number>>;
 
 const AXES: readonly Axis[] = ['ECON', 'SOCIAL', 'ESTAB', 'STATE', 'NATION'];
+
+/** Shown once at the top of the quiz — the Pew forced-choice framing. */
+export const QUIZ_INTRO = 'Pick the answer closest to your view, even if neither is exactly right.';
 
 export interface QuizOption {
   readonly label: string;
@@ -31,246 +40,234 @@ export interface QuizQuestion {
   readonly options: readonly QuizOption[];
 }
 
-// Core questions. Coverage: ECON ×3, SOCIAL ×3, ESTAB ×3, STATE ×2, NATION ×2.
-// Option order is load-bearing — the canonical answer keys in the resolver test
-// address options by index. Per-question option scores:
-//   ECON / SOCIAL / NATION : idx0 = +2, idx1 = 0, idx2 = -2
-//   ESTAB                  : idx0 = -2, idx1 = 0, idx2 = +2
-//   STATE                  : idx0 = -2, idx1 = 0, idx2 = +1  (no tribe sits past
-//                            +1, so the authority pole is scored +1, not +2)
+// 12 core issue questions. Coverage: ECON ×3, SOCIAL ×3, STATE ×2, NATION ×2,
+// ESTAB ×2. Binary questions (taxes, immigration, both ESTAB) have 2 options;
+// the rest have 3 with a genuine on-axis midpoint. Option order is load-bearing —
+// the canonical answer keys in the resolver test address options by index.
 export const CORE_QUESTIONS: readonly QuizQuestion[] = [
   // ---- ECON: market (-) vs collective (+) ----
   {
-    id: 'econ-factory-sale',
-    prompt: 'The factory that runs your town is up for sale. Who should own it?',
+    id: 'econ-taxes',
+    prompt: 'The country is deciding whether to raise taxes on its wealthiest.',
     options: [
       {
-        label: 'The workers who run it. The people who build the value should hold it.',
+        label:
+          'Raise them. Concentrated wealth should pay back into the country that made it possible.',
         scores: { ECON: 2 },
       },
       {
-        label: 'Whoever wins it on a fair, open sale, with workers free to bid.',
-        scores: { ECON: 0 },
-      },
-      {
-        label: 'The highest bidder. The market puts it in the best hands.',
+        label:
+          'Cut them. People earned that money, and they spend it better than any government will.',
         scores: { ECON: -2 },
       },
     ],
   },
   {
-    id: 'econ-wealth-gap',
-    prompt: 'A handful of people now own more than half the country combined.',
+    id: 'econ-healthcare',
+    prompt: 'How should the country handle healthcare?',
     options: [
       {
-        label: 'Rigged. Wealth stacked that high is bought rules, not earned reward.',
+        label: 'Guarantee it for everyone through government. Health is a right, not a market.',
         scores: { ECON: 2 },
       },
       {
-        label: 'Some gap rewards effort; the job is stopping it from hardening into a wall.',
+        label:
+          'Mix both. A public safety net for those who need it, private choice for those who want it.',
         scores: { ECON: 0 },
       },
       {
-        label: "So what? Wealth isn't a fixed pie. Someone gaining doesn't mean you lost.",
+        label:
+          'Keep it private and competitive. Government control means worse care and longer waits.',
         scores: { ECON: -2 },
       },
     ],
   },
   {
-    id: 'econ-new-industry',
-    prompt:
-      'A new industry is booming. Should the public help steer where it grows, or leave it to the market?',
+    id: 'econ-welfare',
+    prompt: 'A neighbor has been on government assistance for years.',
     options: [
       {
-        label: 'Steer it. Public direction makes sure the gains reach everyone, not just owners.',
+        label: 'Fund it without shame. A decent society catches people before they hit the ground.',
         scores: { ECON: 2 },
       },
       {
-        label: 'Set fair rules, then let firms and workers sort out the rest.',
+        label: 'A ladder, not a hammock. Help that expects a real path back to work.',
         scores: { ECON: 0 },
       },
-      { label: 'Leave it. Planners guess; markets discover.', scores: { ECON: -2 } },
+      {
+        label:
+          'Shrink it. Aid that never ends traps people in dependence instead of lifting them out.',
+        scores: { ECON: -2 },
+      },
     ],
   },
   // ---- SOCIAL: tradition (-) vs progress (+) ----
   {
-    id: 'social-new-generation',
-    prompt:
-      'A new generation wants to rewrite the old rules on family, faith, and how people are expected to live.',
+    id: 'social-abortion',
+    prompt: 'Where should the law land on abortion?',
     options: [
       {
-        label: 'Good. Every generation should be free to write its own way of living.',
+        label: "Her body, her call. A woman's right to decide her own life comes first.",
         scores: { SOCIAL: 2 },
       },
       {
-        label: "Some old norms earned their place, some didn't. Sort them one by one.",
+        label:
+          'Legal but limited. Allowed early, real limits later, the way most people actually feel.',
         scores: { SOCIAL: 0 },
       },
       {
         label:
-          'Faith and family are the ground people stand on. Rewrite them and you get rootlessness.',
+          'Protect the unborn. A society is judged by how it guards its most defenseless lives.',
         scores: { SOCIAL: -2 },
       },
     ],
   },
   {
-    id: 'social-monument',
-    prompt:
-      'A monument the town has honored for a century now offends many of the people who live there.',
+    id: 'social-lgbtq',
+    prompt: 'How should the country treat questions of gender and sexuality?',
     options: [
       {
-        label: "Take it down. Honoring the past shouldn't mean being ruled by it.",
-        scores: { SOCIAL: 2 },
-      },
-      { label: "Add the full story beside it. Don't erase, don't freeze.", scores: { SOCIAL: 0 } },
-      {
-        label: 'It stays. A people that tears down its own memory loses its balance.',
-        scores: { SOCIAL: -2 },
-      },
-    ],
-  },
-  {
-    id: 'social-old-custom',
-    prompt:
-      'A custom your community has kept for generations no longer fits how people actually live.',
-    options: [
-      {
-        label: "Customs should move as people do. A tradition that excludes isn't sacred.",
+        label:
+          "Full equality, full stop. Who you love and who you are is nobody's business but yours.",
         scores: { SOCIAL: 2 },
       },
       {
-        label: "Keep what still serves, retire what doesn't, judge each on its merits.",
+        label:
+          'Live and let live. Equal treatment for everyone, and no one made to celebrate or condemn.',
         scores: { SOCIAL: 0 },
       },
       {
-        label: 'Keep it. Inherited wisdom outlasts the mood of any single year.',
+        label: 'Hold to tradition. Marriage and the two sexes are foundations, not fashions.',
         scores: { SOCIAL: -2 },
       },
     ],
   },
-  // ---- ESTAB: anti-establishment (-) vs institutionalist (+) ----
+  {
+    id: 'social-religion',
+    prompt: 'What place should faith have in public life?',
+    options: [
+      {
+        label: 'A central one. A country cut off from its faith and moral roots loses its compass.',
+        scores: { SOCIAL: -2 },
+      },
+      {
+        label: 'A personal one. Believe freely, but the public square should work for everyone.',
+        scores: { SOCIAL: 0 },
+      },
+      {
+        label: 'A private one. Government and law should be strictly secular, no exceptions.',
+        scores: { SOCIAL: 2 },
+      },
+    ],
+  },
+  // ---- STATE: individual liberty (-) vs strong state over the person (+). Moderate deltas on guns. ----
+  {
+    id: 'state-guns',
+    prompt: 'The government wants to tighten who can legally own a gun.',
+    options: [
+      {
+        label: 'Back off. An armed citizen is a free citizen, and a check on government overreach.',
+        scores: { STATE: -1 },
+      },
+      {
+        label: 'Reasonable limits. Keep the right, but screen out the dangerous with real checks.',
+        scores: { STATE: 0 },
+      },
+      {
+        label: 'Lock it down. Fewer guns, stronger rules, fewer funerals. Safety comes first.',
+        scores: { STATE: 1 },
+      },
+    ],
+  },
+  {
+    id: 'state-crime',
+    prompt: "Crime is climbing in a major city. What's the answer?",
+    options: [
+      {
+        label:
+          'More police, tougher sentences. Order is the first thing a government owes its people.',
+        scores: { STATE: 2 },
+      },
+      {
+        label: 'Back the police, and fix what drives people to crime in the first place.',
+        scores: { STATE: 0 },
+      },
+      {
+        label:
+          'Attack the roots. Opportunity and fair policing prevent more crime than force and fear ever will.',
+        scores: { STATE: -2 },
+      },
+    ],
+  },
+  // ---- NATION: cosmopolitan (-) vs nation-first (+). Moderate deltas on foreign policy. ----
+  {
+    id: 'nation-immigration',
+    prompt: 'How should the country handle immigration?',
+    options: [
+      {
+        label:
+          "Secure the border and enforce the law. A nation that can't control who enters isn't sovereign.",
+        scores: { NATION: 2 },
+      },
+      {
+        label:
+          'Open the door. Immigrants renew this country, and a fair, humane system beats a wall.',
+        scores: { NATION: -2 },
+      },
+    ],
+  },
+  {
+    id: 'nation-foreign',
+    prompt: "What should drive the country's role in the world?",
+    options: [
+      {
+        label:
+          'Our own interests first. Stop policing the globe and let allies carry their own weight.',
+        scores: { NATION: 1 },
+      },
+      {
+        label:
+          "Strength with judgment. Lead where it truly serves us, and stay out where it doesn't.",
+        scores: { NATION: 0 },
+      },
+      {
+        label:
+          'Stand with our allies and our values. Retreat just leaves a vacuum worse powers fill.',
+        scores: { NATION: -1 },
+      },
+    ],
+  },
+  // ---- ESTAB: anti-establishment (-) vs institutionalist (+). Both binary, primary dimension (§7.2). ----
   {
     id: 'estab-experts',
-    prompt: 'The official expert panel rules one way. The packed town hall wants the opposite.',
-    options: [
-      {
-        label: 'Go with the room. Experts protect their own standing before they protect you.',
-        scores: { ESTAB: -2 },
-      },
-      {
-        label: 'Hear both out. Judge the case on its merits, not on who is speaking.',
-        scores: { ESTAB: 0 },
-      },
-      {
-        label: "Trust the panel. They actually studied it; a crowd's certainty isn't knowledge.",
-        scores: { ESTAB: 2 },
-      },
-    ],
-  },
-  {
-    id: 'estab-insider-rule',
-    prompt: 'A rule sails through, written by the same insiders it happens to benefit.',
-    options: [
-      {
-        label: "That's the whole game. The establishment writes the rules to keep itself on top.",
-        scores: { ESTAB: -2 },
-      },
-      {
-        label: "A bad rule, sure, but one insider deal doesn't prove the whole thing is bought.",
-        scores: { ESTAB: 0 },
-      },
-      {
-        label: "One bad rule isn't proof it's all rigged. Institutions earn trust over time.",
-        scores: { ESTAB: 2 },
-      },
-    ],
-  },
-  {
-    id: 'estab-institution-failure',
-    prompt: 'A respected institution is caught in a serious failure it tried to hide.',
-    options: [
-      {
-        label: 'Burn the deference. If that one hid it, they all run on reputation, not merit.',
-        scores: { ESTAB: -2 },
-      },
-      {
-        label: 'Account for the failure and fix what allowed it, without torching the rest.',
-        scores: { ESTAB: 0 },
-      },
-      {
-        label: "Failure is when the rules matter most. Don't torch what works over one breach.",
-        scores: { ESTAB: 2 },
-      },
-    ],
-  },
-  // ---- STATE: individual liberty (-) vs strong state over the person (+) ----
-  {
-    id: 'state-surveillance',
     prompt:
-      'After a shock, the government could make everyone safer by watching everyone more closely.',
+      "The experts and official institutions say one thing; a lot of ordinary people don't buy it.",
     options: [
       {
-        label: 'No. A state strong enough to protect you is strong enough to own you.',
-        scores: { STATE: -2 },
-      },
-      {
-        label: 'Some tools, with hard limits and oversight, sunset when the threat passes.',
-        scores: { STATE: 0 },
+        label:
+          "Trust the people. The experts too often serve whoever pays them, and face no consequences when they're wrong.",
+        scores: { ESTAB: -2 },
       },
       {
         label:
-          "Take the protection. A society that can't keep its people safe can't keep them free.",
-        scores: { STATE: 1 },
+          "Trust the process. Expertise gets tested, challenged, and corrected in the open. That's what earns deference.",
+        scores: { ESTAB: 2 },
       },
     ],
   },
   {
-    id: 'state-mandate',
-    prompt: 'The government proposes a year of national service required of every young citizen.',
+    id: 'estab-elites',
+    prompt: 'Is the system basically rigged?',
     options: [
       {
-        label: "No. A year of your life is yours to give, not the state's to take.",
-        scores: { STATE: -2 },
+        label:
+          'Yes. A donor-and-insider class runs the system for itself and leaves everyone else the bill.',
+        scores: { ESTAB: -2 },
       },
       {
-        label: 'Only if the case is real and the burden falls fairly on everyone.',
-        scores: { STATE: 0 },
-      },
-      {
-        label: 'Fair enough. Some duties we owe in common, and the state can ask them.',
-        scores: { STATE: 1 },
-      },
-    ],
-  },
-  // ---- NATION: cosmopolitan (-) vs nation-first (+) ----
-  {
-    id: 'nation-supranational',
-    prompt: "A powerful international body issues a ruling your country's own voters would reject.",
-    options: [
-      {
-        label: 'Our laws are ours to make. No distant body no one elected overrides our vote.',
-        scores: { NATION: 2 },
-      },
-      { label: 'Cooperate where it pays, but keep the final say at home.', scores: { NATION: 0 } },
-      {
-        label: 'Big problems cross borders. Shared rules beat every nation going it alone.',
-        scores: { NATION: -2 },
-      },
-    ],
-  },
-  {
-    id: 'nation-spend-home',
-    prompt:
-      'Your country can spend on its own struggling regions or on a greater good beyond its borders.',
-    options: [
-      {
-        label: 'Home first. A nation owes its own citizens before anyone else.',
-        scores: { NATION: 2 },
-      },
-      { label: "Care starts at home, but it doesn't stop at the border.", scores: { NATION: 0 } },
-      {
-        label: "A person in need is a person in need. Lines on a map don't change that.",
-        scores: { NATION: -2 },
+        label:
+          'No. It has real flaws, but the institutions are legitimate and worth defending and repairing.',
+        scores: { ESTAB: 2 },
       },
     ],
   },
@@ -285,7 +282,7 @@ export interface TribeTarget {
   readonly NATION: number;
 }
 
-/** Normalized tribe coordinates (raw ÷ 2). Slugs match the seed. */
+/** Normalized tribe coordinates (raw ÷ 2). Slugs match the seed. Unchanged from rev 1. */
 export const TRIBE_TARGETS: readonly TribeTarget[] = [
   { slug: 'progressive', ECON: 0.5, SOCIAL: 1.0, ESTAB: 0.5, STATE: 0.5, NATION: -0.5 },
   { slug: 'socialist', ECON: 1.0, SOCIAL: 0.5, ESTAB: -0.5, STATE: 0.5, NATION: -0.5 },
@@ -296,22 +293,20 @@ export const TRIBE_TARGETS: readonly TribeTarget[] = [
   { slug: 'nationalist', ECON: 0.0, SOCIAL: -1.0, ESTAB: -0.5, STATE: 0.5, NATION: 1.0 },
 ];
 
-// Normalization divisors = (questions on that axis) × 2, i.e. max achievable
-// |raw|. STATE's positive options cap at +1, but its negative extreme is -4
-// (two -2s), so 4 is the correct magnitude divisor. Weights are equal (1.0) —
-// the §-analog verification clears without a supporting-axis discount.
-const DIVISOR: Record<Axis, number> = { ECON: 6, SOCIAL: 6, ESTAB: 6, STATE: 4, NATION: 4 };
+// Normalization divisors = max achievable |raw| per axis. ECON/SOCIAL: 3 Qs × 2 =
+// 6. STATE: guns(±1) + crime(±2) = 3. NATION: immigration(±2) + foreign(±1) = 3.
+// ESTAB: 2 Qs × 2 = 4. Weights equal (1.0) — ESTAB is deliberately primary (§7.2).
+const DIVISOR: Record<Axis, number> = { ECON: 6, SOCIAL: 6, ESTAB: 4, STATE: 3, NATION: 3 };
 const WEIGHT: Record<Axis, number> = { ECON: 1, SOCIAL: 1, ESTAB: 1, STATE: 1, NATION: 1 };
 
-// Below this margin between the top two tribes the placement is ambiguous; below
-// this user-vector magnitude it is near-neutral. Both open the override (unless an
-// ambiguous top-two is one of the wired tie-breaker pairs).
-export const BORDER_MARGIN = 0.2;
+// Below this margin the top-two are ambiguous; below this magnitude the vector is
+// near-neutral. Nationalist self-places at margin 0.33, so the border sits under it.
+export const BORDER_MARGIN = 0.25;
 export const MAG_MIN = 0.4;
 
 const clamp = (n: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, n));
 
-export type TiebreakKey = 'prog-lib' | 'pop-nat';
+export type TiebreakKey = 'prog-soc' | 'pop-nat' | 'con-pop';
 
 export interface TiebreakOption {
   readonly label: string;
@@ -330,52 +325,41 @@ export interface TiebreakBank {
   readonly questions: readonly TiebreakQuestion[];
 }
 
-// Terminal runoff banks. Each option is a direct vote for one tribe of the pair;
-// the majority wins (ties fall back to the core pass's nearer tribe). Fired at
-// most once — see resolveTiebreak.
+// Terminal runoff banks — one per issue-twin collapse. Each option is a direct
+// vote for one tribe of the pair; majority wins, ties fall back to the core lean.
 export const TIEBREAK_BANKS: Record<TiebreakKey, TiebreakBank> = {
-  'prog-lib': {
-    pair: ['progressive', 'liberal'],
+  'prog-soc': {
+    pair: ['progressive', 'socialist'],
     questions: [
       {
-        id: 'pl-pace',
-        prompt: 'You agree the economy is unfair. The question is how far to go.',
+        id: 'ps-fix',
+        prompt: 'The economy is rigged against ordinary people. What is the fix?',
         options: [
           {
-            label: 'Structural change. Half-measures are how it stayed unfair this long.',
+            label:
+              'Reform it. Tax the top, regulate hard, and expand the safety net until it works for everyone.',
             vote: 'progressive',
           },
           {
-            label: "Steady reform. Don't burn down what works chasing what might.",
-            vote: 'liberal',
+            label:
+              'Replace it. The problem is the system itself, and the people who do the work should own it.',
+            vote: 'socialist',
           },
         ],
       },
       {
-        id: 'pl-institutions',
-        prompt: 'The institutions are flawed but standing. Work through them, or remake them?',
+        id: 'ps-how',
+        prompt: 'And how does that change actually happen?',
         options: [
           {
-            label: 'Remake them. Loyalty to a broken institution just protects what it does wrong.',
+            label:
+              'Through the institutions. Win elections, write the laws, fix it from the inside.',
             vote: 'progressive',
           },
           {
-            label: 'Work through them. The guardrails are the achievement; mend them from inside.',
-            vote: 'liberal',
-          },
-        ],
-      },
-      {
-        id: 'pl-procedure',
-        prompt: 'A reform you believe in could move faster if you bent one procedure to do it.',
-        options: [
-          {
-            label: "Results matter. Don't let procedure shield a bad status quo.",
-            vote: 'progressive',
-          },
-          {
-            label: 'Never. The moment you skip due process, you have become the problem.',
-            vote: 'liberal',
+            label:
+              'Through movements. The institutions answer to capital; real power is organized from outside.',
+            vote: 'socialist',
           },
         ],
       },
@@ -385,32 +369,62 @@ export const TIEBREAK_BANKS: Record<TiebreakKey, TiebreakBank> = {
     pair: ['populist', 'nationalist'],
     questions: [
       {
-        id: 'pn-grievance',
-        prompt: 'Something has gone badly wrong for ordinary people. Where does the blame sit?',
+        id: 'pn-blame',
+        prompt: 'Ordinary people are getting a raw deal. Who is really to blame?',
         options: [
           {
-            label: 'The insiders at the top. Elites who rigged the game against their own people.',
+            label:
+              'The insiders at the top. A corrupt elite that rigged the game and sold everyone else out.',
             vote: 'populist',
           },
           {
-            label:
-              "Forces from outside. Powers beyond our borders we never chose and can't vote out.",
+            label: 'Forces from outside. Open borders and global powers hollowing out the nation.',
             vote: 'nationalist',
           },
         ],
       },
       {
-        id: 'pn-strong-state',
-        prompt: "To set things right, how much power should the nation's government take?",
+        id: 'pn-fight',
+        prompt: 'So what are you really fighting for?',
+        options: [
+          { label: 'Power back in the hands of the people, against any elite.', vote: 'populist' },
+          {
+            label: 'A strong, sovereign nation with borders and an identity worth defending.',
+            vote: 'nationalist',
+          },
+        ],
+      },
+    ],
+  },
+  'con-pop': {
+    pair: ['conservative', 'populist'],
+    questions: [
+      {
+        id: 'cp-institutions',
+        prompt: 'The institutions are failing. What do they need?',
         options: [
           {
             label:
-              'Enough to defend the country and its way of life. A strong state for a strong nation.',
-            vote: 'nationalist',
+              "Repair, not ruin. They're flawed, but they hold the country together. Fix them from within.",
+            vote: 'conservative',
           },
           {
             label:
-              'Power to the people, not a bigger machine. Every state grows to serve its own insiders.',
+              'Rebuild, not patch. Some institutions are too captured to reform, and patching one just shields a rigged system.',
+            vote: 'populist',
+          },
+        ],
+      },
+      {
+        id: 'cp-system',
+        prompt: 'Be honest about the system as a whole.',
+        options: [
+          {
+            label: "Real problems, but it's legitimate and worth conserving.",
+            vote: 'conservative',
+          },
+          {
+            label: 'Rigged to the core by a self-dealing class, and everyone knows it.',
             vote: 'populist',
           },
         ],
@@ -428,9 +442,9 @@ export interface CoreResolution {
   readonly margin: number;
   /** Magnitude of the user vector (small = near-neutral answers). */
   readonly magnitude: number;
-  /** True when the placement is confident (no branch, no override). */
+  /** True when the placement is confident (no runoff, no override). */
   readonly confident: boolean;
-  /** Which tie-breaker bank to fire, when the ambiguous pair is a wired one. */
+  /** Which runoff bank to fire, when the ambiguous nearest-two is a wired pair. */
   readonly branch: TiebreakKey | null;
   /** True when the UI should open on the all-seven override instead. */
   readonly showOverride: boolean;
@@ -446,9 +460,9 @@ function branchFor(a: string, b: string): TiebreakKey | null {
 }
 
 /**
- * Resolve the 13 core answers (option indices, in CORE_QUESTIONS order) into a
- * placement decision. Missing/out-of-range answers are ignored. Does NOT ask the
- * tie-breaker — it returns `branch` so the UI knows which bank to run next.
+ * Resolve the 12 core answers (option indices, in CORE_QUESTIONS order) into a
+ * placement decision. Missing/out-of-range answers are ignored. Returns `branch`
+ * so the UI knows which runoff to run next; the 7-way resolution never re-runs.
  */
 export function resolveCore(answers: readonly number[]): CoreResolution {
   const raw: Record<Axis, number> = { ECON: 0, SOCIAL: 0, ESTAB: 0, STATE: 0, NATION: 0 };
@@ -486,7 +500,7 @@ export function resolveCore(answers: readonly number[]): CoreResolution {
 /**
  * Terminal runoff. Tally the bank votes and return the winning tribe of the pair.
  * A tie falls back to `coreBest` (the core pass's nearer of the two). The 7-way
- * resolution is never re-run, so there is no border cascade.
+ * resolution is never re-run, so there is no cascade.
  */
 export function resolveTiebreak(
   branch: TiebreakKey,

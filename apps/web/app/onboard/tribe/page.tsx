@@ -24,6 +24,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { trpc } from '../../../lib/trpc';
 import {
   CORE_QUESTIONS,
+  QUIZ_INTRO,
   TIEBREAK_BANKS,
   type TiebreakKey,
   resolveCore,
@@ -209,6 +210,7 @@ function TribeQuiz() {
           {phase.kind === 'core' && (
             <QuestionStep
               eyebrow={`Question ${phase.step + 1} of ${CORE_QUESTIONS.length}`}
+              intro={phase.step === 0 ? QUIZ_INTRO : undefined}
               question={CORE_QUESTIONS[phase.step]!}
               selected={coreAnswers[phase.step]}
               onSelect={selectCore}
@@ -258,6 +260,7 @@ interface StepQuestion {
 
 function QuestionStep({
   eyebrow,
+  intro,
   question,
   selected,
   onSelect,
@@ -266,6 +269,7 @@ function QuestionStep({
   reduceMotion,
 }: {
   eyebrow: string;
+  intro?: string;
   question: StepQuestion;
   selected: number | undefined;
   onSelect: (i: number) => void;
@@ -280,6 +284,7 @@ function QuestionStep({
       <p className="text-xs font-semibold uppercase tracking-[0.2em] text-text-tertiary">
         {eyebrow}
       </p>
+      {intro && <p className="mt-2 text-sm text-text-secondary">{intro}</p>}
       <h1 className="mt-2 font-display text-2xl font-bold tracking-tight text-text-primary">
         {question.prompt}
       </h1>
