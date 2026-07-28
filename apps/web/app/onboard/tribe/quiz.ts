@@ -41,23 +41,27 @@ export interface QuizQuestion {
 }
 
 // 12 core issue questions. Coverage: ECON ×3, SOCIAL ×3, STATE ×2, NATION ×2,
-// ESTAB ×2. Two binary forced-lean questions (taxes, elites) where a middle would
-// be a dodge; the rest have 3 options with a genuine on-axis midpoint. Option
-// order is load-bearing — the canonical keys in the resolver test index options.
+// ESTAB ×2. ECON is GRADUATED (Fix A): the moderate-left option scores +1, the
+// revolutionary-left option +2, so a reformist Democrat nets ~+0.5 and only
+// worker-ownership language reaches Socialist's +1.0. Only elites (Q12) is binary.
+// Option order is load-bearing — the canonical keys in the resolver test index it.
 export const CORE_QUESTIONS: readonly QuizQuestion[] = [
-  // ---- ECON: market (-) vs collective (+) ----
+  // ---- ECON: market (-) vs collective (+), graduated left ----
   {
-    id: 'econ-taxes',
-    prompt: 'The country is deciding whether to raise taxes on its wealthiest.',
+    id: 'econ-system',
+    prompt: "The economy isn't working for regular people. What does it actually need?",
     options: [
       {
         label:
-          'Raise them. Concentrated wealth should pay back into the country that made it possible.',
+          'New ownership. The people who do the work should own and run the economy, not a boss class.',
         scores: { ECON: 2 },
       },
       {
-        label:
-          'Cut them. People earned that money, and they spend it better than any government will.',
+        label: 'A fairer deal. Keep the market, but regulate it hard and make it serve everyone.',
+        scores: { ECON: 0 },
+      },
+      {
+        label: 'Room to grow. Free markets build the wealth; government mostly gets in the way.',
         scores: { ECON: -2 },
       },
     ],
@@ -67,13 +71,13 @@ export const CORE_QUESTIONS: readonly QuizQuestion[] = [
     prompt: 'How should the country handle healthcare?',
     options: [
       {
-        label: 'Guarantee it for everyone through government. Health is a right, not a market.',
+        label: 'Make it fully public. Healthcare is a right, not a market.',
         scores: { ECON: 2 },
       },
       {
         label:
-          'Mix both. A public safety net for those who need it, private choice for those who want it.',
-        scores: { ECON: 0 },
+          'Add a public option. Expand coverage, but keep private plans for those who want them.',
+        scores: { ECON: 1 },
       },
       {
         label:
@@ -83,20 +87,21 @@ export const CORE_QUESTIONS: readonly QuizQuestion[] = [
     ],
   },
   {
-    id: 'econ-welfare',
-    prompt: 'A neighbor has been on government assistance for years.',
+    id: 'econ-wealth',
+    prompt: 'The gap between the very richest and everyone else keeps widening. What about wealth?',
     options: [
       {
-        label: 'Fund it without shame. A decent society catches people before they hit the ground.',
+        label:
+          'Tax wealth itself and break up fortunes that large. No one needs a billion dollars.',
         scores: { ECON: 2 },
       },
       {
-        label: 'A ladder, not a hammock. Help that expects a real path back to work.',
-        scores: { ECON: 0 },
+        label: 'Raise taxes on top earners to fund programs, without going after wealth itself.',
+        scores: { ECON: 1 },
       },
       {
         label:
-          'Shrink it. Aid that never ends traps people in dependence instead of lifting them out.',
+          'Cut taxes and let people keep what they earn. They spend it better than government.',
         scores: { ECON: -2 },
       },
     ],
@@ -274,12 +279,12 @@ export const CORE_QUESTIONS: readonly QuizQuestion[] = [
     options: [
       {
         label:
-          'Of course they do. The rules are written by insiders, for insiders, and everyone else picks up the tab.',
+          "That's the system working as designed. It runs on legalized corruption, and no election changes that.",
         scores: { ESTAB: -2 },
       },
       {
         label:
-          'Then enforce the law and vote them out. The system has the tools to fix that, and using them is the answer.',
+          "Then enforce the law and vote them out. One crook isn't a rigged system, it's a job for the system.",
         scores: { ESTAB: 2 },
       },
     ],
@@ -295,15 +300,20 @@ export interface TribeTarget {
   readonly NATION: number;
 }
 
-/** Normalized tribe coordinates (raw ÷ 2). Slugs match the seed. Unchanged from rev 1. */
+// Normalized tribe coordinates — RE-DERIVED (rev 3) as each tribe's honest
+// issue-answer vector, the principled definition for an issue quiz (see §7.3).
+// Graduated ECON (Fix A) + the illegitimacy-not-corruption Q12 (Fix B) moved
+// several from the old hand-set values: notably Progressive is now ESTAB +1.0
+// (institutionalist), STATE -0.33 (civil-libertarian on crime), NATION -1.0; and
+// Liberal ECON +0.33 (a reachable mild-left, closing the coverage hole, Fix C).
 export const TRIBE_TARGETS: readonly TribeTarget[] = [
-  { slug: 'progressive', ECON: 0.5, SOCIAL: 1.0, ESTAB: 0.5, STATE: 0.5, NATION: -0.5 },
-  { slug: 'socialist', ECON: 1.0, SOCIAL: 0.5, ESTAB: -0.5, STATE: 0.5, NATION: -0.5 },
-  { slug: 'liberal', ECON: 0.0, SOCIAL: 0.5, ESTAB: 1.0, STATE: 0.0, NATION: -0.5 },
-  { slug: 'conservative', ECON: -0.5, SOCIAL: -1.0, ESTAB: 0.5, STATE: 0.0, NATION: 0.5 },
-  { slug: 'libertarian', ECON: -1.0, SOCIAL: 0.5, ESTAB: -0.5, STATE: -1.0, NATION: -0.5 },
-  { slug: 'populist', ECON: 0.0, SOCIAL: -0.5, ESTAB: -1.0, STATE: 0.0, NATION: 0.5 },
-  { slug: 'nationalist', ECON: 0.0, SOCIAL: -1.0, ESTAB: -0.5, STATE: 0.5, NATION: 1.0 },
+  { slug: 'progressive', ECON: 0.67, SOCIAL: 1.0, ESTAB: 1.0, STATE: -0.33, NATION: -1.0 },
+  { slug: 'socialist', ECON: 1.0, SOCIAL: 1.0, ESTAB: -1.0, STATE: -0.33, NATION: -1.0 },
+  { slug: 'liberal', ECON: 0.33, SOCIAL: 0.67, ESTAB: 1.0, STATE: 0.0, NATION: -0.33 },
+  { slug: 'conservative', ECON: -0.5, SOCIAL: -1.0, ESTAB: 0.75, STATE: 0.33, NATION: 0.67 },
+  { slug: 'libertarian', ECON: -1.0, SOCIAL: 0.67, ESTAB: -1.0, STATE: -1.0, NATION: -0.33 },
+  { slug: 'populist', ECON: 0.0, SOCIAL: -0.67, ESTAB: -1.0, STATE: 0.33, NATION: 1.0 },
+  { slug: 'nationalist', ECON: 0.0, SOCIAL: -1.0, ESTAB: -1.0, STATE: 0.33, NATION: 1.0 },
 ];
 
 // Normalization divisors = max achievable |raw| per axis. ECON/SOCIAL: 3 Qs × 2 =
@@ -319,7 +329,7 @@ export const MAG_MIN = 0.4;
 
 const clamp = (n: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, n));
 
-export type TiebreakKey = 'prog-soc' | 'pop-nat' | 'con-pop';
+export type TiebreakKey = 'prog-soc' | 'pop-nat' | 'con-pop' | 'prog-lib';
 
 export interface TiebreakOption {
   readonly label: string;
@@ -439,6 +449,39 @@ export const TIEBREAK_BANKS: Record<TiebreakKey, TiebreakBank> = {
           {
             label: 'Rigged to the core by a self-dealing class, and everyone knows it.',
             vote: 'populist',
+          },
+        ],
+      },
+    ],
+  },
+  'prog-lib': {
+    pair: ['progressive', 'liberal'],
+    questions: [
+      {
+        id: 'pl-pace',
+        prompt: 'You both want the country to be fairer. How fast, and how deep?',
+        options: [
+          {
+            label: 'Big and structural, and soon. Half-measures are how injustice survives.',
+            vote: 'progressive',
+          },
+          {
+            label: 'Step by step, within the system. Lasting change is built, not forced.',
+            vote: 'liberal',
+          },
+        ],
+      },
+      {
+        id: 'pl-institutions',
+        prompt: 'And the institutions themselves?',
+        options: [
+          {
+            label: 'Overhaul them. Too many were built to serve the powerful, and still do.',
+            vote: 'progressive',
+          },
+          {
+            label: 'Defend them and improve them. They are how a free society holds together.',
+            vote: 'liberal',
           },
         ],
       },

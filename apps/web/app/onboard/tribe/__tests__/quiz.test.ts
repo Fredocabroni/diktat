@@ -11,33 +11,28 @@ import {
   resolveTiebreak,
 } from '../quiz.js';
 
-// Canonical self-placement — the §7 verification. Each tribe answers every core
-// issue question at its honest position; the result MUST resolve to that tribe.
-// Four tribes place directly from the core; the two issue-twins that collapse on
-// concrete answers (Progressive≈Socialist on econ+social, Populist≈Nationalist on
-// nation+estab) are resolved by their runoff bank. CI-enforced: any question /
-// delta / coordinate edit that breaks a canonical placement fails here.
+// Canonical self-placement — the §7 verification, rev 3 (graduated ECON + the
+// illegitimacy-not-corruption Q12). Coordinates are re-derived as each tribe's
+// honest issue-answer vector, so each self-places at d²=0. Five place directly;
+// Populist/Nationalist (identical except SOCIAL) resolve through the PN bank.
 //
-// Answer order Q1–Q12: taxes, healthcare, welfare (ECON) · abortion, lgbtq,
+// Answer order Q1–Q12: econ-system, healthcare, wealth (ECON) · abortion, lgbtq,
 // religion (SOCIAL) · guns, crime (STATE) · immigration, foreign (NATION) ·
 // experts, elites (ESTAB).
 interface Canonical {
   readonly core: number[];
-  readonly branch?: TiebreakKey; // set only for the twins that go to a runoff
-  readonly bank?: number[]; // the tribe's runoff answers, if it branches
+  readonly branch?: TiebreakKey;
+  readonly bank?: number[];
 }
 
-// Q9 immigration and Q11 experts are now 3-option (indices 8 and 10). Liberal
-// picks the immigration middle (control + compassion) and Conservative picks the
-// experts middle (trust-but-verify); every other tribe answers at its poles.
 const CANONICAL: Record<string, Canonical> = {
-  progressive: { core: [0, 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 0], branch: 'prog-soc', bank: [0, 0] },
+  progressive: { core: [1, 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 1] },
   socialist: { core: [0, 0, 0, 0, 0, 2, 2, 2, 2, 2, 0, 0] },
-  liberal: { core: [0, 1, 1, 0, 0, 1, 1, 1, 1, 2, 2, 1] },
-  conservative: { core: [1, 2, 1, 2, 2, 0, 0, 0, 0, 1, 1, 1] },
-  libertarian: { core: [1, 2, 2, 0, 1, 2, 0, 2, 2, 0, 0, 0] },
-  populist: { core: [0, 1, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0], branch: 'pop-nat', bank: [0, 0] },
-  nationalist: { core: [0, 1, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0] },
+  liberal: { core: [1, 1, 1, 0, 0, 1, 1, 1, 1, 2, 2, 1] },
+  conservative: { core: [2, 2, 1, 2, 2, 0, 0, 0, 0, 1, 1, 1] },
+  libertarian: { core: [2, 2, 2, 0, 1, 2, 0, 2, 2, 0, 0, 0] },
+  populist: { core: [1, 2, 0, 2, 1, 0, 0, 0, 0, 0, 0, 0], branch: 'pop-nat', bank: [0, 0] },
+  nationalist: { core: [1, 2, 0, 2, 2, 0, 0, 0, 0, 0, 0, 0], branch: 'pop-nat', bank: [1, 1] },
 };
 
 describe('resolveCore + runoff — each tribe self-places (§7 verification)', () => {
@@ -45,13 +40,11 @@ describe('resolveCore + runoff — each tribe self-places (§7 verification)', (
     it(`${slug} resolves to itself`, () => {
       const r = resolveCore(c.core);
       if (c.branch) {
-        // Twin: core lands ambiguous on the right pair, runoff decides.
         expect(r.confident).toBe(false);
         expect(r.branch).toBe(c.branch);
         expect(new Set([r.best, r.runnerUp])).toEqual(new Set(TIEBREAK_BANKS[c.branch].pair));
         expect(resolveTiebreak(c.branch, c.bank!, r.best)).toBe(slug);
       } else {
-        // Places directly from the core.
         expect(r.confident).toBe(true);
         expect(r.branch).toBeNull();
         expect(r.best).toBe(slug);
@@ -61,56 +54,72 @@ describe('resolveCore + runoff — each tribe self-places (§7 verification)', (
   }
 });
 
+// Regression locks — the calibration hole that shipped and got fixed. A mainstream
+// Democrat must land Liberal (was Socialist); a mainstream Republican Conservative.
+describe('mainstream-voter regression traces', () => {
+  // Regulate the market, public option, raise top rates modestly, pro-choice,
+  // pro-LGBTQ, secular, some gun limits, moderate crime/immigration,
+  // internationalist, trust the process, enforce the law on the corrupt senator.
+  const DEMOCRAT = [1, 1, 1, 0, 0, 2, 1, 1, 1, 2, 2, 1];
+  // Free market, private care, cut taxes, pro-life, traditional, faith-in-public,
+  // pro-gun, tough-on-crime, secure border, strength-with-judgment, trust-but-verify,
+  // enforce the law.
+  const REPUBLICAN = [2, 2, 2, 2, 2, 0, 0, 0, 0, 1, 1, 1];
+
+  it('a mainstream Democrat lands Liberal, confidently (NOT Socialist)', () => {
+    const r = resolveCore(DEMOCRAT);
+    expect(r.best).toBe('liberal');
+    expect(r.confident).toBe(true);
+    expect(r.best).not.toBe('socialist');
+  });
+
+  it('a mainstream Republican lands Conservative, confidently', () => {
+    const r = resolveCore(REPUBLICAN);
+    expect(r.best).toBe('conservative');
+    expect(r.confident).toBe(true);
+  });
+});
+
 describe('runoff banks resolve both sides + tie fallback', () => {
-  it('prog-soc: reform+institutions → progressive, replace+movements → socialist', () => {
+  it('prog-soc', () => {
     expect(resolveTiebreak('prog-soc', [0, 0], 'progressive')).toBe('progressive');
     expect(resolveTiebreak('prog-soc', [1, 1], 'progressive')).toBe('socialist');
   });
-
-  it('pop-nat: insiders → populist, foreign → nationalist', () => {
+  it('pop-nat', () => {
     expect(resolveTiebreak('pop-nat', [0, 0], 'populist')).toBe('populist');
     expect(resolveTiebreak('pop-nat', [1, 1], 'populist')).toBe('nationalist');
   });
-
-  it('con-pop: repair → conservative, rebuild → populist', () => {
+  it('con-pop', () => {
     expect(resolveTiebreak('con-pop', [0, 0], 'populist')).toBe('conservative');
     expect(resolveTiebreak('con-pop', [1, 1], 'conservative')).toBe('populist');
   });
-
+  it('prog-lib', () => {
+    expect(resolveTiebreak('prog-lib', [0, 0], 'liberal')).toBe('progressive');
+    expect(resolveTiebreak('prog-lib', [1, 1], 'progressive')).toBe('liberal');
+  });
   it('a 1-1 split falls back to the core lean', () => {
-    expect(resolveTiebreak('pop-nat', [0, 1], 'nationalist')).toBe('nationalist');
-    expect(resolveTiebreak('pop-nat', [0, 1], 'populist')).toBe('populist');
+    expect(resolveTiebreak('prog-lib', [0, 1], 'liberal')).toBe('liberal');
+    expect(resolveTiebreak('prog-lib', [0, 1], 'progressive')).toBe('progressive');
   });
 });
 
 describe('structural invariants', () => {
-  it('12 core questions, unique ids, 2 or 3 options each', () => {
+  it('12 core questions, unique ids; only elites (Q12) is binary', () => {
     expect(CORE_QUESTIONS).toHaveLength(12);
     expect(new Set(CORE_QUESTIONS.map((q) => q.id)).size).toBe(12);
-    for (const q of CORE_QUESTIONS)
-      expect(q.options.length === 2 || q.options.length === 3).toBe(true);
+    expect(CORE_QUESTIONS[11]!.options).toHaveLength(2);
+    for (let i = 0; i < 11; i++) expect(CORE_QUESTIONS[i]!.options).toHaveLength(3);
   });
 
-  it('7 tribe targets, matching the canonical keys, with taxes + elites binary', () => {
+  it('7 tribe targets, matching the canonical keys', () => {
     expect(TRIBE_TARGETS).toHaveLength(7);
     expect(new Set(TRIBE_TARGETS.map((t) => t.slug))).toEqual(new Set(Object.keys(CANONICAL)));
-    // Only taxes (0) and elites (11) are binary; immigration (8) and experts (10) are 3-option.
-    for (const i of [0, 11]) expect(CORE_QUESTIONS[i]!.options).toHaveLength(2);
-    for (const i of [8, 10]) expect(CORE_QUESTIONS[i]!.options).toHaveLength(3);
   });
 
-  it('every canonical core answer is one in-range index per question', () => {
-    for (const { core } of Object.values(CANONICAL)) {
-      expect(core).toHaveLength(CORE_QUESTIONS.length);
-      core.forEach((idx, q) => {
-        expect(idx).toBeGreaterThanOrEqual(0);
-        expect(idx).toBeLessThan(CORE_QUESTIONS[q]!.options.length);
-      });
-    }
-  });
-
-  it('each bank has 2 questions of 2 options, each voting for its pair', () => {
-    for (const key of Object.keys(TIEBREAK_BANKS) as TiebreakKey[]) {
+  it('four banks; each 2 questions of 2 options voting for its pair', () => {
+    const keys = Object.keys(TIEBREAK_BANKS) as TiebreakKey[];
+    expect(keys).toHaveLength(4);
+    for (const key of keys) {
       const bank = TIEBREAK_BANKS[key];
       const pair = new Set(bank.pair);
       expect(bank.questions).toHaveLength(2);
@@ -121,13 +130,20 @@ describe('structural invariants', () => {
     }
   });
 
-  it('near-neutral answers open the override, not a placement', () => {
-    // Every 3-option question at its midpoint (index 1); binary questions at 0.
-    const mid = CORE_QUESTIONS.map((q) => (q.options.length === 3 ? 1 : 0));
-    // Neutralize the binary picks by pairing opposite signs where possible is not
-    // needed — magnitude stays low because 3-option axes sum to 0.
-    const r = resolveCore(mid);
-    expect(r.showOverride === true || r.confident === true).toBe(true); // sanity: never hangs
+  it('every bank pair is distinct — nearest-two maps to at most one bank (no misroute)', () => {
+    const keys = Object.keys(TIEBREAK_BANKS) as TiebreakKey[];
+    const signatures = keys.map((k) => [...TIEBREAK_BANKS[k].pair].sort().join('|'));
+    expect(new Set(signatures).size).toBe(keys.length);
+  });
+
+  it('every canonical core answer is one in-range index per question', () => {
+    for (const { core } of Object.values(CANONICAL)) {
+      expect(core).toHaveLength(CORE_QUESTIONS.length);
+      core.forEach((idx, q) => {
+        expect(idx).toBeGreaterThanOrEqual(0);
+        expect(idx).toBeLessThan(CORE_QUESTIONS[q]!.options.length);
+      });
+    }
   });
 
   it('an empty answer set opens the override', () => {
