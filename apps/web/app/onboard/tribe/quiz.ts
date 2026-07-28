@@ -1,20 +1,24 @@
 // Tribe-placement quiz — pure content + scoring. No React, no network, so the
 // resolver is unit-testable in isolation. Design + verification table live in
-// docs/TRIBE_QUIZ_PLAN.md (rev 5). Slugs must match the tribe seed (migration
-// 20260420090008).
+// docs/TRIBE_OVERHAUL_PLAN.md. Slugs must match the seed (migration
+// 20260718120000_reseed_seven_tribes).
 //
-// Axes: C = change vs continuity, T = elite/institutional trust (both primary);
-// S = state power (a half-weight tiebreaker). Options never name a tribe and the
-// axis scores are hidden from the user — placement stays viewpoint-neutral
-// (VISION §7).
+// 5 axes (all full-weight): ECON = market vs collective; SOCIAL = tradition vs
+// progress; ESTAB = anti-establishment vs institutionalist; STATE = individual
+// liberty vs strong state over the person; NATION = cosmopolitan vs nation-first.
+// Options never name a tribe and axis scores are hidden from the user — placement
+// stays viewpoint-neutral (VISION §7).
 //
-// Rev 5: length + punctuation pass over rev 4's 13 questions. One-line scene per
-// question, one-sentence options, house style (no em-dashes in user-facing copy).
-// Scenes, scores, and axis assignments are unchanged from rev 4, so the §5
-// canonical table and the resolver tests are unaffected.
+// Flow: 13 core questions place a vector, then a TERMINAL two-bank tie-breaker for
+// the only two pairs that geometrically bleed (Progressive/Liberal, Populist/
+// Nationalist). A bank fires once, resolves that pair by a direct vote, and is
+// final — the 7-way resolution never re-runs (no border cascade). Everything else
+// that is ambiguous or near-neutral opens the mandatory all-seven override.
 
-export type Axis = 'S' | 'C' | 'T';
+export type Axis = 'ECON' | 'SOCIAL' | 'ESTAB' | 'STATE' | 'NATION';
 export type AxisScores = Partial<Record<Axis, number>>;
+
+const AXES: readonly Axis[] = ['ECON', 'SOCIAL', 'ESTAB', 'STATE', 'NATION'];
 
 export interface QuizOption {
   readonly label: string;
@@ -27,248 +31,244 @@ export interface QuizQuestion {
   readonly options: readonly QuizOption[];
 }
 
-// Option order is A, B, C (indices 0, 1, 2) and MUST match the §3 tables in
-// docs/TRIBE_QUIZ_PLAN.md — the §5 canonical answer keys (and their CI test)
-// address options by that index.
-export const QUIZ_QUESTIONS: readonly QuizQuestion[] = [
+// Core questions. Coverage: ECON ×3, SOCIAL ×3, ESTAB ×3, STATE ×2, NATION ×2.
+// Option order is load-bearing — the canonical answer keys in the resolver test
+// address options by index. Per-question option scores:
+//   ECON / SOCIAL / NATION : idx0 = +2, idx1 = 0, idx2 = -2
+//   ESTAB                  : idx0 = -2, idx1 = 0, idx2 = +2
+//   STATE                  : idx0 = -2, idx1 = 0, idx2 = +1  (no tribe sits past
+//                            +1, so the authority pole is scored +1, not +2)
+export const CORE_QUESTIONS: readonly QuizQuestion[] = [
+  // ---- ECON: market (-) vs collective (+) ----
   {
-    id: 'fire-company',
+    id: 'econ-factory-sale',
     prompt:
-      "Your town's volunteer fire company runs on trust and handshakes. The state says certify or shut down.",
+      "A town's biggest factory goes up for sale, and its workers pool together to buy it themselves.",
     options: [
+      { label: 'Back them. The people who run the machines should own them.', scores: { ECON: 2 } },
       {
-        label: "Certify it. 'We've always done it this way' never put out a fire.",
-        scores: { C: 2 },
+        label: 'Let the best operator win it on a fair, open sale, workers included.',
+        scores: { ECON: 0 },
       },
       {
-        label: 'Keep the company, add the standards that save lives.',
-        scores: { C: 0 },
-      },
-      {
-        label: 'Hands off. Kill the trust that runs it and nobody answers the call.',
-        scores: { C: -2 },
+        label: 'Highest bidder takes it. The market picks who will put it to best use.',
+        scores: { ECON: -2 },
       },
     ],
   },
   {
-    id: 'guidance-reversal',
+    id: 'econ-wealth-gap',
     prompt:
-      'The agencies reversed a decade of official guidance overnight, with all the certainty they had before.',
+      'The richest hundred families now hold more than the bottom half of the country combined.',
     options: [
       {
-        label: "That's a guild protecting its authority, not the evidence talking.",
-        scores: { T: -2 },
+        label: 'Rigged. Wealth stacked that high is a game with the rules bought, not a reward.',
+        scores: { ECON: 2 },
       },
       {
-        label: "That's the process working. They moved when the data moved.",
-        scores: { T: 2 },
+        label: 'Some gap is the price of effort; the job is keeping it from hardening into a wall.',
+        scores: { ECON: 0 },
       },
       {
-        label: 'Take the finding. Skip the orders about what to do with it.',
-        scores: { T: -1 },
+        label: "Wealth isn't a fixed pie. One person earning more doesn't leave you poorer.",
+        scores: { ECON: -2 },
       },
     ],
   },
   {
-    id: 'failing-school',
+    id: 'econ-new-industry',
     prompt:
-      "Your town's hundred-year-old high school graduates a third of its seniors barely able to read.",
+      'A new industry is booming. Should the public help steer where it grows, or leave it to the market?',
     options: [
       {
-        label: "Replace it. A century of tradition doesn't buy one more failing class.",
-        scores: { C: 2 },
+        label: 'Steer it. Public direction makes sure the gains reach everyone, not just owners.',
+        scores: { ECON: 2 },
       },
       {
-        label: 'Overhaul it. New leadership, hard accountability, same school.',
-        scores: { C: 1 },
+        label: 'Set fair rules, then let firms and workers sort out the rest.',
+        scores: { ECON: 0 },
       },
-      {
-        label: "The school isn't the disease. Rebuild what collapsed around it.",
-        scores: { C: -2 },
-      },
+      { label: 'Leave it. Planners guess; markets discover.', scores: { ECON: -2 } },
     ],
   },
+  // ---- SOCIAL: tradition (-) vs progress (+) ----
   {
-    id: 'hospital-suit',
+    id: 'social-new-generation',
     prompt:
-      'A family sues the hospital three towns depend on. Botched surgery, or every protocol followed. Nobody knows.',
+      'A new generation wants to rewrite the old rules on family, faith, and how people are expected to live.',
     options: [
       {
-        label: 'The family. Institutions bury their mistakes for a living.',
-        scores: { T: -2 },
+        label: 'Good. Every generation should be free to write its own way of living.',
+        scores: { SOCIAL: 2 },
       },
       {
-        label: "The hospital. One family's grief isn't evidence.",
-        scores: { T: 2 },
+        label: "Some old norms earned their place, some didn't. Sort them one by one.",
+        scores: { SOCIAL: 0 },
       },
       {
-        label: 'The hospital, if it opens every record to be checked.',
-        scores: { T: 1 },
+        label:
+          'Faith and family are the ground people stand on. Rewrite them and you get rootlessness.',
+        scores: { SOCIAL: -2 },
       },
     ],
   },
   {
-    id: 'employer-shutdown',
-    prompt: "The town's biggest employer shuts down overnight. Hundreds lose their paycheck.",
-    options: [
-      {
-        label: 'Cut the taxes and red tape so new employers move in.',
-        scores: { S: -2 },
-      },
-      {
-        label: 'Put a floor under them. Retraining, benefits, direct support.',
-        scores: { S: 2 },
-      },
-      {
-        label: 'Rally the town. Local business and neighbors before any agency.',
-        scores: { S: 0 },
-      },
-    ],
-  },
-  {
-    id: 'risky-tech',
-    prompt: 'A new technology could save thousands of lives and carries risks nobody can map.',
-    options: [
-      {
-        label: 'Ship it. Delay has a body count too.',
-        scores: { C: 2 },
-      },
-      {
-        label: 'Move, but lock in the guardrails before it scales.',
-        scores: { C: 0 },
-      },
-      {
-        label: "Slow down. Some doors don't close once they open.",
-        scores: { C: -2 },
-      },
-    ],
-  },
-  {
-    id: 'hospital-bill',
-    prompt: "A working family can't cover a hospital bill that would wipe out a year's savings.",
-    options: [
-      {
-        label: 'Guarantee it. Some needs are too basic to price.',
-        scores: { S: 2 },
-      },
-      {
-        label: 'Open the market so care costs what it should, not what the cartel charges.',
-        scores: { S: -2 },
-      },
-      {
-        label: 'Mutual aid. Community funds, people covering their own.',
-        scores: { S: 0 },
-      },
-    ],
-  },
-  {
-    id: 'technicality',
-    prompt: 'A guilty man walks free. Police skipped a warrant, so the evidence is thrown out.',
-    options: [
-      {
-        label: "Good. Trust the rule precisely because you can't trust the people enforcing it.",
-        scores: { T: -1 },
-      },
-      {
-        label: 'A guilty man walks and the victim eats it. The rules shield insiders.',
-        scores: { T: -2 },
-      },
-      {
-        label: 'The law has to hold even when it stings.',
-        scores: { T: 2 },
-      },
-    ],
-  },
-  {
-    id: 'rural-internet',
-    prompt: 'No company will wire the rural county. Kids do their homework in parking lots.',
-    options: [
-      {
-        label: 'Public build. The market already looked and walked away.',
-        scores: { S: 2 },
-      },
-      {
-        label: 'Clear the permits and let a company find the profit.',
-        scores: { S: -2 },
-      },
-      {
-        label: 'Let the towns wire themselves. Co-ops, neighbors pooling in.',
-        scores: { S: 0 },
-      },
-    ],
-  },
-  {
-    id: 'public-support',
+    id: 'social-monument',
     prompt:
-      "Your neighbor's been on public support three years. Lifeline, or a trap that pays him to stay stuck.",
+      'A monument the town has honored for a century now offends many of the people who live there.',
     options: [
       {
-        label: 'Fund it. Letting people drown to motivate them is just cruelty.',
-        scores: { S: 2 },
+        label: "Take it down. Honoring the past shouldn't mean being ruled by it.",
+        scores: { SOCIAL: 2 },
       },
+      { label: "Add the full story beside it. Don't erase, don't freeze.", scores: { SOCIAL: 0 } },
       {
-        label: 'Shrink it to a floor. Help you lean on forever becomes a cage.',
-        scores: { S: -2 },
-      },
-      {
-        label: 'Tie it to the community. Work he can do, people who know him.',
-        scores: { S: 0 },
+        label: 'It stays. A people that tears down its own memory loses its balance.',
+        scores: { SOCIAL: -2 },
       },
     ],
   },
   {
-    id: 'trusted-institution',
+    id: 'social-old-custom',
     prompt:
-      'The one institution you always defended did something indefensible and buried it. It comes out.',
+      'A custom your community has kept for generations no longer fits how people actually live.',
     options: [
       {
-        label: 'Done. If even that one hid its rot, they all run on PR.',
-        scores: { T: -2 },
+        label: "Customs should move as people do. A tradition that excludes isn't sacred.",
+        scores: { SOCIAL: 2 },
       },
       {
-        label: "One betrayal doesn't erase what it earned. Hold it to account, don't torch it.",
-        scores: { T: 2 },
+        label: "Keep what still serves, retire what doesn't, judge each on its merits.",
+        scores: { SOCIAL: 0 },
       },
       {
-        label: 'Proof nothing gets a permanent pass. Audit it harder now.',
-        scores: { T: -1 },
+        label: 'Keep it. Inherited wisdom outlasts the mood of any single year.',
+        scores: { SOCIAL: -2 },
       },
     ],
   },
+  // ---- ESTAB: anti-establishment (-) vs institutionalist (+) ----
   {
-    id: 'city-budget',
+    id: 'estab-experts',
     prompt:
-      "Your city can bet its whole budget on leveling downtown and building new, or keep patching what's there.",
+      'The credentialed experts and the people they govern have reached opposite conclusions.',
     options: [
       {
-        label: 'Swing big. Cities that only patch decay in slow motion.',
-        scores: { C: 2 },
+        label: 'Trust the people. Experts guard their own authority first and the truth second.',
+        scores: { ESTAB: -2 },
       },
       {
-        label: 'One bold project it can afford to lose, not the whole treasury.',
-        scores: { C: 0 },
+        label: 'Weigh the expertise, but they answer to the public, not the other way around.',
+        scores: { ESTAB: 0 },
       },
       {
-        label: "Patch and maintain. Don't stake the city on an untested blueprint.",
-        scores: { C: -2 },
+        label: 'Defer to those who studied it. Expertise is earned, not a conspiracy.',
+        scores: { ESTAB: 2 },
       },
     ],
   },
   {
-    id: 'tech-founder',
-    prompt: 'A founder nobody elected controls the tools half the country runs on. And it works.',
+    id: 'estab-insider-rule',
+    prompt: 'A rule sails through, written by the same insiders it happens to benefit.',
     options: [
       {
-        label: 'A king is a king, whether the crown is a server farm.',
-        scores: { T: -2 },
+        label: "That's the whole game. The establishment writes the rules to keep itself on top.",
+        scores: { ESTAB: -2 },
       },
       {
-        label: 'Good. Whoever builds the future has earned the right to run it.',
-        scores: { T: 1 },
+        label: "A bad rule, sure, but one insider deal doesn't prove the whole thing is bought.",
+        scores: { ESTAB: 0 },
       },
       {
-        label: "Fine, until you can't switch off his tools without switching off your life.",
-        scores: { T: -1 },
+        label: "One bad rule isn't proof it's all rigged. Institutions earn trust over time.",
+        scores: { ESTAB: 2 },
+      },
+    ],
+  },
+  {
+    id: 'estab-institution-failure',
+    prompt: 'A respected institution is caught in a serious failure it tried to hide.',
+    options: [
+      {
+        label: 'Burn the deference. If that one hid it, they all run on reputation, not merit.',
+        scores: { ESTAB: -2 },
+      },
+      {
+        label: 'Account for the failure and fix what allowed it, without torching the rest.',
+        scores: { ESTAB: 0 },
+      },
+      {
+        label: "Failure is when the rules matter most. Don't torch what works over one breach.",
+        scores: { ESTAB: 2 },
+      },
+    ],
+  },
+  // ---- STATE: individual liberty (-) vs strong state over the person (+) ----
+  {
+    id: 'state-surveillance',
+    prompt:
+      'After a shock, the government could make everyone safer by watching everyone more closely.',
+    options: [
+      {
+        label: 'No. A state strong enough to protect you is strong enough to own you.',
+        scores: { STATE: -2 },
+      },
+      {
+        label: 'Some tools, with hard limits and oversight, sunset when the threat passes.',
+        scores: { STATE: 0 },
+      },
+      {
+        label:
+          "Take the protection. A society that can't keep its people safe can't keep them free.",
+        scores: { STATE: 1 },
+      },
+    ],
+  },
+  {
+    id: 'state-mandate',
+    prompt: 'The state wants to require something of every citizen for the common good.',
+    options: [
+      { label: "Persuade me, don't command me. My life is mine to run.", scores: { STATE: -2 } },
+      {
+        label: "Require it only where one person's choice truly lands on everyone else.",
+        scores: { STATE: 0 },
+      },
+      {
+        label:
+          'A fair rule that serves everyone is legitimate. That is what we build governments for.',
+        scores: { STATE: 1 },
+      },
+    ],
+  },
+  // ---- NATION: cosmopolitan (-) vs nation-first (+) ----
+  {
+    id: 'nation-supranational',
+    prompt: "A powerful international body issues a ruling your country's own voters would reject.",
+    options: [
+      {
+        label: 'Our laws are ours to make. No distant body no one elected overrides our vote.',
+        scores: { NATION: 2 },
+      },
+      { label: 'Cooperate where it pays, but keep the final say at home.', scores: { NATION: 0 } },
+      {
+        label: 'Big problems cross borders. Shared rules beat every nation going it alone.',
+        scores: { NATION: -2 },
+      },
+    ],
+  },
+  {
+    id: 'nation-spend-home',
+    prompt:
+      'Your country can spend on its own struggling regions or on a greater good beyond its borders.',
+    options: [
+      {
+        label: 'Home first. A nation owes its own citizens before anyone else.',
+        scores: { NATION: 2 },
+      },
+      { label: "Care starts at home, but it doesn't stop at the border.", scores: { NATION: 0 } },
+      {
+        label: "A person in need is a person in need. Lines on a map don't change that.",
+        scores: { NATION: -2 },
       },
     ],
   },
@@ -276,69 +276,233 @@ export const QUIZ_QUESTIONS: readonly QuizQuestion[] = [
 
 export interface TribeTarget {
   readonly slug: string;
-  readonly S: number;
-  readonly C: number;
-  readonly T: number;
+  readonly ECON: number;
+  readonly SOCIAL: number;
+  readonly ESTAB: number;
+  readonly STATE: number;
+  readonly NATION: number;
 }
 
 /** Normalized tribe coordinates (raw ÷ 2). Slugs match the seed. */
 export const TRIBE_TARGETS: readonly TribeTarget[] = [
-  { slug: 'libertarians', S: -1, C: 0, T: -0.5 },
-  { slug: 'progressives', S: 1, C: 0.5, T: 0.5 },
-  { slug: 'traditionalists', S: 0, C: -1, T: 1 },
-  { slug: 'populists', S: 0, C: 0.5, T: -1 },
-  { slug: 'accelerationists', S: -0.5, C: 1, T: -0.5 },
+  { slug: 'progressive', ECON: 0.5, SOCIAL: 1.0, ESTAB: 0.5, STATE: 0.5, NATION: -0.5 },
+  { slug: 'socialist', ECON: 1.0, SOCIAL: 0.5, ESTAB: -0.5, STATE: 0.5, NATION: -0.5 },
+  { slug: 'liberal', ECON: 0.0, SOCIAL: 0.5, ESTAB: 1.0, STATE: 0.0, NATION: -0.5 },
+  { slug: 'conservative', ECON: -0.5, SOCIAL: -1.0, ESTAB: 0.5, STATE: 0.0, NATION: 0.5 },
+  { slug: 'libertarian', ECON: -1.0, SOCIAL: 0.5, ESTAB: -0.5, STATE: -1.0, NATION: -0.5 },
+  { slug: 'populist', ECON: 0.0, SOCIAL: -0.5, ESTAB: -1.0, STATE: 0.0, NATION: 0.5 },
+  { slug: 'nationalist', ECON: 0.0, SOCIAL: -1.0, ESTAB: -0.5, STATE: 0.5, NATION: 1.0 },
 ];
 
-// Max achievable |sum| per axis (normalization divisors = question count × 2)
-// and axis weights. 4 Change / 5 Trust / 4 State questions.
-const DIVISOR: Record<Axis, number> = { S: 8, C: 8, T: 10 };
-const WEIGHT: Record<Axis, number> = { S: 0.5, C: 1, T: 1 };
+// Normalization divisors = (questions on that axis) × 2, i.e. max achievable
+// |raw|. STATE's positive options cap at +1, but its negative extreme is -4
+// (two -2s), so 4 is the correct magnitude divisor. Weights are equal (1.0) —
+// the §-analog verification clears without a supporting-axis discount.
+const DIVISOR: Record<Axis, number> = { ECON: 6, SOCIAL: 6, ESTAB: 6, STATE: 4, NATION: 4 };
+const WEIGHT: Record<Axis, number> = { ECON: 1, SOCIAL: 1, ESTAB: 1, STATE: 1, NATION: 1 };
 
-// Below this margin between the top two tribes, or this user-vector magnitude,
-// the result is low-confidence and the UI opens on the all-five override.
-const CONFIDENT_MARGIN = 0.15;
-const CONFIDENT_MAGNITUDE = 0.35;
+// Below this margin between the top two tribes the placement is ambiguous; below
+// this user-vector magnitude it is near-neutral. Both open the override (unless an
+// ambiguous top-two is one of the wired tie-breaker pairs).
+export const BORDER_MARGIN = 0.2;
+export const MAG_MIN = 0.4;
 
 const clamp = (n: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, n));
 
-export interface QuizResult {
-  /** Nearest tribe's slug. */
-  readonly slug: string;
-  /** False when the result is ambiguous — the UI should lead with the override. */
+export type TiebreakKey = 'prog-lib' | 'pop-nat';
+
+export interface TiebreakOption {
+  readonly label: string;
+  /** Slug this option votes for (one of the pair). */
+  readonly vote: string;
+}
+
+export interface TiebreakQuestion {
+  readonly id: string;
+  readonly prompt: string;
+  readonly options: readonly TiebreakOption[];
+}
+
+export interface TiebreakBank {
+  readonly pair: readonly [string, string];
+  readonly questions: readonly TiebreakQuestion[];
+}
+
+// Terminal runoff banks. Each option is a direct vote for one tribe of the pair;
+// the majority wins (ties fall back to the core pass's nearer tribe). Fired at
+// most once — see resolveTiebreak.
+export const TIEBREAK_BANKS: Record<TiebreakKey, TiebreakBank> = {
+  'prog-lib': {
+    pair: ['progressive', 'liberal'],
+    questions: [
+      {
+        id: 'pl-pace',
+        prompt: 'You agree the economy is unfair. The question is how far to go.',
+        options: [
+          {
+            label: 'Structural change. Half-measures are how it stayed unfair this long.',
+            vote: 'progressive',
+          },
+          {
+            label: "Steady reform. Don't burn down what works chasing what might.",
+            vote: 'liberal',
+          },
+        ],
+      },
+      {
+        id: 'pl-institutions',
+        prompt: 'The institutions are flawed but standing. Work through them, or remake them?',
+        options: [
+          {
+            label: 'Remake them. Loyalty to a broken institution just protects what it does wrong.',
+            vote: 'progressive',
+          },
+          {
+            label: 'Work through them. The guardrails are the achievement; mend them from inside.',
+            vote: 'liberal',
+          },
+        ],
+      },
+      {
+        id: 'pl-procedure',
+        prompt: 'A reform you believe in could move faster if you bent one procedure to do it.',
+        options: [
+          {
+            label: "Results matter. Don't let procedure shield a bad status quo.",
+            vote: 'progressive',
+          },
+          {
+            label: 'Never. The moment you skip due process, you have become the problem.',
+            vote: 'liberal',
+          },
+        ],
+      },
+    ],
+  },
+  'pop-nat': {
+    pair: ['populist', 'nationalist'],
+    questions: [
+      {
+        id: 'pn-grievance',
+        prompt: 'Something has gone badly wrong for ordinary people. Where does the blame sit?',
+        options: [
+          {
+            label: 'The insiders at the top. Elites who rigged the game against their own people.',
+            vote: 'populist',
+          },
+          {
+            label:
+              "Forces from outside. Powers beyond our borders we never chose and can't vote out.",
+            vote: 'nationalist',
+          },
+        ],
+      },
+      {
+        id: 'pn-strong-state',
+        prompt: "To set things right, how much power should the nation's government take?",
+        options: [
+          {
+            label:
+              'Enough to defend the country and its way of life. A strong state for a strong nation.',
+            vote: 'nationalist',
+          },
+          {
+            label:
+              'Power to the people, not a bigger machine. Every state grows to serve its own insiders.',
+            vote: 'populist',
+          },
+        ],
+      },
+    ],
+  },
+};
+
+export interface CoreResolution {
+  /** Nearest tribe's slug from the core pass. */
+  readonly best: string;
+  /** Second-nearest tribe's slug. */
+  readonly runnerUp: string;
+  /** d² gap between runner-up and best (larger = more confident). */
+  readonly margin: number;
+  /** Magnitude of the user vector (small = near-neutral answers). */
+  readonly magnitude: number;
+  /** True when the placement is confident (no branch, no override). */
   readonly confident: boolean;
+  /** Which tie-breaker bank to fire, when the ambiguous pair is a wired one. */
+  readonly branch: TiebreakKey | null;
+  /** True when the UI should open on the all-seven override instead. */
+  readonly showOverride: boolean;
+}
+
+function branchFor(a: string, b: string): TiebreakKey | null {
+  const pair = new Set([a, b]);
+  for (const key of Object.keys(TIEBREAK_BANKS) as TiebreakKey[]) {
+    const [x, y] = TIEBREAK_BANKS[key].pair;
+    if (pair.has(x) && pair.has(y)) return key;
+  }
+  return null;
 }
 
 /**
- * Resolve a list of chosen option indices (one per question, in QUIZ_QUESTIONS
- * order) to the nearest tribe. Missing/out-of-range answers are ignored.
+ * Resolve the 13 core answers (option indices, in CORE_QUESTIONS order) into a
+ * placement decision. Missing/out-of-range answers are ignored. Does NOT ask the
+ * tie-breaker — it returns `branch` so the UI knows which bank to run next.
  */
-export function resolveTribe(answers: readonly number[]): QuizResult {
-  const raw: Record<Axis, number> = { S: 0, C: 0, T: 0 };
+export function resolveCore(answers: readonly number[]): CoreResolution {
+  const raw: Record<Axis, number> = { ECON: 0, SOCIAL: 0, ESTAB: 0, STATE: 0, NATION: 0 };
   answers.forEach((optionIndex, questionIndex) => {
-    const option = QUIZ_QUESTIONS[questionIndex]?.options[optionIndex];
+    const option = CORE_QUESTIONS[questionIndex]?.options[optionIndex];
     if (!option) return;
-    (['S', 'C', 'T'] as const).forEach((axis) => {
-      raw[axis] += option.scores[axis] ?? 0;
-    });
+    for (const axis of AXES) raw[axis] += option.scores[axis] ?? 0;
   });
 
-  const v: Record<Axis, number> = {
-    S: clamp(raw.S / DIVISOR.S, -1, 1),
-    C: clamp(raw.C / DIVISOR.C, -1, 1),
-    T: clamp(raw.T / DIVISOR.T, -1, 1),
-  };
+  const v = {} as Record<Axis, number>;
+  for (const axis of AXES) v[axis] = clamp(raw[axis] / DIVISOR[axis], -1, 1);
 
   const ranked = TRIBE_TARGETS.map((t) => ({
     slug: t.slug,
-    d2: WEIGHT.S * (v.S - t.S) ** 2 + WEIGHT.C * (v.C - t.C) ** 2 + WEIGHT.T * (v.T - t.T) ** 2,
-    sDist: Math.abs(v.S - t.S),
-  })).sort((a, b) => a.d2 - b.d2 || a.sDist - b.sDist);
+    d2: AXES.reduce((sum, axis) => sum + WEIGHT[axis] * (v[axis] - t[axis]) ** 2, 0),
+  })).sort((p, q) => p.d2 - q.d2);
 
   const best = ranked[0]!;
   const second = ranked[1]!;
-  const magnitude = Math.hypot(v.S, v.C, v.T);
-  const confident = second.d2 - best.d2 >= CONFIDENT_MARGIN && magnitude >= CONFIDENT_MAGNITUDE;
+  const margin = second.d2 - best.d2;
+  const magnitude = Math.sqrt(AXES.reduce((sum, axis) => sum + v[axis] ** 2, 0));
 
-  return { slug: best.slug, confident };
+  const base = { best: best.slug, runnerUp: second.slug, margin, magnitude };
+
+  if (magnitude < MAG_MIN) {
+    return { ...base, confident: false, branch: null, showOverride: true };
+  }
+  if (margin >= BORDER_MARGIN) {
+    return { ...base, confident: true, branch: null, showOverride: false };
+  }
+  const branch = branchFor(best.slug, second.slug);
+  return { ...base, confident: false, branch, showOverride: branch === null };
+}
+
+/**
+ * Terminal runoff. Tally the bank votes and return the winning tribe of the pair.
+ * A tie falls back to `coreBest` (the core pass's nearer of the two). The 7-way
+ * resolution is never re-run, so there is no border cascade.
+ */
+export function resolveTiebreak(
+  branch: TiebreakKey,
+  tiebreakAnswers: readonly number[],
+  coreBest: string,
+): string {
+  const bank = TIEBREAK_BANKS[branch];
+  const tally: Record<string, number> = {};
+  tiebreakAnswers.forEach((optionIndex, questionIndex) => {
+    const option = bank.questions[questionIndex]?.options[optionIndex];
+    if (!option) return;
+    tally[option.vote] = (tally[option.vote] ?? 0) + 1;
+  });
+
+  const [a, b] = bank.pair;
+  const va = tally[a] ?? 0;
+  const vb = tally[b] ?? 0;
+  if (va > vb) return a;
+  if (vb > va) return b;
+  return bank.pair.includes(coreBest) ? coreBest : a;
 }
