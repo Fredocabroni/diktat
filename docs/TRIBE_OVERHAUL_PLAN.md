@@ -313,8 +313,41 @@ anti-establishment distinction that is the whole point of separating those two t
 (The alternative — ESTAB as a secondary tiebreaker — was considered and rejected: see
 the Option A decision.)
 
+### 7.3 Rev 3 — graduated economics + re-derived coordinates
+
+Real-usage bug: a mainstream Democrat (raise taxes on the wealthy, public healthcare,
+fund the safety net) resolved to **Socialist**. Root cause — the ECON collective
+options were phrased as full-socialist, so a redistributionist Democrat maxed the axis
+to Socialist's exact coordinate (+1.0); and the corrupt-senator Q12 pulled "insiders"
+(−2) from everyone, dragging institutionalist Democrats anti-establishment. Three fixes:
+
+- **Graduated ECON (Fix A):** the three ECON questions now score the moderate-left
+  option `+1` and the revolutionary-left option `+2`. Only worker-ownership /
+  replace-capitalism language reaches +2; a reformist Democrat (public option, modest
+  taxes) nets ~+0.33–0.67, landing Liberal/Progressive, not Socialist.
+- **Q12 measures illegitimacy, not corruption (Fix B):** the options now distinguish
+  "enforce the law and vote them out" (institutionalist) from "the system is rigged by
+  design, no election changes it" (anti-establishment). A Democrat disgusted by one
+  corrupt senator stays ESTAB-positive.
+- **Reachability + re-derived coordinates (Fix C):** graduated deltas make the odd
+  sums (e.g. +0.5) reachable, and every tribe's coordinate is now re-derived as its
+  **honest issue-answer vector** — the principled definition for an issue quiz. Several
+  moved from the old hand-set values (Progressive → ESTAB +1.0 / STATE −0.33 / NATION
+  −1.0; Liberal → ECON +0.33, closing the coverage hole that made it unreachable).
+
+**Fourth bank (PL, prog/lib).** Fixing the left made Liberal↔Progressive the closest
+mainstream-left pair — the left's analog of Con/Pop — so it gets its own terminal
+runoff (incremental-vs-structural change + work-within-vs-overhaul institutions). Four
+banks now: PS `{prog,soc}`, PN `{pop,nat}`, CP `{con,pop}`, PL `{prog,lib}`. All four
+pairs are distinct, so nearest-two → at most one bank; the mechanic stays terminal and
+unambiguous (Prog is in PS+PL, Pop in PN+CP, disambiguated by the actual runner-up).
+
+Regression-locked in the resolver test: mainstream Democrat → Liberal, mainstream
+Republican → Conservative. §7.2 still holds (an anti-establishment issue-conservative
+still resolves to Populist/Nationalist).
+
 ---
 
-_Rev 2 (issue-based questions + three terminal tie-breaker banks) is the model being
-built. §3–4's abstract-axis framing is superseded by §7 for question content; the axes
-and coordinates in §1–2 stand._
+_Rev 3 (graduated economics, illegitimacy Q12, re-derived coordinates, four terminal
+banks) is the shipped model. §3–4's abstract-axis framing is superseded by §7 for
+content; §7's coordinates supersede the §1–2 sketch._
