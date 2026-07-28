@@ -19,7 +19,7 @@
 import { AnimatePresence, LazyMotion, domAnimation, m, useReducedMotion } from 'framer-motion';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
 import { trpc } from '../../../lib/trpc';
 import {
@@ -234,6 +234,8 @@ function TribeQuiz() {
               showAll={phase.showAll}
               tribes={(tribes.data ?? []) as TribeRow[]}
               tribesLoading={tribes.isLoading}
+              tribesError={tribes.isError}
+              onRetry={() => void tribes.refetch()}
               onPick={pick}
               onShowAll={() => setPhase({ ...phase, showAll: true })}
               onBack={goBack}
@@ -351,6 +353,8 @@ function ResultView({
   showAll,
   tribes,
   tribesLoading,
+  tribesError,
+  onRetry,
   onPick,
   onShowAll,
   onBack,
@@ -362,6 +366,8 @@ function ResultView({
   showAll: boolean;
   tribes: readonly TribeRow[];
   tribesLoading: boolean;
+  tribesError: boolean;
+  onRetry: () => void;
   onPick: (slug: string) => void;
   onShowAll: () => void;
   onBack: () => void;
@@ -371,17 +377,74 @@ function ResultView({
 }) {
   const suggested = tribes.find((t) => t.slug === slug) ?? null;
 
+  // Guard against a fetch that never settles (e.g. a black-holed request): if
+  // we're still loading after a grace period, fall through to the error state
+  // rather than spinning forever.
+  const [timedOut, setTimedOut] = useState(false);
+  useEffect(() => {
+    if (!tribesLoading) return;
+    setTimedOut(false);
+    const id = setTimeout(() => setTimedOut(true), 10_000);
+    return () => clearTimeout(id);
+  }, [tribesLoading]);
+
   const rise = (delay: number) => ({
     initial: { opacity: 0, y: reduceMotion ? 0 : 10 },
     animate: { opacity: 1, y: 0 },
     transition: { duration: 0.3, ease: EASE_SNAP, delay: reduceMotion ? 0 : delay },
   });
 
-  if (tribesLoading || !suggested) {
+  // Nothing to show yet: skeleton while genuinely loading, otherwise a real
+  // error state (fetch failed, timed out, or the tribe isn't in the list) with
+  // Retry + Skip — never an eternal skeleton.
+  if (!suggested) {
+    if (tribesLoading && !timedOut) {
+      return (
+        <div className="space-y-4">
+          <div className="h-6 w-40 animate-pulse rounded bg-ink-300" />
+          <div className="h-32 animate-pulse rounded-2xl bg-surface-card/60" />
+        </div>
+      );
+    }
     return (
-      <div className="space-y-4">
-        <div className="h-6 w-40 animate-pulse rounded bg-ink-300" />
-        <div className="h-32 animate-pulse rounded-2xl bg-surface-card/60" />
+      <div className="flex flex-1 flex-col">
+        <p className="text-xs font-semibold uppercase tracking-[0.2em] text-text-tertiary">
+          Something went wrong
+        </p>
+        <h1 className="mt-2 font-display text-2xl font-bold tracking-tight text-text-primary">
+          Couldn&apos;t load tribes
+        </h1>
+        <p className="mt-3 text-sm leading-relaxed text-text-secondary">
+          {tribesError || timedOut
+            ? 'We could not reach the server to load your tribe. Check your connection and try again.'
+            : 'Your tribe could not be matched. Try again, or skip for now.'}
+        </p>
+        <div className="mt-auto pt-8">
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={onBack}
+              className="rounded-full border border-ink-300 px-5 py-3 text-sm font-semibold text-text-secondary transition hover:border-brand hover:text-text-primary"
+            >
+              Back
+            </button>
+            <button
+              type="button"
+              onClick={onRetry}
+              className="flex-1 rounded-full bg-brand px-4 py-3 text-center font-display font-bold text-brand-fg shadow-glow-violet transition hover:bg-brand/90 active:scale-[0.99]"
+            >
+              Retry
+            </button>
+          </div>
+          <div className="mt-4 flex justify-center">
+            <Link
+              href="/onboard/preview"
+              className="rounded-full px-4 py-2 text-sm font-semibold text-text-secondary transition hover:text-text-primary"
+            >
+              Skip
+            </Link>
+          </div>
+        </div>
       </div>
     );
   }
