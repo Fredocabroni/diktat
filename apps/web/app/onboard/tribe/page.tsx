@@ -6,12 +6,17 @@
 // the seven, or skip — nothing is locked: ADDICTION_ARCHITECTURE §11 (no forced
 // choice to proceed, no FOMO).
 //
-// Pure frontend: the quiz content + scoring live in ./quiz; joining reuses the
-// existing trpc.tribes.list / trpc.tribes.join. No API/migration changes.
+// Flow (v2): select an option (it locks in visibly), then Next. Back re-opens the
+// previous question with its choice restored and recomputes from there — answers
+// live in a plain array and resolveCore/resolveTiebreak are pure, so editing just
+// re-runs. Motion is a fighting-game character-select: sharp directional slides
+// with momentum, a lock-in snap on select, and an impact reveal on "You lean X".
+// All gated by useReducedMotion. Pure frontend: content + scoring live in ./quiz;
+// joining reuses trpc.tribes.list / trpc.tribes.join.
 
 'use client';
 
-import { LazyMotion, domAnimation, m, useReducedMotion } from 'framer-motion';
+import { AnimatePresence, LazyMotion, domAnimation, m, useReducedMotion } from 'framer-motion';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useMemo, useState } from 'react';
@@ -25,9 +30,14 @@ import {
   resolveTiebreak,
 } from './quiz';
 
-// motion token: easing.standard — mutable 4-tuple so it satisfies Framer's
-// BezierDefinition (a `readonly` tuple is rejected by the `ease` prop type).
-const EASE_STANDARD: [number, number, number, number] = [0.2, 0, 0, 1];
+// Sharp ease-out with momentum (fast start, quick settle) — the character-select
+// whip. Exit is the same curve reversed by the directional offset.
+const EASE_SNAP: [number, number, number, number] = [0.16, 1, 0.3, 1];
+const SLIDE_PX = 64;
+
+type Origin =
+  | { readonly kind: 'core' }
+  | { readonly kind: 'tiebreak'; readonly branch: TiebreakKey; readonly coreBest: string };
 
 type Phase =
   | { readonly kind: 'core'; readonly step: number }
@@ -37,7 +47,12 @@ type Phase =
       readonly step: number;
       readonly coreBest: string;
     }
-  | { readonly kind: 'result'; readonly slug: string; readonly showAll: boolean };
+  | {
+      readonly kind: 'result';
+      readonly slug: string;
+      readonly showAll: boolean;
+      readonly origin: Origin;
+    };
 
 interface TribeRow {
   readonly id: string;
@@ -46,6 +61,8 @@ interface TribeRow {
   readonly description: string | null;
   readonly manifesto: string | null;
 }
+
+const LAST_CORE = CORE_QUESTIONS.length - 1;
 
 export default function OnboardTribePage() {
   return (
@@ -57,12 +74,14 @@ export default function OnboardTribePage() {
 
 function TribeQuiz() {
   const router = useRouter();
-  const reduceMotion = useReducedMotion();
+  const reduceMotion = useReducedMotion() ?? false;
   const tribes = trpc.tribes.list.useQuery();
 
-  const [coreAnswers, setCoreAnswers] = useState<number[]>([]);
-  const [tiebreakAnswers, setTiebreakAnswers] = useState<number[]>([]);
+  const [coreAnswers, setCoreAnswers] = useState<(number | undefined)[]>([]);
+  const [tiebreakAnswers, setTiebreakAnswers] = useState<(number | undefined)[]>([]);
   const [phase, setPhase] = useState<Phase>({ kind: 'core', step: 0 });
+  // +1 = advancing, -1 = going back. Drives the slide direction.
+  const [dir, setDir] = useState(1);
 
   const bySlug = useMemo(() => {
     const map = new Map<string, TribeRow>();
@@ -74,42 +93,85 @@ function TribeQuiz() {
     onSuccess: () => router.push('/onboard/preview'),
   });
 
-  function place(coreBest: string, tbAnswers: number[], branch: TiebreakKey) {
-    const slug = resolveTiebreak(branch, tbAnswers, coreBest);
-    setPhase({ kind: 'result', slug, showAll: false });
-  }
-
-  function chooseCore(optionIndex: number) {
+  function selectCore(i: number) {
     if (phase.kind !== 'core') return;
     const next = [...coreAnswers];
-    next[phase.step] = optionIndex;
+    next[phase.step] = i;
     setCoreAnswers(next);
+  }
 
-    if (phase.step + 1 < CORE_QUESTIONS.length) {
+  function selectTiebreak(i: number) {
+    if (phase.kind !== 'tiebreak') return;
+    const next = [...tiebreakAnswers];
+    next[phase.step] = i;
+    setTiebreakAnswers(next);
+  }
+
+  function nextFromCore() {
+    if (phase.kind !== 'core' || coreAnswers[phase.step] === undefined) return;
+    setDir(1);
+    if (phase.step < LAST_CORE) {
       setPhase({ kind: 'core', step: phase.step + 1 });
       return;
     }
-    const result = resolveCore(next);
+    const result = resolveCore(coreAnswers.map((a) => a ?? -1));
     if (result.branch) {
       setTiebreakAnswers([]);
       setPhase({ kind: 'tiebreak', branch: result.branch, step: 0, coreBest: result.best });
     } else {
-      // Confident placement, or low-confidence/off-pair → open the override.
-      setPhase({ kind: 'result', slug: result.best, showAll: result.showOverride });
+      // Confident placement, or low-confidence / off-pair → open the override.
+      setPhase({
+        kind: 'result',
+        slug: result.best,
+        showAll: result.showOverride,
+        origin: { kind: 'core' },
+      });
     }
   }
 
-  function chooseTiebreak(optionIndex: number) {
-    if (phase.kind !== 'tiebreak') return;
-    const next = [...tiebreakAnswers];
-    next[phase.step] = optionIndex;
-    setTiebreakAnswers(next);
-
+  function nextFromTiebreak() {
+    if (phase.kind !== 'tiebreak' || tiebreakAnswers[phase.step] === undefined) return;
+    setDir(1);
     const bank = TIEBREAK_BANKS[phase.branch];
-    if (phase.step + 1 < bank.questions.length) {
+    if (phase.step < bank.questions.length - 1) {
       setPhase({ ...phase, step: phase.step + 1 });
+      return;
+    }
+    const slug = resolveTiebreak(
+      phase.branch,
+      tiebreakAnswers.map((a) => a ?? -1),
+      phase.coreBest,
+    );
+    setPhase({
+      kind: 'result',
+      slug,
+      showAll: false,
+      origin: { kind: 'tiebreak', branch: phase.branch, coreBest: phase.coreBest },
+    });
+  }
+
+  function goBack() {
+    setDir(-1);
+    if (phase.kind === 'core') {
+      if (phase.step > 0) setPhase({ kind: 'core', step: phase.step - 1 });
+      return;
+    }
+    if (phase.kind === 'tiebreak') {
+      if (phase.step > 0) setPhase({ ...phase, step: phase.step - 1 });
+      else setPhase({ kind: 'core', step: LAST_CORE }); // re-open the last core question
+      return;
+    }
+    // From the result, step back into whichever question produced it.
+    if (phase.origin.kind === 'core') {
+      setPhase({ kind: 'core', step: LAST_CORE });
     } else {
-      place(phase.coreBest, next, phase.branch);
+      const bank = TIEBREAK_BANKS[phase.origin.branch];
+      setPhase({
+        kind: 'tiebreak',
+        branch: phase.origin.branch,
+        step: bank.questions.length - 1,
+        coreBest: phase.origin.coreBest,
+      });
     }
   }
 
@@ -120,52 +182,71 @@ function TribeQuiz() {
     join.mutate({ tribeId: tribe.id });
   }
 
-  const rise = (delay = 0) => ({
-    initial: { opacity: 0, y: reduceMotion ? 0 : 12 },
-    animate: { opacity: 1, y: 0 },
-    transition: { duration: 0.3, ease: EASE_STANDARD, delay: reduceMotion ? 0 : delay },
-  });
+  const stepKey =
+    phase.kind === 'core'
+      ? `core-${phase.step}`
+      : phase.kind === 'tiebreak'
+        ? `tb-${phase.branch}-${phase.step}`
+        : 'result';
 
   return (
-    <main className="mx-auto flex min-h-dvh max-w-md flex-col px-6 py-10">
-      {phase.kind === 'core' && (
-        <QuestionStep
-          eyebrow={`Question ${phase.step + 1} of ${CORE_QUESTIONS.length}`}
-          question={CORE_QUESTIONS[phase.step]!}
-          onChoose={chooseCore}
-          rise={rise}
-        />
-      )}
-      {phase.kind === 'tiebreak' && (
-        <QuestionStep
-          eyebrow="Just to be sure"
-          question={TIEBREAK_BANKS[phase.branch].questions[phase.step]!}
-          onChoose={chooseTiebreak}
-          rise={rise}
-        />
-      )}
-      {phase.kind === 'result' && (
-        <ResultView
-          slug={phase.slug}
-          showAll={phase.showAll}
-          tribes={(tribes.data ?? []) as TribeRow[]}
-          tribesLoading={tribes.isLoading}
-          onPick={pick}
-          onShowAll={() => setPhase({ ...phase, showAll: true })}
-          joinPending={join.isPending}
-          joinError={join.isError}
-          rise={rise}
-        />
-      )}
+    <main className="mx-auto flex min-h-dvh max-w-md flex-col overflow-hidden px-6 py-10">
+      <AnimatePresence mode="wait" custom={dir} initial={false}>
+        <m.div
+          key={stepKey}
+          custom={dir}
+          variants={{
+            enter: (d: number) => ({ x: reduceMotion ? 0 : d * SLIDE_PX, opacity: 0 }),
+            center: { x: 0, opacity: 1 },
+            exit: (d: number) => ({ x: reduceMotion ? 0 : d * -SLIDE_PX, opacity: 0 }),
+          }}
+          initial="enter"
+          animate="center"
+          exit="exit"
+          transition={{ duration: reduceMotion ? 0.12 : 0.18, ease: EASE_SNAP }}
+          className="flex flex-1 flex-col"
+        >
+          {phase.kind === 'core' && (
+            <QuestionStep
+              eyebrow={`Question ${phase.step + 1} of ${CORE_QUESTIONS.length}`}
+              question={CORE_QUESTIONS[phase.step]!}
+              selected={coreAnswers[phase.step]}
+              onSelect={selectCore}
+              onNext={nextFromCore}
+              onBack={phase.step > 0 ? goBack : null}
+              reduceMotion={reduceMotion}
+            />
+          )}
+          {phase.kind === 'tiebreak' && (
+            <QuestionStep
+              eyebrow="Just to be sure"
+              question={TIEBREAK_BANKS[phase.branch].questions[phase.step]!}
+              selected={tiebreakAnswers[phase.step]}
+              onSelect={selectTiebreak}
+              onNext={nextFromTiebreak}
+              onBack={goBack}
+              reduceMotion={reduceMotion}
+            />
+          )}
+          {phase.kind === 'result' && (
+            <ResultView
+              slug={phase.slug}
+              showAll={phase.showAll}
+              tribes={(tribes.data ?? []) as TribeRow[]}
+              tribesLoading={tribes.isLoading}
+              onPick={pick}
+              onShowAll={() => setPhase({ ...phase, showAll: true })}
+              onBack={goBack}
+              joinPending={join.isPending}
+              joinError={join.isError}
+              reduceMotion={reduceMotion}
+            />
+          )}
+        </m.div>
+      </AnimatePresence>
     </main>
   );
 }
-
-type RiseFn = (delay?: number) => {
-  initial: { opacity: number; y: number };
-  animate: { opacity: number; y: number };
-  transition: { duration: number; ease: [number, number, number, number]; delay: number };
-};
 
 interface StepQuestion {
   readonly id: string;
@@ -176,45 +257,90 @@ interface StepQuestion {
 function QuestionStep({
   eyebrow,
   question,
-  onChoose,
-  rise,
+  selected,
+  onSelect,
+  onNext,
+  onBack,
+  reduceMotion,
 }: {
   eyebrow: string;
   question: StepQuestion;
-  onChoose: (i: number) => void;
-  rise: RiseFn;
+  selected: number | undefined;
+  onSelect: (i: number) => void;
+  onNext: () => void;
+  onBack: (() => void) | null;
+  reduceMotion: boolean;
 }) {
+  const canNext = selected !== undefined;
+
   return (
-    <div key={question.id}>
-      <p className="text-xs font-semibold uppercase tracking-wide text-text-tertiary">{eyebrow}</p>
-      <m.h1
-        {...rise()}
-        className="mt-2 font-display text-2xl font-bold tracking-tight text-text-primary"
-      >
+    <div className="flex flex-1 flex-col">
+      <p className="text-xs font-semibold uppercase tracking-[0.2em] text-text-tertiary">
+        {eyebrow}
+      </p>
+      <h1 className="mt-2 font-display text-2xl font-bold tracking-tight text-text-primary">
         {question.prompt}
-      </m.h1>
+      </h1>
 
       <ul className="mt-6 space-y-3">
-        {question.options.map((opt, i) => (
-          <m.li key={i} {...rise(0.05 + i * 0.05)}>
-            <button
-              type="button"
-              onClick={() => onChoose(i)}
-              className="w-full rounded-2xl border border-ink-300 bg-surface-card p-4 text-left text-sm text-text-primary transition hover:border-brand hover:bg-surface-raised"
-            >
-              {opt.label}
-            </button>
-          </m.li>
-        ))}
+        {question.options.map((opt, i) => {
+          const isSelected = selected === i;
+          return (
+            <li key={i}>
+              <m.button
+                type="button"
+                onClick={() => onSelect(i)}
+                aria-pressed={isSelected}
+                animate={reduceMotion ? { scale: 1 } : { scale: isSelected ? [1, 1.04, 1] : 1 }}
+                whileTap={reduceMotion ? undefined : { scale: 0.97 }}
+                transition={{ duration: 0.22, ease: [0.3, 0, 0, 1] }}
+                className={`flex w-full items-center gap-3 rounded-2xl border p-4 text-left text-sm transition-colors ${
+                  isSelected
+                    ? 'border-brand bg-surface-raised text-text-primary shadow-glow-violet ring-2 ring-brand/50'
+                    : 'border-ink-300 bg-surface-card text-text-primary hover:border-brand hover:bg-surface-raised'
+                }`}
+              >
+                <span
+                  aria-hidden
+                  className={`mt-0.5 h-2 w-2 flex-none rounded-full transition-colors ${
+                    isSelected ? 'bg-brand' : 'bg-ink-300'
+                  }`}
+                />
+                <span>{opt.label}</span>
+              </m.button>
+            </li>
+          );
+        })}
       </ul>
 
-      <div className="mt-8 flex justify-center pb-4">
-        <Link
-          href="/onboard/preview"
-          className="rounded-full px-4 py-2 text-sm font-semibold text-text-secondary transition hover:text-text-primary"
-        >
-          Skip
-        </Link>
+      <div className="mt-auto pt-8">
+        <div className="flex items-center gap-3">
+          {onBack && (
+            <button
+              type="button"
+              onClick={onBack}
+              className="rounded-full border border-ink-300 px-5 py-3 text-sm font-semibold text-text-secondary transition hover:border-brand hover:text-text-primary"
+            >
+              Back
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={onNext}
+            disabled={!canNext}
+            className="flex-1 rounded-full bg-brand px-4 py-3 text-center font-display font-bold text-brand-fg shadow-glow-violet transition hover:bg-brand/90 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none"
+          >
+            Next
+          </button>
+        </div>
+        <div className="mt-4 flex justify-center">
+          <Link
+            href="/onboard/preview"
+            className="rounded-full px-4 py-2 text-sm font-semibold text-text-secondary transition hover:text-text-primary"
+          >
+            Skip
+          </Link>
+        </div>
       </div>
     </div>
   );
@@ -227,9 +353,10 @@ function ResultView({
   tribesLoading,
   onPick,
   onShowAll,
+  onBack,
   joinPending,
   joinError,
-  rise,
+  reduceMotion,
 }: {
   slug: string;
   showAll: boolean;
@@ -237,11 +364,18 @@ function ResultView({
   tribesLoading: boolean;
   onPick: (slug: string) => void;
   onShowAll: () => void;
+  onBack: () => void;
   joinPending: boolean;
   joinError: boolean;
-  rise: RiseFn;
+  reduceMotion: boolean;
 }) {
   const suggested = tribes.find((t) => t.slug === slug) ?? null;
+
+  const rise = (delay: number) => ({
+    initial: { opacity: 0, y: reduceMotion ? 0 : 10 },
+    animate: { opacity: 1, y: 0 },
+    transition: { duration: 0.3, ease: EASE_SNAP, delay: reduceMotion ? 0 : delay },
+  });
 
   if (tribesLoading || !suggested) {
     return (
@@ -253,36 +387,58 @@ function ResultView({
   }
 
   return (
-    <div>
+    <div className="flex flex-1 flex-col">
       {!showAll && (
-        <m.div {...rise()}>
-          <p className="text-xs font-semibold uppercase tracking-wide text-text-tertiary">
+        <div>
+          <m.p
+            {...rise(0)}
+            className="text-xs font-semibold uppercase tracking-[0.25em] text-text-tertiary"
+          >
             You lean
-          </p>
-          <h1 className="mt-1 font-display text-3xl font-bold tracking-tight text-text-primary">
-            {suggested.name}
-          </h1>
+          </m.p>
+          <div className="relative mt-1">
+            {!reduceMotion && (
+              <m.div
+                aria-hidden
+                initial={{ opacity: 0, scale: 0.6 }}
+                animate={{ opacity: [0, 0.7, 0], scale: 1.5 }}
+                transition={{ duration: 0.6, ease: 'easeOut' }}
+                className="pointer-events-none absolute -inset-6 -z-10 rounded-full bg-brand/25 blur-2xl"
+              />
+            )}
+            {/* The lock-in: the tribe name slams in from slightly oversized. */}
+            <m.h1
+              initial={{ scale: reduceMotion ? 1 : 1.3, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              transition={{ duration: reduceMotion ? 0.15 : 0.32, ease: EASE_SNAP }}
+              className="font-display text-4xl font-black tracking-tight text-text-primary"
+            >
+              {suggested.name}
+            </m.h1>
+          </div>
           {suggested.manifesto && (
-            <p className="mt-4 text-sm leading-relaxed text-text-secondary">
+            <m.p {...rise(0.14)} className="mt-4 text-sm leading-relaxed text-text-secondary">
               {suggested.manifesto}
-            </p>
+            </m.p>
           )}
-          <button
-            type="button"
-            onClick={() => onPick(suggested.slug)}
-            disabled={joinPending}
-            className="mt-6 w-full rounded-full bg-brand px-4 py-3 text-center font-display font-bold text-brand-fg shadow-glow-violet transition hover:bg-brand/90 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-60 disabled:shadow-none"
-          >
-            {joinPending ? 'Joining…' : `Join ${suggested.name}`}
-          </button>
-          <button
-            type="button"
-            onClick={onShowAll}
-            className="mt-3 w-full rounded-full px-4 py-2 text-sm font-semibold text-text-secondary transition hover:text-text-primary"
-          >
-            Not you? Pick another
-          </button>
-        </m.div>
+          <m.div {...rise(0.22)} className="mt-6">
+            <button
+              type="button"
+              onClick={() => onPick(suggested.slug)}
+              disabled={joinPending}
+              className="w-full rounded-full bg-brand px-4 py-3 text-center font-display font-bold text-brand-fg shadow-glow-violet transition hover:bg-brand/90 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-60 disabled:shadow-none"
+            >
+              {joinPending ? 'Joining…' : `Lock in ${suggested.name}`}
+            </button>
+            <button
+              type="button"
+              onClick={onShowAll}
+              className="mt-3 w-full rounded-full px-4 py-2 text-sm font-semibold text-text-secondary transition hover:text-text-primary"
+            >
+              Not you? Pick another
+            </button>
+          </m.div>
+        </div>
       )}
 
       {showAll && (
@@ -295,7 +451,7 @@ function ResultView({
           </p>
           <ul className="mt-6 space-y-3">
             {tribes.map((t, i) => (
-              <m.li key={t.id} {...rise(0.04 * i)}>
+              <m.li key={t.id} {...rise(0.03 * i)}>
                 <button
                   type="button"
                   onClick={() => onPick(t.slug)}
@@ -323,13 +479,22 @@ function ResultView({
         </p>
       )}
 
-      <div className="mt-8 flex justify-center pb-4">
-        <Link
-          href="/onboard/preview"
-          className="rounded-full px-4 py-2 text-sm font-semibold text-text-secondary transition hover:text-text-primary"
-        >
-          Skip
-        </Link>
+      <div className="mt-auto pt-8">
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={onBack}
+            className="rounded-full border border-ink-300 px-5 py-3 text-sm font-semibold text-text-secondary transition hover:border-brand hover:text-text-primary"
+          >
+            Back
+          </button>
+          <Link
+            href="/onboard/preview"
+            className="flex-1 rounded-full px-4 py-3 text-center text-sm font-semibold text-text-secondary transition hover:text-text-primary"
+          >
+            Skip
+          </Link>
+        </div>
       </div>
     </div>
   );

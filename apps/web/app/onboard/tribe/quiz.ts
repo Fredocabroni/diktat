@@ -42,35 +42,36 @@ export const CORE_QUESTIONS: readonly QuizQuestion[] = [
   // ---- ECON: market (-) vs collective (+) ----
   {
     id: 'econ-factory-sale',
-    prompt:
-      "A town's biggest factory goes up for sale, and its workers pool together to buy it themselves.",
+    prompt: 'The factory that runs your town is up for sale. Who should own it?',
     options: [
-      { label: 'Back them. The people who run the machines should own them.', scores: { ECON: 2 } },
       {
-        label: 'Let the best operator win it on a fair, open sale, workers included.',
+        label: 'The workers who run it. The people who build the value should hold it.',
+        scores: { ECON: 2 },
+      },
+      {
+        label: 'Whoever wins it on a fair, open sale, with workers free to bid.',
         scores: { ECON: 0 },
       },
       {
-        label: 'Highest bidder takes it. The market picks who will put it to best use.',
+        label: 'The highest bidder. The market puts it in the best hands.',
         scores: { ECON: -2 },
       },
     ],
   },
   {
     id: 'econ-wealth-gap',
-    prompt:
-      'The richest hundred families now hold more than the bottom half of the country combined.',
+    prompt: 'A handful of people now own more than half the country combined.',
     options: [
       {
-        label: 'Rigged. Wealth stacked that high is a game with the rules bought, not a reward.',
+        label: 'Rigged. Wealth stacked that high is bought rules, not earned reward.',
         scores: { ECON: 2 },
       },
       {
-        label: 'Some gap is the price of effort; the job is keeping it from hardening into a wall.',
+        label: 'Some gap rewards effort; the job is stopping it from hardening into a wall.',
         scores: { ECON: 0 },
       },
       {
-        label: "Wealth isn't a fixed pie. One person earning more doesn't leave you poorer.",
+        label: "So what? Wealth isn't a fixed pie. Someone gaining doesn't mean you lost.",
         scores: { ECON: -2 },
       },
     ],
@@ -150,19 +151,18 @@ export const CORE_QUESTIONS: readonly QuizQuestion[] = [
   // ---- ESTAB: anti-establishment (-) vs institutionalist (+) ----
   {
     id: 'estab-experts',
-    prompt:
-      'The credentialed experts and the people they govern have reached opposite conclusions.',
+    prompt: 'The official expert panel rules one way. The packed town hall wants the opposite.',
     options: [
       {
-        label: 'Trust the people. Experts guard their own authority first and the truth second.',
+        label: 'Go with the room. Experts protect their own standing before they protect you.',
         scores: { ESTAB: -2 },
       },
       {
-        label: 'Weigh the expertise, but they answer to the public, not the other way around.',
+        label: 'Hear both out. Judge the case on its merits, not on who is speaking.',
         scores: { ESTAB: 0 },
       },
       {
-        label: 'Defer to those who studied it. Expertise is earned, not a conspiracy.',
+        label: "Trust the panel. They actually studied it; a crowd's certainty isn't knowledge.",
         scores: { ESTAB: 2 },
       },
     ],
@@ -226,16 +226,18 @@ export const CORE_QUESTIONS: readonly QuizQuestion[] = [
   },
   {
     id: 'state-mandate',
-    prompt: 'The state wants to require something of every citizen for the common good.',
+    prompt: 'The government proposes a year of national service required of every young citizen.',
     options: [
-      { label: "Persuade me, don't command me. My life is mine to run.", scores: { STATE: -2 } },
       {
-        label: "Require it only where one person's choice truly lands on everyone else.",
+        label: "No. A year of your life is yours to give, not the state's to take.",
+        scores: { STATE: -2 },
+      },
+      {
+        label: 'Only if the case is real and the burden falls fairly on everyone.',
         scores: { STATE: 0 },
       },
       {
-        label:
-          'A fair rule that serves everyone is legitimate. That is what we build governments for.',
+        label: 'Fair enough. Some duties we owe in common, and the state can ask them.',
         scores: { STATE: 1 },
       },
     ],
