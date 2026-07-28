@@ -27,12 +27,15 @@ interface Canonical {
   readonly bank?: number[]; // the tribe's runoff answers, if it branches
 }
 
+// Q9 immigration and Q11 experts are now 3-option (indices 8 and 10). Liberal
+// picks the immigration middle (control + compassion) and Conservative picks the
+// experts middle (trust-but-verify); every other tribe answers at its poles.
 const CANONICAL: Record<string, Canonical> = {
-  progressive: { core: [0, 0, 0, 0, 0, 2, 2, 2, 1, 2, 1, 0], branch: 'prog-soc', bank: [0, 0] },
-  socialist: { core: [0, 0, 0, 0, 0, 2, 2, 2, 1, 2, 0, 0] },
-  liberal: { core: [0, 1, 1, 0, 0, 1, 1, 1, 1, 2, 1, 1] },
+  progressive: { core: [0, 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 0], branch: 'prog-soc', bank: [0, 0] },
+  socialist: { core: [0, 0, 0, 0, 0, 2, 2, 2, 2, 2, 0, 0] },
+  liberal: { core: [0, 1, 1, 0, 0, 1, 1, 1, 1, 2, 2, 1] },
   conservative: { core: [1, 2, 1, 2, 2, 0, 0, 0, 0, 1, 1, 1] },
-  libertarian: { core: [1, 2, 2, 0, 1, 2, 0, 2, 1, 0, 0, 0] },
+  libertarian: { core: [1, 2, 2, 0, 1, 2, 0, 2, 2, 0, 0, 0] },
   populist: { core: [0, 1, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0], branch: 'pop-nat', bank: [0, 0] },
   nationalist: { core: [0, 1, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0] },
 };
@@ -88,11 +91,12 @@ describe('structural invariants', () => {
       expect(q.options.length === 2 || q.options.length === 3).toBe(true);
   });
 
-  it('7 tribe targets, matching the canonical keys and the four binary questions', () => {
+  it('7 tribe targets, matching the canonical keys, with taxes + elites binary', () => {
     expect(TRIBE_TARGETS).toHaveLength(7);
     expect(new Set(TRIBE_TARGETS.map((t) => t.slug))).toEqual(new Set(Object.keys(CANONICAL)));
-    // taxes, immigration, experts, elites are binary.
-    for (const i of [0, 8, 10, 11]) expect(CORE_QUESTIONS[i]!.options).toHaveLength(2);
+    // Only taxes (0) and elites (11) are binary; immigration (8) and experts (10) are 3-option.
+    for (const i of [0, 11]) expect(CORE_QUESTIONS[i]!.options).toHaveLength(2);
+    for (const i of [8, 10]) expect(CORE_QUESTIONS[i]!.options).toHaveLength(3);
   });
 
   it('every canonical core answer is one in-range index per question', () => {

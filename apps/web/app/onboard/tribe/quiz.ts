@@ -41,9 +41,9 @@ export interface QuizQuestion {
 }
 
 // 12 core issue questions. Coverage: ECON ×3, SOCIAL ×3, STATE ×2, NATION ×2,
-// ESTAB ×2. Binary questions (taxes, immigration, both ESTAB) have 2 options;
-// the rest have 3 with a genuine on-axis midpoint. Option order is load-bearing —
-// the canonical answer keys in the resolver test address options by index.
+// ESTAB ×2. Two binary forced-lean questions (taxes, elites) where a middle would
+// be a dodge; the rest have 3 options with a genuine on-axis midpoint. Option
+// order is load-bearing — the canonical keys in the resolver test index options.
 export const CORE_QUESTIONS: readonly QuizQuestion[] = [
   // ---- ECON: market (-) vs collective (+) ----
   {
@@ -211,6 +211,11 @@ export const CORE_QUESTIONS: readonly QuizQuestion[] = [
       },
       {
         label:
+          'Control and compassion. Strong borders, plus a fair path for those who build a life here.',
+        scores: { NATION: 0 },
+      },
+      {
+        label:
           'Open the door. Immigrants renew this country, and a fair, humane system beats a wall.',
         scores: { NATION: -2 },
       },
@@ -237,7 +242,10 @@ export const CORE_QUESTIONS: readonly QuizQuestion[] = [
       },
     ],
   },
-  // ---- ESTAB: anti-establishment (-) vs institutionalist (+). Both binary, primary dimension (§7.2). ----
+  // ---- ESTAB: anti-establishment (-) vs institutionalist (+). Primary dimension (§7.2).
+  // experts has a committed trust-but-verify middle (+1, a landing spot for real
+  // moderates, NOT a rescue for anti-establishment conservatives — those pick full
+  // anti on both and still resolve Populist). elites is a concrete binary. ----
   {
     id: 'estab-experts',
     prompt:
@@ -250,6 +258,11 @@ export const CORE_QUESTIONS: readonly QuizQuestion[] = [
       },
       {
         label:
+          'Trust, but verify. Start from the expertise, because it has earned that, but never on blind faith.',
+        scores: { ESTAB: 1 },
+      },
+      {
+        label:
           "Trust the process. Expertise gets tested, challenged, and corrected in the open. That's what earns deference.",
         scores: { ESTAB: 2 },
       },
@@ -257,16 +270,16 @@ export const CORE_QUESTIONS: readonly QuizQuestion[] = [
   },
   {
     id: 'estab-elites',
-    prompt: 'Is the system basically rigged?',
+    prompt: 'A senator gets rich trading stocks in the very industries their committee oversees.',
     options: [
       {
         label:
-          'Yes. A donor-and-insider class runs the system for itself and leaves everyone else the bill.',
+          'Of course they do. The rules are written by insiders, for insiders, and everyone else picks up the tab.',
         scores: { ESTAB: -2 },
       },
       {
         label:
-          'No. It has real flaws, but the institutions are legitimate and worth defending and repairing.',
+          'Then enforce the law and vote them out. The system has the tools to fix that, and using them is the answer.',
         scores: { ESTAB: 2 },
       },
     ],
