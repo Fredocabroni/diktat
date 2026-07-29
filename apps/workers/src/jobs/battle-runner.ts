@@ -89,6 +89,7 @@ export function runBattle(battleId: string, deps: BattleRunnerDeps): RunningBatt
 
   let stopped = false;
   let pendingTimeout: ReturnType<typeof setTimeout> | null = null;
+  let resolveSleep: (() => void) | null = null;
 
   const done = (async () => {
     try {
@@ -103,53 +104,64 @@ export function runBattle(battleId: string, deps: BattleRunnerDeps): RunningBatt
         return;
       }
 
-      const questions = await fetchQuestions(deps.supabase, ROUND_COUNT);
-      if (questions.length < ROUND_COUNT) {
-        logger.error({
-          event: 'battle.runner.skip',
-          reason: 'insufficient_verified_trivia',
-          battleId,
-          got: questions.length,
-          need: ROUND_COUNT,
-        });
-        return;
-      }
-
-      logger.info({
-        event: 'battle.runner.start',
-        battleId,
-        botSeats: participants.filter((p) => p.is_bot).map((p) => p.seat),
-      });
-
-      for (let roundNo = 0; roundNo < ROUND_COUNT; roundNo += 1) {
-        if (stopped) return;
-        const question = questions[roundNo]!;
-        const roundId = await emitRound({
-          supabase: deps.supabase,
-          battleId,
-          roundNo,
-          question,
-        });
-
-        // Generate any bot answers for this round.
-        for (const p of participants.filter((x) => x.is_bot)) {
-          await emitBotAnswer({
-            supabase: deps.supabase,
+      // Resume: if a prior run already emitted every round (e.g. it crashed
+      // during settlement), do NOT re-emit — that would duplicate battle_rounds.
+      // Go straight to the (idempotent) settle. A PARTIAL round set still re-runs
+      // the loop for now; making round emission itself idempotent is PR 2.
+      const emittedRounds = await countBattleRounds(deps.supabase, battleId);
+      if (emittedRounds >= ROUND_COUNT) {
+        logger.info({ event: 'battle.runner.resume_settle', battleId, emittedRounds });
+      } else {
+        const questions = await fetchQuestions(deps.supabase, ROUND_COUNT);
+        if (questions.length < ROUND_COUNT) {
+          logger.error({
+            event: 'battle.runner.skip',
+            reason: 'insufficient_verified_trivia',
             battleId,
-            roundId,
-            userId: p.user_id,
-            questionId: question.id,
-            correctIndex: question.correct_index,
-            tier: p.tier_id as Tier,
-            random,
+            got: questions.length,
+            need: ROUND_COUNT,
           });
+          return;
         }
 
-        if (roundNo < ROUND_COUNT - 1) {
-          await sleep(ROUND_DURATION_MS, setTimeoutFn, clearTimeoutFn, (t) => {
-            pendingTimeout = t;
+        logger.info({
+          event: 'battle.runner.start',
+          battleId,
+          botSeats: participants.filter((p) => p.is_bot).map((p) => p.seat),
+        });
+
+        for (let roundNo = 0; roundNo < ROUND_COUNT; roundNo += 1) {
+          if (stopped) return;
+          const question = questions[roundNo]!;
+          const roundId = await emitRound({
+            supabase: deps.supabase,
+            battleId,
+            roundNo,
+            question,
           });
-          pendingTimeout = null;
+
+          // Generate any bot answers for this round.
+          for (const p of participants.filter((x) => x.is_bot)) {
+            await emitBotAnswer({
+              supabase: deps.supabase,
+              battleId,
+              roundId,
+              userId: p.user_id,
+              questionId: question.id,
+              correctIndex: question.correct_index,
+              tier: p.tier_id as Tier,
+              random,
+            });
+          }
+
+          if (roundNo < ROUND_COUNT - 1) {
+            await sleep(ROUND_DURATION_MS, setTimeoutFn, clearTimeoutFn, (t, resolve) => {
+              pendingTimeout = t;
+              resolveSleep = resolve;
+            });
+            pendingTimeout = null;
+            resolveSleep = null;
+          }
         }
       }
 
@@ -171,6 +183,7 @@ export function runBattle(battleId: string, deps: BattleRunnerDeps): RunningBatt
       });
     } finally {
       pendingTimeout = null;
+      resolveSleep = null;
     }
   })();
 
@@ -179,20 +192,38 @@ export function runBattle(battleId: string, deps: BattleRunnerDeps): RunningBatt
     stop: () => {
       stopped = true;
       if (pendingTimeout !== null) clearTimeoutFn(pendingTimeout);
+      // Unblock a pending inter-round sleep so the loop reaches its
+      // `if (stopped) return` immediately — lets shutdown drain quickly
+      // instead of hanging on a cleared-but-unresolved timer.
+      if (resolveSleep !== null) resolveSleep();
     },
     done,
   };
+}
+
+async function countBattleRounds(supabase: ServiceClient, battleId: string): Promise<number> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data, error } = (await (supabase as any)
+    .from('battle_rounds')
+    .select('round_no')
+    .eq('battle_id', battleId)) as {
+    data: { round_no: number }[] | null;
+    error: { message: string } | null;
+  };
+  if (error) throw new Error(`countBattleRounds: ${error.message}`);
+  return (data ?? []).length;
 }
 
 async function sleep(
   ms: number,
   setTimeoutFn: typeof setTimeout,
   _clearTimeoutFn: typeof clearTimeout,
-  capture: (t: ReturnType<typeof setTimeout>) => void,
+  capture: (t: ReturnType<typeof setTimeout>, resolve: () => void) => void,
 ): Promise<void> {
   return new Promise((resolve) => {
     const t = setTimeoutFn(() => resolve(), ms);
-    capture(t);
+    // Expose `resolve` so stop() can unblock a cleared timer (see runBattle).
+    capture(t, resolve);
   });
 }
 
@@ -334,6 +365,28 @@ async function settle(opts: {
   logger: Logger;
   now: () => number;
 }): Promise<void> {
+  // Entry guard: re-read status and skip if the battle is no longer live.
+  // Makes re-invocation (resume after a crash, or a concurrent settler that
+  // already finished) an idempotent no-op — no re-apply, no re-flip.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data: statusRow, error: statusErr } = (await (opts.supabase as any)
+    .from('battles')
+    .select('status')
+    .eq('id', opts.battleId)
+    .maybeSingle()) as { data: { status: string } | null; error: { message: string } | null };
+
+  if (statusErr) {
+    throw new Error(`settle.fetchStatus: ${statusErr.message}`);
+  }
+  if (!statusRow || statusRow.status !== 'live') {
+    opts.logger.info({
+      event: 'battle.runner.settle_skip',
+      battleId: opts.battleId,
+      status: statusRow?.status ?? 'missing',
+    });
+    return;
+  }
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { data: answers, error: answersErr } = (await (opts.supabase as any)
     .from('trivia_answers')
@@ -370,20 +423,6 @@ async function settle(opts: {
   const loser = ranked[1]!;
   const isPractice = opts.participants.some((p) => p.is_bot);
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { error: updateErr } = (await (opts.supabase as any)
-    .from('battles')
-    .update({
-      status: 'settled',
-      winner_user_id: winner.user_id,
-      ended_at: new Date(opts.now()).toISOString(),
-    })
-    .eq('id', opts.battleId)) as { error: { message: string } | null };
-
-  if (updateErr) {
-    throw new Error(`settle.battleUpdate: ${updateErr.message}`);
-  }
-
   const drafts = settleBattle({
     battleId: toBattleId(opts.battleId),
     mode: 'trivia',
@@ -403,12 +442,39 @@ async function settle(opts: {
     },
   });
 
+  // AP FIRST, status flip LAST (mirrors the open-debate crash-safe order).
+  // apply_ap_drafts is idempotent on the deterministic idempotency key
+  // (battle:<id>:user:<uid>:reason:<r>), so re-running after a crash-before-
+  // flip re-applies as a no-op rather than double-crediting.
+  //
   // applyFn is the engine's RPC adapter; its `SupabaseClient<unknown>`
-  // signature doesn't unify with the typed `ServiceClient` schema, so
-  // we widen here. The runtime contract is: pass any Supabase client
-  // with `.rpc('apply_ap_drafts', { p_drafts })`.
+  // signature doesn't unify with the typed `ServiceClient` schema, so we
+  // widen here. The runtime contract is `.rpc('apply_ap_drafts', {p_drafts})`.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   await opts.applyFn(opts.supabase as any, drafts);
+
+  // Claim-guarded flip: only the attempt that still sees status='live' wins.
+  // A concurrent settler (or an already-settled re-run) matches 0 rows and
+  // aborts — the AP is already applied, so this is safe.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data: claimed, error: updateErr } = (await (opts.supabase as any)
+    .from('battles')
+    .update({
+      status: 'settled',
+      winner_user_id: winner.user_id,
+      ended_at: new Date(opts.now()).toISOString(),
+    })
+    .eq('id', opts.battleId)
+    .eq('status', 'live')
+    .select('id')) as { data: { id: string }[] | null; error: { message: string } | null };
+
+  if (updateErr) {
+    throw new Error(`settle.battleUpdate: ${updateErr.message}`);
+  }
+  if (!claimed || claimed.length === 0) {
+    opts.logger.info({ event: 'battle.runner.settle_claim_lost', battleId: opts.battleId });
+    return;
+  }
 
   opts.logger.info({
     event: 'battle.runner.settle_drafts',

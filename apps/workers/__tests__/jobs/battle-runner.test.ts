@@ -10,6 +10,10 @@ const BOT_ID = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
 
 interface FakeSupabaseState {
   client: ServiceClient;
+  /** Current battle status; flips to 'settled' when the claim-guarded update lands. */
+  battleStatus: string;
+  /** Rounds a prior run already emitted (resume path). */
+  existingRounds: { round_no: number }[];
   battlesUpdates: { battleId: string; payload: Record<string, unknown> }[];
   roundsInserts: { battle_id: string; round_no: number; payload: unknown }[];
   answers: Array<{
@@ -41,11 +45,19 @@ interface FakeSupabaseConfig {
   }>;
   /** Pre-seeded human answers, optionally injected before settle. */
   preAnswers?: FakeSupabaseState['answers'];
+  /** Initial battle status (default 'live'). */
+  status?: string;
+  /** Rounds already emitted by a prior run (drives the resume path). */
+  preRounds?: { round_no: number }[];
+  /** Force the claim-guarded flip to match 0 rows (simulates a lost claim). */
+  claimLost?: boolean;
 }
 
 function buildFakeSupabase(cfg: FakeSupabaseConfig): FakeSupabaseState {
   const state: FakeSupabaseState = {
     client: null as unknown as ServiceClient,
+    battleStatus: cfg.status ?? 'live',
+    existingRounds: cfg.preRounds ? [...cfg.preRounds] : [],
     battlesUpdates: [],
     roundsInserts: [],
     answers: cfg.preAnswers ? [...cfg.preAnswers] : [],
@@ -102,19 +114,44 @@ function buildFakeSupabase(cfg: FakeSupabaseConfig): FakeSupabaseState {
         }),
       };
     };
+    // countBattleRounds: .select('round_no').eq('battle_id', id)
+    builder.select = () => builder;
+    builder.eq = () =>
+      Promise.resolve({
+        data: [...state.existingRounds, ...state.roundsInserts].map((r) => ({
+          round_no: r.round_no,
+        })),
+        error: null,
+      });
     return builder;
   };
 
   const battlesBuilder = () => {
-    let pending: Record<string, unknown> | null = null;
+    let updatePayload: Record<string, unknown> | null = null;
+    const filters: Record<string, string> = {};
     const builder: Record<string, unknown> = {};
     builder.update = (payload: Record<string, unknown>) => {
-      pending = payload;
+      updatePayload = payload;
       return builder;
     };
-    builder.eq = (_col: string, val: string) => {
-      state.battlesUpdates.push({ battleId: val, payload: pending! });
-      return Promise.resolve({ error: null });
+    builder.eq = (col: string, val: string) => {
+      filters[col] = val;
+      return builder;
+    };
+    // Entry guard: .select('status').eq('id', id).maybeSingle()
+    builder.maybeSingle = () =>
+      Promise.resolve({ data: { status: state.battleStatus }, error: null });
+    builder.select = () => {
+      if (!updatePayload) return builder; // read chain (status guard)
+      // Claim-guarded flip terminal: .update(...).eq('id').eq('status','live').select('id')
+      if (cfg.claimLost) return Promise.resolve({ data: [] as { id: string }[], error: null });
+      const statusMatches = filters.status === undefined || filters.status === state.battleStatus;
+      if (statusMatches) {
+        state.battlesUpdates.push({ battleId: filters.id ?? '', payload: updatePayload });
+        if (typeof updatePayload.status === 'string') state.battleStatus = updatePayload.status;
+        return Promise.resolve({ data: [{ id: filters.id ?? '' }], error: null });
+      }
+      return Promise.resolve({ data: [] as { id: string }[], error: null });
     };
     return builder;
   };
@@ -339,5 +376,148 @@ describe('runBattle', () => {
 
     const drafts = applyFn.mock.calls[0]![1];
     expect(drafts.every((d: { isPractice: boolean }) => d.isPractice === false)).toBe(true);
+  });
+});
+
+const ALL_ROUNDS = [0, 1, 2, 3, 4].map((round_no) => ({ round_no }));
+const seedAnswers = () =>
+  QUESTIONS.map((q) => ({
+    battle_id: BATTLE_ID,
+    round_id: 'seed',
+    user_id: HUMAN_ID,
+    question_id: q.id,
+    chosen_index: q.correct_index,
+    correct: true,
+    latency_ms: 2_000,
+  }));
+const hasEvent = (logger: ReturnType<typeof buildLogger>, event: string): boolean =>
+  logger.calls.some((c) => (c.obj as { event?: string }).event === event);
+const twoPlayers = [
+  { user_id: HUMAN_ID, seat: 0, is_bot: false, current_ap: 1000, tier_id: 3 },
+  { user_id: BOT_ID, seat: 1, is_bot: true, current_ap: 1000, tier_id: 3 },
+];
+
+describe('runBattle — crash safety (PR1: atomic settle + resume + drain)', () => {
+  it('resume: all rounds already emitted -> skips re-emission, applies AP, flips settled', async () => {
+    const supa = buildFakeSupabase({
+      participants: twoPlayers,
+      questions: QUESTIONS,
+      status: 'live',
+      preRounds: ALL_ROUNDS,
+      preAnswers: seedAnswers(),
+    });
+    const logger = buildLogger();
+    const applyFn = vi.fn().mockResolvedValue([]);
+
+    const handle = runBattle(BATTLE_ID, {
+      supabase: supa.client,
+      logger,
+      applyDraftsFn: applyFn as never,
+      now: () => 1_700_000_000_000,
+    });
+    await handle.done;
+
+    expect(supa.roundsInserts).toHaveLength(0); // no re-emission
+    expect(applyFn).toHaveBeenCalledTimes(1); // AP applied
+    expect(supa.battlesUpdates).toHaveLength(1);
+    expect(supa.battlesUpdates[0]!.payload).toMatchObject({ status: 'settled' });
+    expect(supa.battleStatus).toBe('settled');
+    expect(hasEvent(logger, 'battle.runner.resume_settle')).toBe(true);
+  });
+
+  it('idempotent re-run: an already-settled battle applies no AP and writes no update', async () => {
+    const supa = buildFakeSupabase({
+      participants: twoPlayers,
+      questions: QUESTIONS,
+      status: 'settled', // a prior run already settled it
+      preRounds: ALL_ROUNDS,
+      preAnswers: seedAnswers(),
+    });
+    const logger = buildLogger();
+    const applyFn = vi.fn().mockResolvedValue([]);
+
+    const handle = runBattle(BATTLE_ID, {
+      supabase: supa.client,
+      logger,
+      applyDraftsFn: applyFn as never,
+      now: () => 1_700_000_000_000,
+    });
+    await handle.done;
+
+    expect(applyFn).not.toHaveBeenCalled(); // entry guard skipped settle
+    expect(supa.roundsInserts).toHaveLength(0);
+    expect(supa.battlesUpdates).toHaveLength(0);
+    expect(hasEvent(logger, 'battle.runner.settle_skip')).toBe(true);
+  });
+
+  it('claim contention: a lost status claim aborts cleanly after AP is applied', async () => {
+    const supa = buildFakeSupabase({
+      participants: twoPlayers,
+      questions: QUESTIONS,
+      status: 'live', // entry guard passes...
+      preRounds: ALL_ROUNDS,
+      preAnswers: seedAnswers(),
+      claimLost: true, // ...but the flip matches 0 rows (another settler won)
+    });
+    const logger = buildLogger();
+    const applyFn = vi.fn().mockResolvedValue([]);
+
+    const handle = runBattle(BATTLE_ID, {
+      supabase: supa.client,
+      logger,
+      applyDraftsFn: applyFn as never,
+      now: () => 1_700_000_000_000,
+    });
+    await expect(handle.done).resolves.toBeUndefined(); // no throw
+
+    expect(applyFn).toHaveBeenCalledTimes(1); // AP applied (before the flip)
+    expect(supa.battlesUpdates).toHaveLength(0); // flip claimed nothing
+    expect(hasEvent(logger, 'battle.runner.settle_claim_lost')).toBe(true);
+  });
+
+  it('drain: done resolves only after settle completes, even when stop() fires mid-settle', async () => {
+    const supa = buildFakeSupabase({
+      participants: twoPlayers,
+      questions: QUESTIONS,
+      status: 'live',
+      preRounds: ALL_ROUNDS, // resume -> straight to settle, no round-loop timers
+      preAnswers: seedAnswers(),
+    });
+    const logger = buildLogger();
+    let releaseApply!: () => void;
+    const applyGate = new Promise<void>((r) => {
+      releaseApply = r;
+    });
+    const applyFn = vi.fn().mockImplementation(async () => {
+      await applyGate;
+      return [];
+    });
+
+    const handle = runBattle(BATTLE_ID, {
+      supabase: supa.client,
+      logger,
+      applyDraftsFn: applyFn as never,
+      now: () => 1_700_000_000_000,
+    });
+    let doneResolved = false;
+    void handle.done.then(() => {
+      doneResolved = true;
+    });
+
+    // Let the runner reach settle -> applyFn (now blocked on applyGate).
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(applyFn).toHaveBeenCalledTimes(1);
+
+    // Stop mid-settle: must NOT short-circuit the in-flight settlement.
+    handle.stop();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(doneResolved).toBe(false); // still draining: settle blocked on applyFn
+
+    releaseApply();
+    await handle.done;
+    expect(doneResolved).toBe(true);
+    expect(supa.battlesUpdates).toHaveLength(1); // drain let settle finish
+    expect(supa.battleStatus).toBe('settled');
   });
 });
