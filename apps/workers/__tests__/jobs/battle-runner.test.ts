@@ -12,8 +12,8 @@ interface FakeSupabaseState {
   client: ServiceClient;
   /** Current battle status; flips to 'settled' when the claim-guarded update lands. */
   battleStatus: string;
-  /** Rounds a prior run already emitted (resume path). */
-  existingRounds: { round_no: number }[];
+  /** Rounds a prior run already emitted (resume path); payload carries questionId. */
+  existingRounds: { round_no: number; payload?: { questionId?: string } }[];
   battlesUpdates: { battleId: string; payload: Record<string, unknown> }[];
   roundsInserts: { battle_id: string; round_no: number; payload: unknown; id: string }[];
   answers: Array<{
@@ -48,7 +48,7 @@ interface FakeSupabaseConfig {
   /** Initial battle status (default 'live'). */
   status?: string;
   /** Rounds already emitted by a prior run (drives the resume path). */
-  preRounds?: { round_no: number }[];
+  preRounds?: { round_no: number; payload?: { questionId?: string } }[];
   /** Force the claim-guarded flip to match 0 rows (simulates a lost claim). */
   claimLost?: boolean;
 }
@@ -86,9 +86,20 @@ function buildFakeSupabase(cfg: FakeSupabaseConfig): FakeSupabaseState {
 
   const triviaQuestionsBuilder = () => {
     const builder: Record<string, unknown> = {};
+    const filters: Record<string, unknown> = {};
     builder.select = () => builder;
-    builder.eq = () => builder;
+    builder.eq = (col: string, val: unknown) => {
+      filters[col] = val;
+      return builder;
+    };
+    // fetchQuestions: .select(...).eq(...).limit(n)
     builder.limit = () => Promise.resolve({ data: cfg.questions, error: null });
+    // loadRoundForBackfill: .select(...).eq('id', qId).maybeSingle()
+    builder.maybeSingle = () =>
+      Promise.resolve({
+        data: cfg.questions.find((q) => q.id === filters.id) ?? null,
+        error: null,
+      });
     return builder;
   };
 
@@ -96,8 +107,13 @@ function buildFakeSupabase(cfg: FakeSupabaseConfig): FakeSupabaseState {
     const builder: Record<string, unknown> = {};
     builder.select = () => builder;
     builder.eq = () => Promise.resolve({ data: state.answers, error: null });
-    builder.insert = (payload: FakeSupabaseState['answers'][number]) => {
-      state.answers.push(payload);
+    // emitBotAnswer: .upsert(payload, { onConflict:'round_id,user_id', ignoreDuplicates })
+    // Model the unique (round_id, user_id): a duplicate is a clean no-op.
+    builder.upsert = (payload: FakeSupabaseState['answers'][number]) => {
+      const dup = state.answers.some(
+        (a) => a.round_id === payload.round_id && a.user_id === payload.user_id,
+      );
+      if (!dup) state.answers.push(payload);
       return Promise.resolve({ error: null });
     };
     return builder;
@@ -108,9 +124,13 @@ function buildFakeSupabase(cfg: FakeSupabaseConfig): FakeSupabaseState {
     const eqFilters: Record<string, unknown> = {};
     // Model the (battle_id, round_no) unique constraint. Pre-seeded rounds get a
     // deterministic id so the conflict re-select can return it.
-    const allRounds = (): { round_no: number; id: string }[] => [
-      ...state.existingRounds.map((r) => ({ round_no: r.round_no, id: `preround-${r.round_no}` })),
-      ...state.roundsInserts.map((r) => ({ round_no: r.round_no, id: r.id })),
+    const allRounds = (): { round_no: number; id: string; payload: unknown }[] => [
+      ...state.existingRounds.map((r) => ({
+        round_no: r.round_no,
+        id: `preround-${r.round_no}`,
+        payload: r.payload ?? null,
+      })),
+      ...state.roundsInserts.map((r) => ({ round_no: r.round_no, id: r.id, payload: r.payload })),
     ];
 
     // emitRound: .upsert(payload, { onConflict, ignoreDuplicates }).select('id').maybeSingle()
@@ -132,10 +152,14 @@ function buildFakeSupabase(cfg: FakeSupabaseConfig): FakeSupabaseState {
       eqFilters[col] = val;
       return builder;
     };
-    // emitRound conflict re-select: .select('id').eq('battle_id').eq('round_no').maybeSingle()
+    // emitRound conflict re-select AND loadRoundForBackfill:
+    //   .select('id'[,'payload']).eq('battle_id').eq('round_no').maybeSingle()
     builder.maybeSingle = () => {
       const found = allRounds().find((r) => r.round_no === eqFilters.round_no);
-      return Promise.resolve({ data: found ? { id: found.id } : null, error: null });
+      return Promise.resolve({
+        data: found ? { id: found.id, payload: found.payload } : null,
+        error: null,
+      });
     };
     // maxEmittedRoundNo: .select('round_no').eq('battle_id', id) — awaited directly.
     // A thenable builder lets the single-.eq read resolve without a terminal call.
@@ -617,5 +641,112 @@ describe('runBattle — crash safety (PR1: atomic settle + resume + drain)', () 
     });
     expect(freshId).toMatch(/^round-/);
     expect(supa.roundsInserts.map((r) => r.round_no)).toEqual([5]);
+  });
+
+  it('boundary backfill: crash after round-row + before bot-answer -> resume backfills the missing bot answer against the original question', async () => {
+    // Rounds 0,1,2 emitted; the crash left round 2 (the boundary) with its row
+    // but NO bot answer. Rounds 0,1 are fully complete (bot answered).
+    // Capture round 2's original question id BEFORE the run — fetchQuestions
+    // shuffles the shared questions array in place when it emits the new rounds.
+    const round2OriginalQid = QUESTIONS[2]!.id;
+    const supa = buildFakeSupabase({
+      participants: twoPlayers,
+      questions: QUESTIONS,
+      status: 'live',
+      preRounds: [0, 1, 2].map((i) => ({ round_no: i, payload: { questionId: QUESTIONS[i]!.id } })),
+      preAnswers: [
+        // human answered all three completed rounds
+        ...[0, 1, 2].map((i) => ({
+          battle_id: BATTLE_ID,
+          round_id: `preround-${i}`,
+          user_id: HUMAN_ID,
+          question_id: QUESTIONS[i]!.id,
+          chosen_index: QUESTIONS[i]!.correct_index,
+          correct: true,
+          latency_ms: 2_000,
+        })),
+        // bot answered ONLY rounds 0 and 1 — round 2 (boundary) is missing
+        ...[0, 1].map((i) => ({
+          battle_id: BATTLE_ID,
+          round_id: `preround-${i}`,
+          user_id: BOT_ID,
+          question_id: QUESTIONS[i]!.id,
+          chosen_index: QUESTIONS[i]!.correct_index,
+          correct: true,
+          latency_ms: 3_000,
+        })),
+      ],
+    });
+    const logger = buildLogger();
+    const fastTimeout = ((cb: () => void, _ms: number) => {
+      cb();
+      return 0 as unknown as ReturnType<typeof setTimeout>;
+    }) as unknown as typeof setTimeout;
+    const applyFn = vi.fn().mockResolvedValue([]);
+
+    const handle = runBattle(BATTLE_ID, {
+      supabase: supa.client,
+      logger,
+      applyDraftsFn: applyFn as never,
+      setTimeoutFn: fastTimeout,
+      clearTimeoutFn: (() => {}) as unknown as typeof clearTimeout,
+      random: () => 0,
+      now: () => 1_700_000_000_000,
+    });
+    await handle.done;
+
+    // The bot's round-2 answer was backfilled against round 2's ORIGINAL question.
+    const round2Bot = supa.answers.find((a) => a.user_id === BOT_ID && a.round_id === 'preround-2');
+    expect(round2Bot).toBeDefined();
+    expect(round2Bot!.question_id).toBe(round2OriginalQid); // original question, not reshuffled
+    // Backfill emits no NEW round row; only genuinely-new rounds 3,4 are inserted.
+    expect(supa.roundsInserts.map((r) => r.round_no)).toEqual([3, 4]);
+    // Bot now has an answer for every round (0,1 seeded; 2 backfilled; 3,4 new).
+    expect(supa.answers.filter((a) => a.user_id === BOT_ID)).toHaveLength(5);
+    expect(hasEvent(logger, 'battle.runner.boundary_backfill_skipped')).toBe(false);
+    expect(hasEvent(logger, 'battle.runner.resume')).toBe(true);
+    expect(applyFn).toHaveBeenCalledTimes(1);
+    expect(supa.battleStatus).toBe('settled');
+  });
+
+  it('crash after a COMPLETE round: resume backfill no-ops cleanly — no duplicate, no throw, no orphan', async () => {
+    // All 5 rounds emitted AND fully answered (bot answered the final round). The
+    // resume re-touches the boundary round; the idempotent bot-answer upsert must
+    // no-op on the unique (round_id, user_id) constraint rather than throw.
+    const complete = (uid: string) =>
+      QUESTIONS.map((q, i) => ({
+        battle_id: BATTLE_ID,
+        round_id: `preround-${i}`,
+        user_id: uid,
+        question_id: q.id,
+        chosen_index: q.correct_index,
+        correct: true,
+        latency_ms: 2_000,
+      }));
+    const supa = buildFakeSupabase({
+      participants: twoPlayers,
+      questions: QUESTIONS,
+      status: 'live',
+      preRounds: QUESTIONS.map((q, i) => ({ round_no: i, payload: { questionId: q.id } })),
+      preAnswers: [...complete(HUMAN_ID), ...complete(BOT_ID)],
+    });
+    const logger = buildLogger();
+    const applyFn = vi.fn().mockResolvedValue([]);
+
+    const handle = runBattle(BATTLE_ID, {
+      supabase: supa.client,
+      logger,
+      applyDraftsFn: applyFn as never,
+      now: () => 1_700_000_000_000,
+    });
+    await expect(handle.done).resolves.toBeUndefined(); // no throw / re-orphan
+
+    // Idempotent: no duplicate bot answer for the final round.
+    expect(supa.answers.filter((a) => a.user_id === BOT_ID)).toHaveLength(5);
+    expect(supa.roundsInserts).toHaveLength(0);
+    expect(hasEvent(logger, 'battle.runner.failed')).toBe(false);
+    expect(hasEvent(logger, 'battle.runner.resume_settle')).toBe(true);
+    expect(applyFn).toHaveBeenCalledTimes(1);
+    expect(supa.battleStatus).toBe('settled');
   });
 });
