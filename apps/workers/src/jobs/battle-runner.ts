@@ -104,13 +104,19 @@ export function runBattle(battleId: string, deps: BattleRunnerDeps): RunningBatt
         return;
       }
 
-      // Resume: if a prior run already emitted every round (e.g. it crashed
-      // during settlement), do NOT re-emit — that would duplicate battle_rounds.
-      // Go straight to the (idempotent) settle. A PARTIAL round set still re-runs
-      // the loop for now; making round emission itself idempotent is PR 2.
-      const emittedRounds = await countBattleRounds(deps.supabase, battleId);
-      if (emittedRounds >= ROUND_COUNT) {
-        logger.info({ event: 'battle.runner.resume_settle', battleId, emittedRounds });
+      // Resume-from-max: pick up at the first UN-emitted round. A prior run may
+      // have crashed after emitting some (or all) rounds. Completed rounds keep
+      // their persisted questions + answers and are NEVER re-touched — re-emitting
+      // one would double-count its bot answer (trivia_answers has no
+      // (round_id, user_id) uniqueness). If every round is already emitted (crash
+      // during settlement), skip the loop entirely and go straight to the
+      // idempotent settle. emitRound itself is idempotent on the
+      // (battle_id, round_no) unique constraint, so the exact-boundary round (or a
+      // rare double-spawn race) can't throw us into an orphaned-live state.
+      const lastRound = await maxEmittedRoundNo(deps.supabase, battleId);
+      const resumeFrom = lastRound + 1;
+      if (resumeFrom >= ROUND_COUNT) {
+        logger.info({ event: 'battle.runner.resume_settle', battleId, emittedRounds: resumeFrom });
       } else {
         const questions = await fetchQuestions(deps.supabase, ROUND_COUNT);
         if (questions.length < ROUND_COUNT) {
@@ -125,12 +131,13 @@ export function runBattle(battleId: string, deps: BattleRunnerDeps): RunningBatt
         }
 
         logger.info({
-          event: 'battle.runner.start',
+          event: resumeFrom > 0 ? 'battle.runner.resume' : 'battle.runner.start',
           battleId,
+          ...(resumeFrom > 0 ? { resumeFrom } : {}),
           botSeats: participants.filter((p) => p.is_bot).map((p) => p.seat),
         });
 
-        for (let roundNo = 0; roundNo < ROUND_COUNT; roundNo += 1) {
+        for (let roundNo = resumeFrom; roundNo < ROUND_COUNT; roundNo += 1) {
           if (stopped) return;
           const question = questions[roundNo]!;
           const roundId = await emitRound({
@@ -201,7 +208,7 @@ export function runBattle(battleId: string, deps: BattleRunnerDeps): RunningBatt
   };
 }
 
-async function countBattleRounds(supabase: ServiceClient, battleId: string): Promise<number> {
+async function maxEmittedRoundNo(supabase: ServiceClient, battleId: string): Promise<number> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { data, error } = (await (supabase as any)
     .from('battle_rounds')
@@ -210,8 +217,9 @@ async function countBattleRounds(supabase: ServiceClient, battleId: string): Pro
     data: { round_no: number }[] | null;
     error: { message: string } | null;
   };
-  if (error) throw new Error(`countBattleRounds: ${error.message}`);
-  return (data ?? []).length;
+  if (error) throw new Error(`maxEmittedRoundNo: ${error.message}`);
+  // -1 when no rounds are emitted yet, so `resumeFrom = max + 1` starts at 0.
+  return (data ?? []).reduce((m, r) => (r.round_no > m ? r.round_no : m), -1);
 }
 
 async function sleep(
@@ -299,21 +307,44 @@ async function emitRound(opts: {
   roundNo: number;
   question: QuestionRow;
 }): Promise<string> {
+  // Idempotent on the (battle_id, round_no) unique constraint. `ignoreDuplicates`
+  // makes the write `on conflict do nothing`, so a re-emit of an already-persisted
+  // round (crash-resume boundary, or a rare double-spawn race) returns NO row
+  // instead of throwing a unique violation and orphaning the battle at
+  // status='live'. On that no-row path we re-select the existing round id.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { data, error } = (await (opts.supabase as any)
     .from('battle_rounds')
-    .insert({
-      battle_id: opts.battleId,
-      round_no: opts.roundNo,
-      payload: { questionId: opts.question.id },
-    })
+    .upsert(
+      {
+        battle_id: opts.battleId,
+        round_no: opts.roundNo,
+        payload: { questionId: opts.question.id },
+      },
+      { onConflict: 'battle_id,round_no', ignoreDuplicates: true },
+    )
     .select('id')
     .maybeSingle()) as { data: { id: string } | null; error: { message: string } | null };
 
-  if (error || !data) {
-    throw new Error(`emitRound: ${error?.message ?? 'no row'}`);
+  if (error) {
+    throw new Error(`emitRound: ${error.message}`);
   }
-  return data.id;
+  if (data) return data.id;
+
+  // Conflict path: the round already exists — fetch its id so the caller can
+  // still attach bot answers to the correct round row.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data: existing, error: selError } = (await (opts.supabase as any)
+    .from('battle_rounds')
+    .select('id')
+    .eq('battle_id', opts.battleId)
+    .eq('round_no', opts.roundNo)
+    .maybeSingle()) as { data: { id: string } | null; error: { message: string } | null };
+
+  if (selError || !existing) {
+    throw new Error(`emitRound: ${selError?.message ?? 'no row after conflict'}`);
+  }
+  return existing.id;
 }
 
 async function emitBotAnswer(opts: {
@@ -493,6 +524,8 @@ export const __testing = {
   ROUND_DURATION_MS,
   idempotencyKeyFor,
   pickWrongIndex,
+  emitRound,
+  maxEmittedRoundNo,
 };
 
 // Type re-exports for convenience in callers.
