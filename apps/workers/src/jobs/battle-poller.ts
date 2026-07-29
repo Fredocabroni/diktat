@@ -32,6 +32,21 @@ export interface BattlePollerHandle {
   stop(): Promise<void>;
 }
 
+// Per-battle drain ceiling on shutdown: await an in-flight settle so AP is
+// applied before exit, but don't let one hung battle block the deploy forever.
+const DRAIN_TIMEOUT_MS = 8_000;
+
+/** Resolve when `p` settles or after `ms`, whichever comes first (no leaked timer). */
+function withTimeout(p: Promise<void>, ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, ms);
+    void p.finally(() => {
+      clearTimeout(t);
+      resolve();
+    });
+  });
+}
+
 export function buildBattlePoller(deps: BattlePollerDeps): BattlePollerHandle {
   const running = new Map<string, RunningBattle | RunningOpenDebate>();
 
@@ -93,7 +108,13 @@ export function buildBattlePoller(deps: BattlePollerDeps): BattlePollerHandle {
   }
 
   async function stop(): Promise<void> {
-    for (const handle of running.values()) handle.stop();
+    const handles = [...running.values()];
+    // Signal every runner to wind down (bails a mid-round battle to its
+    // stopped-check; a mid-settle battle keeps going).
+    for (const handle of handles) handle.stop();
+    // Then DRAIN: await each lifecycle so an in-flight settlement finishes
+    // applying AP before the process exits. Bounded per battle.
+    await Promise.allSettled(handles.map((h) => withTimeout(h.done, DRAIN_TIMEOUT_MS)));
     running.clear();
   }
 

@@ -158,12 +158,23 @@ async function main(): Promise<void> {
       });
   }, SCHEDULER_TICK_MS);
 
+  const SHUTDOWN_MAX_MS = 12_000;
   const shutdown = (signal: string): void => {
     logger.info({ event: 'workers.shutdown', signal });
     clearInterval(matchmakingInterval);
     clearInterval(battlePollerInterval);
     clearInterval(schedulerInterval);
-    void Promise.all([battlePoller.stop(), listener.stop()]).finally(() => process.exit(0));
+    // battlePoller.stop() now DRAINS in-flight battles (applies AP before exit).
+    // Force-exit if the drain itself hangs past the ceiling so a deploy can
+    // never wedge on a stuck settlement.
+    const force = setTimeout(() => {
+      logger.warn({ event: 'workers.shutdown.forced', signal });
+      process.exit(0);
+    }, SHUTDOWN_MAX_MS);
+    void Promise.all([battlePoller.stop(), listener.stop()]).finally(() => {
+      clearTimeout(force);
+      process.exit(0);
+    });
   };
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
