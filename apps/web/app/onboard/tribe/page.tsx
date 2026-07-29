@@ -5,8 +5,9 @@
 // "Skip" opens the all-seven manual picker (never a tribeless exit), and the
 // picker is terminal — its only way forward is choosing one. The quiz itself stays
 // optional (skip = pick your own without answering), consistent with the spirit of
-// ADDICTION_ARCHITECTURE §11. The lone tribeless path left is the tribes-unavailable
-// error state (API down), which can't render a picker at all.
+// ADDICTION_ARCHITECTURE §11. There is NO tribeless path out: the tribes-unavailable
+// error state is retry-only (no exit to the arena), and the only navigation away is
+// the post-join success push. A test guards that no `href` here leaves tribeless.
 //
 // Flow (v2): select an option (it locks in visibly), then Next. Back re-opens the
 // previous question with its choice restored and recomputes from there — answers
@@ -19,7 +20,6 @@
 'use client';
 
 import { AnimatePresence, LazyMotion, domAnimation, m, useReducedMotion } from 'framer-motion';
-import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useEffect, useMemo, useState } from 'react';
 
@@ -248,7 +248,6 @@ function TribeQuiz() {
               showAll={phase.showAll}
               tribes={(tribes.data ?? []) as TribeRow[]}
               tribesLoading={tribes.isLoading}
-              tribesError={tribes.isError}
               onRetry={() => void tribes.refetch()}
               onPick={pick}
               onShowAll={() => setPhase({ ...phase, showAll: true })}
@@ -373,7 +372,6 @@ function ResultView({
   showAll,
   tribes,
   tribesLoading,
-  tribesError,
   onRetry,
   onPick,
   onShowAll,
@@ -386,7 +384,6 @@ function ResultView({
   showAll: boolean;
   tribes: readonly TribeRow[];
   tribesLoading: boolean;
-  tribesError: boolean;
   onRetry: () => void;
   onPick: (slug: string) => void;
   onShowAll: () => void;
@@ -437,10 +434,11 @@ function ResultView({
           Couldn&apos;t load tribes
         </h1>
         <p className="mt-3 text-sm leading-relaxed text-text-secondary">
-          {tribesError || timedOut
-            ? 'We could not reach the server to load your tribe. Check your connection and try again.'
-            : 'Your tribe could not be matched. Try again, or skip for now.'}
+          We could not reach the server to load the tribes. Check your connection and try again.
         </p>
+        {/* Retry-only, by design: with no tribe list there is nothing to place
+            against, and we never proceed tribeless. There is no exit to the arena
+            from here — the user retries until the list loads. */}
         <div className="mt-auto pt-8">
           <div className="flex items-center gap-3">
             <button
@@ -457,14 +455,6 @@ function ResultView({
             >
               Retry
             </button>
-          </div>
-          <div className="mt-4 flex justify-center">
-            <Link
-              href="/onboard/preview"
-              className="rounded-full px-4 py-2 text-sm font-semibold text-text-secondary transition hover:text-text-primary"
-            >
-              Skip
-            </Link>
           </div>
         </div>
       </div>
@@ -560,7 +550,7 @@ function ResultView({
 
       {joinError && (
         <p role="alert" className="mt-4 text-sm text-danger-soft-fg">
-          Could not join that tribe. Try again, or skip.
+          Could not join that tribe. Try again.
         </p>
       )}
 

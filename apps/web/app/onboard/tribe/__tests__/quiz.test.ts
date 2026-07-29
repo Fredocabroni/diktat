@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -248,4 +250,29 @@ describe('totality — resolveTiebreak always returns a slug in the pair, never 
       expect(pair.has(resolveTiebreak(branch, [], 'not-a-real-tribe'))).toBe(true);
     });
   }
+});
+
+describe('no tribeless exit — the flow never navigates to the arena without a tribe', () => {
+  // Source-level guard (the web test env is node-only, no React renderer). The
+  // ONLY legitimate navigation to /onboard/preview is the post-join success push;
+  // any `href="/onboard/preview"` would be a Link that proceeds without joining a
+  // tribe (the error-state Skip we removed). Assert none exist.
+  const pageSource = readFileSync(new URL('../page.tsx', import.meta.url), 'utf8');
+
+  it('has no <Link>/href navigation to onboarding-exit that bypasses join', () => {
+    expect(pageSource).not.toMatch(/href=["']\/onboard\/preview["']/);
+  });
+
+  it('the single /onboard/preview reference is the post-join success push', () => {
+    const refs = pageSource.match(/onboard\/preview/g) ?? [];
+    expect(refs).toHaveLength(1);
+    expect(pageSource).toMatch(
+      /onSuccess:\s*\(\)\s*=>\s*router\.push\(['"]\/onboard\/preview['"]\)/,
+    );
+  });
+
+  it('the error state is retry-only (no "skip" affordance in its copy)', () => {
+    // The removed error-state escape had a Skip; its copy no longer offers one.
+    expect(pageSource).not.toMatch(/Try again, or skip/i);
+  });
 });
