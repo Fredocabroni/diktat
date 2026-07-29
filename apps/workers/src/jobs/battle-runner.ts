@@ -104,19 +104,59 @@ export function runBattle(battleId: string, deps: BattleRunnerDeps): RunningBatt
         return;
       }
 
-      // Resume-from-max: pick up at the first UN-emitted round. A prior run may
-      // have crashed after emitting some (or all) rounds. Completed rounds keep
-      // their persisted questions + answers and are NEVER re-touched — re-emitting
-      // one would double-count its bot answer (trivia_answers has no
-      // (round_id, user_id) uniqueness). If every round is already emitted (crash
-      // during settlement), skip the loop entirely and go straight to the
-      // idempotent settle. emitRound itself is idempotent on the
-      // (battle_id, round_no) unique constraint, so the exact-boundary round (or a
-      // rare double-spawn race) can't throw us into an orphaned-live state.
+      // Resume-from-max with boundary backfill. `maxEmittedRoundNo` returns the
+      // highest emitted round_no (-1 if none). A prior run may have crashed after
+      // writing a round's battle_rounds row but BEFORE its bot answer, so the
+      // BOUNDARY round (== lastRound) can be missing its bot answer. We backfill it
+      // idempotently: trivia_answers has a unique (round_id, user_id) constraint
+      // (migration 20260618180000), so re-emitting a bot answer either fills the
+      // gap or cleanly no-ops when the round already completed — it can never
+      // double-count. The boundary round is graded against its ORIGINAL question
+      // (loaded from the persisted round payload), never a reshuffled one, so
+      // answer.question_id stays consistent with the round it belongs to. Earlier
+      // rounds (0..lastRound-1) are known-complete — their bot answers were written
+      // before the next round's row — so they are not re-touched. Genuinely-new
+      // rounds (lastRound+1..) are emitted with fresh questions below.
       const lastRound = await maxEmittedRoundNo(deps.supabase, battleId);
-      const resumeFrom = lastRound + 1;
-      if (resumeFrom >= ROUND_COUNT) {
-        logger.info({ event: 'battle.runner.resume_settle', battleId, emittedRounds: resumeFrom });
+      const bots = participants.filter((p) => p.is_bot);
+
+      if (lastRound >= 0 && bots.length > 0) {
+        const boundary = await loadRoundForBackfill(deps.supabase, battleId, lastRound);
+        if (boundary === null) {
+          // Round row exists but its question can't be resolved — skip the backfill
+          // rather than crash; the bot simply keeps 0 credit for this one round (the
+          // original bounded edge). Should not happen in practice.
+          logger.warn({
+            event: 'battle.runner.boundary_backfill_skipped',
+            battleId,
+            roundNo: lastRound,
+          });
+        } else {
+          for (const p of bots) {
+            await emitBotAnswer({
+              supabase: deps.supabase,
+              battleId,
+              roundId: boundary.roundId,
+              userId: p.user_id,
+              questionId: boundary.question.id,
+              correctIndex: boundary.question.correct_index,
+              tier: p.tier_id as Tier,
+              random,
+            });
+          }
+        }
+      }
+
+      const firstNewRound = lastRound + 1;
+      if (firstNewRound >= ROUND_COUNT) {
+        // Every round was already emitted (crash during/after the final round or
+        // during settlement). The boundary backfill above closed any missing
+        // final-round bot answer; go straight to the idempotent settle.
+        logger.info({
+          event: 'battle.runner.resume_settle',
+          battleId,
+          emittedRounds: firstNewRound,
+        });
       } else {
         const questions = await fetchQuestions(deps.supabase, ROUND_COUNT);
         if (questions.length < ROUND_COUNT) {
@@ -131,13 +171,13 @@ export function runBattle(battleId: string, deps: BattleRunnerDeps): RunningBatt
         }
 
         logger.info({
-          event: resumeFrom > 0 ? 'battle.runner.resume' : 'battle.runner.start',
+          event: firstNewRound > 0 ? 'battle.runner.resume' : 'battle.runner.start',
           battleId,
-          ...(resumeFrom > 0 ? { resumeFrom } : {}),
-          botSeats: participants.filter((p) => p.is_bot).map((p) => p.seat),
+          ...(firstNewRound > 0 ? { resumeFrom: firstNewRound } : {}),
+          botSeats: bots.map((p) => p.seat),
         });
 
-        for (let roundNo = resumeFrom; roundNo < ROUND_COUNT; roundNo += 1) {
+        for (let roundNo = firstNewRound; roundNo < ROUND_COUNT; roundNo += 1) {
           if (stopped) return;
           const question = questions[roundNo]!;
           const roundId = await emitRound({
@@ -148,7 +188,7 @@ export function runBattle(battleId: string, deps: BattleRunnerDeps): RunningBatt
           });
 
           // Generate any bot answers for this round.
-          for (const p of participants.filter((x) => x.is_bot)) {
+          for (const p of bots) {
             await emitBotAnswer({
               supabase: deps.supabase,
               battleId,
@@ -366,20 +406,63 @@ async function emitBotAnswer(opts: {
     BOT_LATENCY_MIN_MS + opts.random() * (BOT_LATENCY_MAX_MS - BOT_LATENCY_MIN_MS),
   );
 
+  // Idempotent on trivia_answers' unique (round_id, user_id) constraint
+  // (migration 20260618180000). `ignoreDuplicates` makes a re-emit — a resume
+  // that re-touches the boundary round whose bot answer already landed — a clean
+  // no-op instead of a 23505 that would throw and re-orphan the battle. A genuine
+  // (non-conflict) error still surfaces.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { error } = (await (opts.supabase as any).from('trivia_answers').insert({
-    battle_id: opts.battleId,
-    round_id: opts.roundId,
-    user_id: opts.userId,
-    question_id: opts.questionId,
-    chosen_index: chosenIndex,
-    correct: isCorrect,
-    latency_ms: latencyMs,
-  })) as { error: { message: string } | null };
+  const { error } = (await (opts.supabase as any).from('trivia_answers').upsert(
+    {
+      battle_id: opts.battleId,
+      round_id: opts.roundId,
+      user_id: opts.userId,
+      question_id: opts.questionId,
+      chosen_index: chosenIndex,
+      correct: isCorrect,
+      latency_ms: latencyMs,
+    },
+    { onConflict: 'round_id,user_id', ignoreDuplicates: true },
+  )) as { error: { message: string } | null };
 
   if (error) {
     throw new Error(`emitBotAnswer: ${error.message}`);
   }
+}
+
+// Load the row id + ORIGINAL question for an already-emitted round, so a resume
+// can backfill that round's bot answer graded against the same question it posed
+// (never a reshuffled one). Returns null if the round row or its question can't
+// be resolved — the caller then skips the backfill rather than crashing.
+async function loadRoundForBackfill(
+  supabase: ServiceClient,
+  battleId: string,
+  roundNo: number,
+): Promise<{ roundId: string; question: QuestionRow } | null> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data: round, error: roundErr } = (await (supabase as any)
+    .from('battle_rounds')
+    .select('id, payload')
+    .eq('battle_id', battleId)
+    .eq('round_no', roundNo)
+    .maybeSingle()) as {
+    data: { id: string; payload: { questionId?: string } | null } | null;
+    error: { message: string } | null;
+  };
+  if (roundErr) throw new Error(`loadRoundForBackfill: ${roundErr.message}`);
+  const questionId = round?.payload?.questionId;
+  if (!round || !questionId) return null;
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data: question, error: qErr } = (await (supabase as any)
+    .from('trivia_questions')
+    .select('id, category, prompt, choices, correct_index, difficulty')
+    .eq('id', questionId)
+    .maybeSingle()) as { data: QuestionRow | null; error: { message: string } | null };
+  if (qErr) throw new Error(`loadRoundForBackfill: ${qErr.message}`);
+  if (!question) return null;
+
+  return { roundId: round.id, question };
 }
 
 function pickWrongIndex(correctIndex: number, random: () => number): number {
