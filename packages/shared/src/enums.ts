@@ -38,6 +38,7 @@ export type XPostStatus = z.infer<typeof XPostStatusSchema>;
 export const ApReasonSchema = z.enum([
   'battle_win',
   'battle_loss',
+  'prediction_stake',
   'prediction_settle',
   'ghost_credit',
   'streak_bonus',

@@ -29,6 +29,7 @@ describe('enums', () => {
     for (const r of [
       'battle_win',
       'battle_loss',
+      'prediction_stake',
       'prediction_settle',
       'ghost_credit',
       'streak_bonus',
