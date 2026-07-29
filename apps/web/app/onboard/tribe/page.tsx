@@ -1,10 +1,13 @@
 // Tribe placement quiz. A short set of concrete-tradeoff questions places the
 // user into the tribe they lean toward (see docs/TRIBE_OVERHAUL_PLAN.md). When the
-// answers land between the two pairs that geometrically bleed (Progressive/Liberal
-// or Populist/Nationalist) a short tie-breaker runs; otherwise the result leads
-// with the nearest tribe. A mandatory override always lets the user pick any of
-// the seven, or skip — nothing is locked: ADDICTION_ARCHITECTURE §11 (no forced
-// choice to proceed, no FOMO).
+// answers land in an ambiguous nearest-two pair a short tie-breaker runs;
+// otherwise the result leads with the nearest tribe. Everyone ends up in a tribe:
+// "Skip" opens the all-seven manual picker (never a tribeless exit), and the
+// picker is terminal — its only way forward is choosing one. The quiz itself stays
+// optional (skip = pick your own without answering), consistent with the spirit of
+// ADDICTION_ARCHITECTURE §11. There is NO tribeless path out: the tribes-unavailable
+// error state is retry-only (no exit to the arena), and the only navigation away is
+// the post-join success push. A test guards that no `href` here leaves tribeless.
 //
 // Flow (v2): select an option (it locks in visibly), then Next. Back re-opens the
 // previous question with its choice restored and recomputes from there — answers
@@ -17,7 +20,6 @@
 'use client';
 
 import { AnimatePresence, LazyMotion, domAnimation, m, useReducedMotion } from 'framer-motion';
-import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useEffect, useMemo, useState } from 'react';
 
@@ -183,6 +185,14 @@ function TribeQuiz() {
     join.mutate({ tribeId: tribe.id });
   }
 
+  // Skip routes to the all-seven manual picker (not out of onboarding tribeless):
+  // no one reaches the arena without a tribe. The picker itself is terminal — its
+  // only way forward is picking one.
+  function skipToPicker() {
+    setDir(1);
+    setPhase({ kind: 'result', slug: '', showAll: true, origin: { kind: 'core' } });
+  }
+
   const stepKey =
     phase.kind === 'core'
       ? `core-${phase.step}`
@@ -216,6 +226,7 @@ function TribeQuiz() {
               onSelect={selectCore}
               onNext={nextFromCore}
               onBack={phase.step > 0 ? goBack : null}
+              onSkip={skipToPicker}
               reduceMotion={reduceMotion}
             />
           )}
@@ -227,6 +238,7 @@ function TribeQuiz() {
               onSelect={selectTiebreak}
               onNext={nextFromTiebreak}
               onBack={goBack}
+              onSkip={skipToPicker}
               reduceMotion={reduceMotion}
             />
           )}
@@ -236,7 +248,6 @@ function TribeQuiz() {
               showAll={phase.showAll}
               tribes={(tribes.data ?? []) as TribeRow[]}
               tribesLoading={tribes.isLoading}
-              tribesError={tribes.isError}
               onRetry={() => void tribes.refetch()}
               onPick={pick}
               onShowAll={() => setPhase({ ...phase, showAll: true })}
@@ -266,6 +277,7 @@ function QuestionStep({
   onSelect,
   onNext,
   onBack,
+  onSkip,
   reduceMotion,
 }: {
   eyebrow: string;
@@ -275,6 +287,7 @@ function QuestionStep({
   onSelect: (i: number) => void;
   onNext: () => void;
   onBack: (() => void) | null;
+  onSkip: () => void;
   reduceMotion: boolean;
 }) {
   const canNext = selected !== undefined;
@@ -341,12 +354,13 @@ function QuestionStep({
           </button>
         </div>
         <div className="mt-4 flex justify-center">
-          <Link
-            href="/onboard/preview"
+          <button
+            type="button"
+            onClick={onSkip}
             className="rounded-full px-4 py-2 text-sm font-semibold text-text-secondary transition hover:text-text-primary"
           >
-            Skip
-          </Link>
+            Skip the quiz and pick your own
+          </button>
         </div>
       </div>
     </div>
@@ -358,7 +372,6 @@ function ResultView({
   showAll,
   tribes,
   tribesLoading,
-  tribesError,
   onRetry,
   onPick,
   onShowAll,
@@ -371,7 +384,6 @@ function ResultView({
   showAll: boolean;
   tribes: readonly TribeRow[];
   tribesLoading: boolean;
-  tribesError: boolean;
   onRetry: () => void;
   onPick: (slug: string) => void;
   onShowAll: () => void;
@@ -399,10 +411,12 @@ function ResultView({
     transition: { duration: 0.3, ease: EASE_SNAP, delay: reduceMotion ? 0 : delay },
   });
 
-  // Nothing to show yet: skeleton while genuinely loading, otherwise a real
-  // error state (fetch failed, timed out, or the tribe isn't in the list) with
-  // Retry + Skip — never an eternal skeleton.
-  if (!suggested) {
+  // Nothing to place against: skeleton while the tribe list is genuinely loading,
+  // otherwise a real error state (fetch failed / timed out / empty). Only reached
+  // when we have NO tribe data at all — never an eternal skeleton. (With data but
+  // no suggested slug — e.g. Skip — we fall through to the all-seven picker.)
+  const hasTribes = tribes.length > 0;
+  if (!hasTribes) {
     if (tribesLoading && !timedOut) {
       return (
         <div className="space-y-4">
@@ -420,10 +434,11 @@ function ResultView({
           Couldn&apos;t load tribes
         </h1>
         <p className="mt-3 text-sm leading-relaxed text-text-secondary">
-          {tribesError || timedOut
-            ? 'We could not reach the server to load your tribe. Check your connection and try again.'
-            : 'Your tribe could not be matched. Try again, or skip for now.'}
+          We could not reach the server to load the tribes. Check your connection and try again.
         </p>
+        {/* Retry-only, by design: with no tribe list there is nothing to place
+            against, and we never proceed tribeless. There is no exit to the arena
+            from here — the user retries until the list loads. */}
         <div className="mt-auto pt-8">
           <div className="flex items-center gap-3">
             <button
@@ -441,14 +456,6 @@ function ResultView({
               Retry
             </button>
           </div>
-          <div className="mt-4 flex justify-center">
-            <Link
-              href="/onboard/preview"
-              className="rounded-full px-4 py-2 text-sm font-semibold text-text-secondary transition hover:text-text-primary"
-            >
-              Skip
-            </Link>
-          </div>
         </div>
       </div>
     );
@@ -456,7 +463,7 @@ function ResultView({
 
   return (
     <div className="flex flex-1 flex-col">
-      {!showAll && (
+      {!showAll && suggested && (
         <div>
           <m.p
             {...rise(0)}
@@ -509,7 +516,7 @@ function ResultView({
         </div>
       )}
 
-      {showAll && (
+      {(showAll || !suggested) && (
         <div>
           <h1 className="font-display text-2xl font-bold tracking-tight text-text-primary">
             Pick your tribe
@@ -543,26 +550,20 @@ function ResultView({
 
       {joinError && (
         <p role="alert" className="mt-4 text-sm text-danger-soft-fg">
-          Could not join that tribe. Try again, or skip.
+          Could not join that tribe. Try again.
         </p>
       )}
 
+      {/* No tribeless exit from the result flow — Back returns to the quiz; the
+          only way forward is picking a tribe (or the suggested "Lock in"). */}
       <div className="mt-auto pt-8">
-        <div className="flex items-center gap-3">
-          <button
-            type="button"
-            onClick={onBack}
-            className="rounded-full border border-ink-300 px-5 py-3 text-sm font-semibold text-text-secondary transition hover:border-brand hover:text-text-primary"
-          >
-            Back
-          </button>
-          <Link
-            href="/onboard/preview"
-            className="flex-1 rounded-full px-4 py-3 text-center text-sm font-semibold text-text-secondary transition hover:text-text-primary"
-          >
-            Skip
-          </Link>
-        </div>
+        <button
+          type="button"
+          onClick={onBack}
+          className="rounded-full border border-ink-300 px-5 py-3 text-sm font-semibold text-text-secondary transition hover:border-brand hover:text-text-primary"
+        >
+          Back
+        </button>
       </div>
     </div>
   );

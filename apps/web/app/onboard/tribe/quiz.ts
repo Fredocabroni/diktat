@@ -515,10 +515,27 @@ function branchFor(a: string, b: string): TiebreakKey | null {
   return null;
 }
 
+interface Ranked {
+  readonly slug: string;
+  readonly d2: number;
+}
+
+/**
+ * Rank comparator: nearest tribe first. EXACT d² ties are broken by ascending
+ * slug — an explicit, TRIBE_TARGETS-order-independent rule, so reordering the
+ * targets can never silently change a tie outcome. `p.d2 - q.d2` is 0 (falsy)
+ * only on bit-exact equality, so the slug key fires only on a genuine tie.
+ */
+export function compareByDistance(p: Ranked, q: Ranked): number {
+  return p.d2 - q.d2 || p.slug.localeCompare(q.slug);
+}
+
 /**
  * Resolve the 12 core answers (option indices, in CORE_QUESTIONS order) into a
  * placement decision. Missing/out-of-range answers are ignored. Returns `branch`
  * so the UI knows which runoff to run next; the 7-way resolution never re-runs.
+ * Total: any input (empty, sparse, out-of-range, overlong) yields exactly one
+ * valid tribe as `best`; it never returns null/undefined or throws.
  */
 export function resolveCore(answers: readonly number[]): CoreResolution {
   const raw: Record<Axis, number> = { ECON: 0, SOCIAL: 0, ESTAB: 0, STATE: 0, NATION: 0 };
@@ -534,7 +551,7 @@ export function resolveCore(answers: readonly number[]): CoreResolution {
   const ranked = TRIBE_TARGETS.map((t) => ({
     slug: t.slug,
     d2: AXES.reduce((sum, axis) => sum + WEIGHT[axis] * (v[axis] - t[axis]) ** 2, 0),
-  })).sort((p, q) => p.d2 - q.d2);
+  })).sort(compareByDistance);
 
   const best = ranked[0]!;
   const second = ranked[1]!;

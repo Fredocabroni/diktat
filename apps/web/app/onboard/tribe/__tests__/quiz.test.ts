@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -7,9 +9,12 @@ import {
   TIEBREAK_BANKS,
   TRIBE_TARGETS,
   type TiebreakKey,
+  compareByDistance,
   resolveCore,
   resolveTiebreak,
 } from '../quiz.js';
+
+const VALID_SLUGS = new Set(TRIBE_TARGETS.map((t) => t.slug));
 
 // Canonical self-placement — the §7 verification, rev 3 (graduated ECON + the
 // illegitimacy-not-corruption Q12). Coordinates are re-derived as each tribe's
@@ -154,5 +159,120 @@ describe('structural invariants', () => {
 
   it('exposes the forced-choice intro line', () => {
     expect(QUIZ_INTRO).toMatch(/closest to your view/i);
+  });
+});
+
+describe('exact-tie tie-break is explicit (ascending slug, not array order)', () => {
+  it('equal d² orders by ascending slug', () => {
+    expect(
+      compareByDistance({ slug: 'socialist', d2: 1 }, { slug: 'liberal', d2: 1 }),
+    ).toBeGreaterThan(0);
+    expect(
+      compareByDistance({ slug: 'liberal', d2: 1 }, { slug: 'socialist', d2: 1 }),
+    ).toBeLessThan(0);
+    expect(compareByDistance({ slug: 'liberal', d2: 1 }, { slug: 'liberal', d2: 1 })).toBe(0);
+  });
+
+  it('distance dominates when d² differ (nearer wins regardless of slug)', () => {
+    expect(compareByDistance({ slug: 'aaa', d2: 0.5 }, { slug: 'zzz', d2: 0.6 })).toBeLessThan(0);
+    expect(compareByDistance({ slug: 'zzz', d2: 0.5 }, { slug: 'aaa', d2: 0.6 })).toBeLessThan(0);
+  });
+
+  it('a tie sorts deterministically by slug, independent of input order', () => {
+    const tied = [
+      { slug: 'socialist', d2: 1 },
+      { slug: 'liberal', d2: 1 },
+      { slug: 'progressive', d2: 1 },
+    ];
+    const forward = [...tied].sort(compareByDistance).map((x) => x.slug);
+    const reversed = [...tied]
+      .reverse()
+      .sort(compareByDistance)
+      .map((x) => x.slug);
+    expect(forward).toEqual(['liberal', 'progressive', 'socialist']);
+    expect(reversed).toEqual(['liberal', 'progressive', 'socialist']);
+  });
+});
+
+describe('totality — resolveCore always yields exactly one valid tribe, never throws', () => {
+  const inputs: Array<{ name: string; answers: number[] }> = [
+    { name: 'empty', answers: [] },
+    { name: 'all midpoints', answers: Array(12).fill(1) },
+    { name: 'out-of-range high', answers: Array(12).fill(9) },
+    { name: 'negative indices', answers: Array(12).fill(-1) },
+    { name: 'overlong', answers: Array(30).fill(1) },
+    { name: 'too short', answers: [0, 1] },
+    { name: 'mixed invalid', answers: [0, 99, -3, 2, 1, 0, 2, 1, 5, 0, 1, 0] },
+  ];
+  for (const { name, answers } of inputs) {
+    it(`${name} → one valid tribe + exactly one downstream outcome`, () => {
+      const r = resolveCore(answers);
+      expect(VALID_SLUGS.has(r.best)).toBe(true);
+      expect(VALID_SLUGS.has(r.runnerUp)).toBe(true);
+      const active = [r.confident, r.branch !== null, r.showOverride].filter(Boolean).length;
+      expect(active).toBe(1);
+    });
+  }
+
+  it('sparse array (holes) is ignored and still resolves', () => {
+    const sparse: number[] = [];
+    sparse[0] = 0;
+    sparse[11] = 1;
+    expect(VALID_SLUGS.has(resolveCore(sparse).best)).toBe(true);
+  });
+
+  it('a 2000-case deterministic fuzz sweep never throws and always yields a valid best', () => {
+    let seed = 0x2545f491;
+    const next = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff);
+    for (let i = 0; i < 2000; i++) {
+      const len = next() % 16;
+      const answers = Array.from({ length: len }, () => (next() % 8) - 2); // -2..5, incl out-of-range
+      const r = resolveCore(answers);
+      expect(VALID_SLUGS.has(r.best)).toBe(true);
+      const active = [r.confident, r.branch !== null, r.showOverride].filter(Boolean).length;
+      expect(active).toBe(1);
+    }
+  });
+});
+
+describe('totality — resolveTiebreak always returns a slug in the pair, never throws', () => {
+  const banks = Object.keys(TIEBREAK_BANKS) as TiebreakKey[];
+  for (const branch of banks) {
+    const pair = new Set(TIEBREAK_BANKS[branch].pair);
+    const [a] = TIEBREAK_BANKS[branch].pair;
+    const cases: number[][] = [[], [9, 9], [-1, -1], [0, 1, 2, 3], [0]];
+    for (const answers of cases) {
+      it(`${branch} with ${JSON.stringify(answers)} → a slug in the pair`, () => {
+        expect(pair.has(resolveTiebreak(branch, answers, a))).toBe(true);
+      });
+    }
+    it(`${branch} with an out-of-pair coreBest on a 0-0 tie still returns a pair member`, () => {
+      expect(pair.has(resolveTiebreak(branch, [], 'not-a-real-tribe'))).toBe(true);
+    });
+  }
+});
+
+describe('no tribeless exit — the flow never navigates to the arena without a tribe', () => {
+  // Source-level guard (the web test env is node-only, no React renderer). The
+  // ONLY legitimate navigation to /onboard/preview is the post-join success push;
+  // any `href="/onboard/preview"` would be a Link that proceeds without joining a
+  // tribe (the error-state Skip we removed). Assert none exist.
+  const pageSource = readFileSync(new URL('../page.tsx', import.meta.url), 'utf8');
+
+  it('has no <Link>/href navigation to onboarding-exit that bypasses join', () => {
+    expect(pageSource).not.toMatch(/href=["']\/onboard\/preview["']/);
+  });
+
+  it('the single /onboard/preview reference is the post-join success push', () => {
+    const refs = pageSource.match(/onboard\/preview/g) ?? [];
+    expect(refs).toHaveLength(1);
+    expect(pageSource).toMatch(
+      /onSuccess:\s*\(\)\s*=>\s*router\.push\(['"]\/onboard\/preview['"]\)/,
+    );
+  });
+
+  it('the error state is retry-only (no "skip" affordance in its copy)', () => {
+    // The removed error-state escape had a Skip; its copy no longer offers one.
+    expect(pageSource).not.toMatch(/Try again, or skip/i);
   });
 });
