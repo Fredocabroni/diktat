@@ -1,4 +1,4 @@
-import { makeAlerter } from '@diktat/shared';
+import { makeAlerter } from '@diktat/shared/alerts';
 import cors from '@fastify/cors';
 import { fastifyTRPCPlugin, type FastifyTRPCPluginOptions } from '@trpc/server/adapters/fastify';
 import Fastify from 'fastify';
@@ -140,7 +140,18 @@ const alerter = makeAlerter({
   onFailure: ({ status, severity }) =>
     app.log.warn({ event: 'telegram_alert_failed', status, severity }, 'telegram alert failed'),
 });
-app.log.info({ event: 'alerts.telegram', enabled: alerter.enabled }, 'telegram alerts');
+// hasToken/hasChatId (booleans only — no credential values) make a "set one but
+// not both" misconfiguration visible in the boot log instead of silently
+// disabled.
+app.log.info(
+  {
+    event: 'alerts.telegram',
+    enabled: alerter.enabled,
+    hasToken: Boolean(env.TELEGRAM_BOT_TOKEN),
+    hasChatId: Boolean(env.TELEGRAM_CHAT_ID),
+  },
+  'telegram alerts',
+);
 
 await app.register(cors, {
   origin: (origin, cb) => {

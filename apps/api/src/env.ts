@@ -63,7 +63,16 @@ const envSchema = z.object({
   // no-op — boot never fails on a missing token. Set BOTH on the Railway
   // diktat-api service to turn on 🔴 tRPC-error alerts.
   TELEGRAM_BOT_TOKEN: z.string().optional(),
-  TELEGRAM_CHAT_ID: z.string().optional(),
+  // Chat id: a signed integer (user/group) or an @channelusername. Validated at
+  // boot so a malformed value fails loudly here rather than silently 400ing every
+  // sendMessage at runtime (which the alerter's catch would swallow).
+  TELEGRAM_CHAT_ID: z
+    .string()
+    .regex(
+      /^(-?\d+|@[A-Za-z][A-Za-z0-9_]{4,})$/,
+      'TELEGRAM_CHAT_ID must be a numeric id or @channelusername',
+    )
+    .optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;

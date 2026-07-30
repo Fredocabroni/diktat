@@ -134,43 +134,50 @@ export function makeAlerter(cfg: AlerterConfig = {}): Alerter {
       if (!enabled) return;
       const t = now();
 
-      // Dedup: one bug = one alert per window.
+      // --- Synchronous critical section: mutate all shared counters here, with
+      // NO `await` in between, so concurrent alert() microtasks can't interleave
+      // across a yield and race past the rate cap. Only network posts (below)
+      // await, and by then no shared state is touched.
       if (opts?.dedupKey) {
         const ttl = opts.dedupTtlMs ?? dedupTtlDefault;
         const last = lastSent.get(opts.dedupKey);
         if (last !== undefined && t - last < ttl) return;
         lastSent.set(opts.dedupKey, t);
-        if (lastSent.size > 1000) {
-          for (const [k, v] of lastSent) if (t - v > ttl) lastSent.delete(k);
-        }
       }
 
-      // Rate window: on rollover, emit one summary if we suppressed anything.
+      // Window rollover: capture a suppression count to report, reset the window,
+      // and prune expired dedup entries HERE (once per window) rather than on
+      // every insert — bounds the eviction cost to the rollover cadence.
+      let summaryCount = 0;
       if (t - windowStart > rateWindowMs) {
-        const prev = suppressed;
+        summaryCount = suppressed;
         windowStart = t;
         windowCount = 0;
         suppressed = 0;
-        if (prev > 0) {
-          await post(
-            `${EMOJI.warn} <b>alerts suppressed</b>\n${prev} alert(s) rate-limited in the last window`,
-            'warn',
-          );
-        }
+        for (const [k, v] of lastSent) if (t - v > dedupTtlDefault) lastSent.delete(k);
       }
+
       if (windowCount >= rateMax) {
         suppressed += 1;
         onFailure({ status: 'rate_limited', severity });
         return;
       }
       windowCount += 1;
+      if (summaryCount > 0) windowCount += 1; // the summary itself counts toward the window
 
       // Pre-slice raw detail to bound work, escape, assemble, then clamp so the
       // final HTML can't exceed the limit or end on a partial entity/tag.
-      const body = `${EMOJI[severity]} <b>${escapeHtml(title)}</b>\n${escapeHtml(
-        detail.slice(0, TELEGRAM_MAX),
-      )}`;
-      await post(clampToTelegram(body), severity);
+      const text = clampToTelegram(
+        `${EMOJI[severity]} <b>${escapeHtml(title)}</b>\n${escapeHtml(detail.slice(0, TELEGRAM_MAX))}`,
+      );
+      // --- End critical section; only awaited network posts below.
+      if (summaryCount > 0) {
+        await post(
+          `${EMOJI.warn} <b>alerts suppressed</b>\n${summaryCount} alert(s) rate-limited in the last window`,
+          'warn',
+        );
+      }
+      await post(text, severity);
     } catch {
       // alert() must NEVER throw — swallow anything unexpected.
     }
