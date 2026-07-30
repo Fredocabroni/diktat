@@ -273,126 +273,54 @@ export const debatesRouter = router({
       }),
     )
     .mutation(async ({ ctx, input }) => {
-      // 1. Verdict round must be in awaiting_final_vote and within window.
-      const { data: verdictRound, error: vrErr } = await ctx.db
-        .from('battle_rounds')
-        .select('id, payload, deadline_at')
-        .eq('battle_id', input.battleId)
-        .eq('round_no', VERDICT_ROUND_NO)
-        .maybeSingle<RoundShape>();
-      if (vrErr) {
-        throw new TRPCError({
-          code: 'INTERNAL_SERVER_ERROR',
-          message: 'Failed to read verdict round.',
-          cause: vrErr,
-        });
-      }
-      if (!verdictRound) {
-        throw new TRPCError({
-          code: 'BAD_REQUEST',
-          message: 'Voting is not yet open for this debate.',
-        });
-      }
-      if (roundState(verdictRound.payload) !== 'awaiting_final_vote') {
-        throw new TRPCError({ code: 'BAD_REQUEST', message: 'Voting window is closed.' });
-      }
-      if (verdictRound.deadline_at && new Date(verdictRound.deadline_at).getTime() <= Date.now()) {
-        throw new TRPCError({ code: 'BAD_REQUEST', message: 'Voting window has expired.' });
-      }
-
-      // 2. Voter must NOT be a participant; vote_for_user_id MUST be one.
-      const { data: parts, error: pErr } = await ctx.db
-        .from('battle_participants')
-        .select('user_id')
-        .eq('battle_id', input.battleId);
-      if (pErr) {
-        throw new TRPCError({
-          code: 'INTERNAL_SERVER_ERROR',
-          message: 'Failed to read participants.',
-          cause: pErr,
-        });
-      }
-      const participantIds = new Set((parts ?? []).map((p) => p.user_id));
-      if (participantIds.has(ctx.userId!)) {
-        throw new TRPCError({
-          code: 'FORBIDDEN',
-          message: 'Participants cannot vote on their own debate.',
-        });
-      }
-      if (!participantIds.has(input.voteForUserId)) {
-        throw new TRPCError({
-          code: 'BAD_REQUEST',
-          message: 'vote_for_user_id is not a participant in this debate.',
-        });
-      }
-
-      // 3. Snapshot voter's AP and insert. Unique (battle_id, voter_user_id)
-      //    blocks duplicate votes at the DB.
-      const { data: voterRow, error: uErr } = await ctx.db
-        .from('users')
-        .select('current_ap')
-        .eq('id', ctx.userId!)
-        .maybeSingle<{ current_ap: number }>();
-      if (uErr || !voterRow) {
-        throw new TRPCError({
-          code: 'INTERNAL_SERVER_ERROR',
-          message: 'Failed to read voter AP.',
-          cause: uErr,
-        });
-      }
-
-      const { data, error } = await ctx.db
-        .from('debate_votes')
-        .insert({
-          battle_id: input.battleId,
-          voter_user_id: ctx.userId!,
-          vote_for_user_id: input.voteForUserId,
-          ap_at_vote_time: voterRow.current_ap,
-        })
-        .select('id')
-        .maybeSingle();
+      // Votes route through the SECURITY DEFINER `cast_debate_vote` RPC (#114).
+      // The RPC snapshots `ap_at_vote_time` from `users.current_ap` server-side —
+      // the decisive AP-weighted tally weight is therefore unforgeable — and
+      // enforces the open votable round (payload state), the deadline, and
+      // participation atomically. There is no direct `debate_votes` insert path
+      // anymore (`debate_votes_insert_self` dropped in migration 20260730120000),
+      // so this thin wrapper is the only writer. We map the RPC's raised SQLSTATEs
+      // to the same user-facing errors the previous resolver-side checks returned.
+      const { data, error } = await ctx.db.rpc('cast_debate_vote', {
+        p_battle_id: input.battleId,
+        p_vote_for_user_id: input.voteForUserId,
+      });
       if (error) {
-        if (error.code === '23505') {
-          throw new TRPCError({
-            code: 'CONFLICT',
-            message: 'You have already voted on this debate.',
-          });
+        switch (error.code) {
+          case 'DK003': // no round in 'awaiting_final_vote'
+            throw new TRPCError({
+              code: 'BAD_REQUEST',
+              message: 'Voting is not yet open for this debate.',
+            });
+          case 'DK004': // deadline passed
+            throw new TRPCError({ code: 'BAD_REQUEST', message: 'Voting window has expired.' });
+          case 'DK001': // voter is a participant
+            throw new TRPCError({
+              code: 'FORBIDDEN',
+              message: 'Participants cannot vote on their own debate.',
+            });
+          case 'DK002': // vote_for is not a participant
+            throw new TRPCError({
+              code: 'BAD_REQUEST',
+              message: 'vote_for_user_id is not a participant in this debate.',
+            });
+          case '23505': // unique (battle_id, voter_user_id) — already voted
+            throw new TRPCError({
+              code: 'CONFLICT',
+              message: 'You have already voted on this debate.',
+            });
+          default:
+            throw new TRPCError({
+              code: 'INTERNAL_SERVER_ERROR',
+              message: 'Failed to save vote.',
+              cause: error,
+            });
         }
-        // DK001 / DK002 are the DB-layer TOCTOU backstop for the two
-        // participant invariants checked resolver-side in step 2 — the
-        // BEFORE INSERT trigger on debate_votes (migration
-        // 20260622141706) fires the same predicates atomically with the
-        // insert. Wire messages stay byte-identical to step 2's so a
-        // race that the resolver narrowly missed is reported as the
-        // same user-facing error rather than a generic 500.
-        if (error.code === 'DK001') {
-          throw new TRPCError({
-            code: 'FORBIDDEN',
-            message: 'Participants cannot vote on their own debate.',
-          });
-        }
-        if (error.code === 'DK002') {
-          throw new TRPCError({
-            code: 'BAD_REQUEST',
-            message: 'vote_for_user_id is not a participant in this debate.',
-          });
-        }
-        throw new TRPCError({
-          code: 'INTERNAL_SERVER_ERROR',
-          message: 'Failed to save vote.',
-          cause: error,
-        });
       }
-      // `voterRow.current_ap` is the authoritative AP snapshot and is
-      // written to `ap_at_vote_time` above; do NOT echo it back on the
-      // wire. Returning the caller's authoritative AP turned every vote
-      // into an oracle a stale client could use to refresh its cached
-      // balance from the server. The visible "weight" chip in
-      // VotePanel.tsx reads `ap_at_vote_time` off the votes list
-      // returned by `debates.getBattle`, not off this mutation's
-      // response — no UI consumer reads `apWeight`. PR #62 round-3
-      // MEDIUM-2 disclosure pass.
-      return { ok: true, voteId: data?.id };
+      // The RPC returns the new vote id (uuid). Do NOT echo the AP snapshot —
+      // it's never returned by the RPC, closing the balance-oracle vector the
+      // prior resolver called out (PR #62 round-3 MEDIUM-2).
+      return { ok: true, voteId: (data as string | null) ?? undefined };
     }),
 });
 
