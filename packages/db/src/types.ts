@@ -1318,8 +1318,6 @@ export type Database = {
         Returns: Json;
       };
       bump_last_active: { Args: never; Returns: string };
-      // Manually added ahead of `supabase gen types` regen (migration
-      // 20260730120000). Regenerate after the migration applies to prod.
       cast_debate_vote: {
         Args: { p_battle_id: string; p_vote_for_user_id: string };
         Returns: string;
@@ -1382,7 +1380,20 @@ export type Database = {
         }[];
       };
       increment_take5_progress: { Args: { p_user_id: string }; Returns: Json };
+      is_battle_open_debate_observable: {
+        Args: { p_battle_id: string };
+        Returns: boolean;
+      };
       is_self: { Args: { target_user_id: string }; Returns: boolean };
+      place_prediction: {
+        Args: {
+          p_ap_stake: number;
+          p_direction: string;
+          p_market_external_id?: string;
+          p_topic_id: string;
+        };
+        Returns: string;
+      };
       set_user_timezone: { Args: { p_tz: string }; Returns: string };
       submit_trivia_answer: {
         Args: {

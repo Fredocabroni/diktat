@@ -23,11 +23,31 @@ A Gen Z political news + debate PWA. "TikTok meets Duolingo meets Reuters raised
 - Enter plan mode for any multi-file change. Get approval before execution unless the scope is clearly a single bounded fix.
 - Use the `explore` subagent for any unknown area of the repo.
 - Use the `schema-reviewer` subagent before any migration touches.
+- Economy-touching writes go through `SECURITY DEFINER` RPCs, never client `*_insert_self` RLS — see [Data writes: RLS vs SECURITY DEFINER RPC](#data-writes-rls-vs-security-definer-rpc).
 - Never use sed, heredoc, or shell redirects to edit files. Use the edit tools only.
 - Commit in atomic units with conventional commits. Feature branches only. Never push to `main`.
 - Session logs via the `session-recap` skill at end of every multi-hour session.
 - When touching anything user-facing, run `copy-linter` subagent.
 - When designing mechanics, run `addiction-auditor` subagent.
+
+## Data writes: RLS vs SECURITY DEFINER RPC
+
+**Rule.** Any write whose validity depends on an invariant RLS cannot express goes through a `SECURITY DEFINER` RPC — never a client-side `*_insert_self` INSERT policy. A `*_insert_self` policy is reserved for rows whose validity is _fully_ expressible in its `with check` (ownership + simple column predicates, e.g. `is_self(user_id) and status='open'`).
+
+A `with check` **cannot** express: an atomic debit/credit of `current_ap`; a value that must be snapshotted from server-read state rather than trusted from the client; an eligibility / deadline / round-state gate; or a trigger-driven economy side-effect. When any of those is coupled to the write, the RLS `with check` is bypassable — a normal user's JWT can `POST` straight to PostgREST and skip whatever the tRPC does. Move the write behind an RPC that derives the actor from `auth.uid()`, reads authoritative state server-side, and enforces the invariant in one transaction; drop the `*_insert_self` policy so the RPC is the only writer; `set search_path = ''`, `revoke` from `public`, `grant execute` to `authenticated` (+ `service_role`).
+
+**Reference implementations (evidence this is a pattern, not a one-off):**
+
+- **H3** — `predictions_insert_self` (un-debited stake) → atomic `place_prediction` RPC (`FOR UPDATE` debit + balance check + ledger row). Migration `20260729120000`, PR #107.
+- **#114** — `debate_votes_insert_self` (client-forgeable `ap_at_vote_time`, the _decisive_ AP-weighted tally weight) → `cast_debate_vote` RPC (server-read AP snapshot + round-state / deadline / participation). Migration `20260730120000`.
+- **#115** — audit backlog of the remaining coupled-invariant `*_insert_self` policies (`debate_args`, `opinion_shifts`, and `bp` — H3-shaped the day `entry_ap` becomes a real stake). Inert `*_insert_self` policies (`user_push_subscriptions`, `sessions`) are fine as-is.
+
+**Repeatable sweep — re-run this after adding any table or insert policy.** #114 was not spotted ad hoc; it fell out of sweeping the H3 shape across every table. To repeat:
+
+1. Enumerate every client insert policy: `grep -rniE "create policy .* for insert to (authenticated|anon)" supabase/migrations/*.sql`.
+2. For each, read its `with check`. If it's `is_self(...)`-only (or ownership + trivial predicates), ask: **does an accepted row drive a coupled state change RLS can't validate?** — an AP debit/credit, a server-authoritative value the client here controls (`ap_at_vote_time`, `entry_ap`, …), an eligibility/deadline/state gate, or an `AFTER INSERT` trigger with an economy effect (e.g. `opinion_shifts` → Take-5 streak progress).
+3. If yes → it's H3-shaped: fix it (RPC + drop policy) or file it. If the row is inert → the policy is fine as-is.
+4. Confirm the tRPC is not the _only_ guard: a check that lives solely in the resolver is bypassable while the RLS insert path is open.
 
 ## Build / debugging discipline
 
