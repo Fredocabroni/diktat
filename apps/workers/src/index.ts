@@ -198,7 +198,18 @@ async function main(): Promise<void> {
     // never wedge on a stuck settlement.
     const force = setTimeout(() => {
       logger.warn({ event: 'workers.shutdown.forced', signal });
-      process.exit(0);
+      // 🟡 The 12s drain didn't complete — an in-flight settle may be exactly the
+      // case C1 hardened against. Expected-but-consequential, so warn severity.
+      // Await the alert (bounded by its 5s POST timeout) so it's visible before we
+      // hard-exit; a fire-and-forget POST would die with the process.
+      void alerter
+        .alert(
+          'warn',
+          'workers shutdown forced',
+          `signal=${signal} · drain exceeded ${SHUTDOWN_MAX_MS}ms`,
+          { dedupKey: 'workers:shutdown_forced' },
+        )
+        .finally(() => process.exit(0));
     }, SHUTDOWN_MAX_MS);
     void Promise.all([battlePoller.stop(), listener.stop()]).finally(() => {
       clearTimeout(force);
