@@ -1,13 +1,19 @@
 // Tribe placement quiz. A short set of concrete-tradeoff questions places the
 // user into the tribe they lean toward (see docs/TRIBE_OVERHAUL_PLAN.md). When the
 // answers land in an ambiguous nearest-two pair a short tie-breaker runs;
-// otherwise the result leads with the nearest tribe. Everyone ends up in a tribe:
-// "Skip" opens the all-seven manual picker (never a tribeless exit), and the
-// picker is terminal — its only way forward is choosing one. The quiz itself stays
-// optional (skip = pick your own without answering), consistent with the spirit of
-// ADDICTION_ARCHITECTURE §11. There is NO tribeless path out: the tribes-unavailable
-// error state is retry-only (no exit to the arena), and the only navigation away is
-// the post-join success push. A test guards that no `href` here leaves tribeless.
+// otherwise the result leads with the nearest tribe. Scope note: "no tribeless
+// exit" below applies to THIS QUIZ FLOW only — once you enter the quiz, every path
+// ends in a tribe. "Skip" here opens the all-seven manual picker (never a tribeless
+// exit), and the picker is terminal — its only way forward is choosing one. The
+// tribes-unavailable error state is retry-only (no exit to the arena), and the only
+// navigation away is the post-join success push. A test guards that no `href` here
+// leaves tribeless.
+//
+// This does NOT make a tribe mandatory app-wide. The PRIOR screen (onboard/welcome)
+// offers "Skip for now", which completes onboarding with NO tribe — the sanctioned
+// ADDICTION_ARCHITECTURE §11 opt-out (no forced choice). So onboarded-without-a-tribe
+// is a VALID state; the quiz flow simply never dead-ends someone tribeless once
+// they've chosen to take it.
 //
 // Flow (v2): select an option (it locks in visibly), then Next. Back re-opens the
 // previous question with its choice restored and recomputes from there — answers
@@ -185,9 +191,11 @@ function TribeQuiz() {
     join.mutate({ tribeId: tribe.id });
   }
 
-  // Skip routes to the all-seven manual picker (not out of onboarding tribeless):
-  // no one reaches the arena without a tribe. The picker itself is terminal — its
-  // only way forward is picking one.
+  // Skip routes to the all-seven manual picker (not out of the QUIZ tribeless):
+  // once in the quiz flow, no path leaves without a tribe. (App-wide, the
+  // welcome-screen "Skip for now" is the sanctioned §11 tribeless opt-out — see
+  // the header note.) The picker itself is terminal — its only way forward is
+  // picking one.
   function skipToPicker() {
     setDir(1);
     setPhase({ kind: 'result', slug: '', showAll: true, origin: { kind: 'core' } });
