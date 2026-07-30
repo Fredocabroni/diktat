@@ -58,6 +58,12 @@ const envSchema = z.object({
     ),
 
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+
+  // Telegram alerting (optional). When either is unset the alerter is a silent
+  // no-op — boot never fails on a missing token. Set BOTH on the Railway
+  // diktat-api service to turn on 🔴 tRPC-error alerts.
+  TELEGRAM_BOT_TOKEN: z.string().optional(),
+  TELEGRAM_CHAT_ID: z.string().optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;

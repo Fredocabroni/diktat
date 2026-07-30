@@ -1,3 +1,4 @@
+import { makeAlerter } from '@diktat/shared';
 import cors from '@fastify/cors';
 import { fastifyTRPCPlugin, type FastifyTRPCPluginOptions } from '@trpc/server/adapters/fastify';
 import Fastify from 'fastify';
@@ -130,6 +131,17 @@ app.log.info(
   'diktat-api booting',
 );
 
+// Telegram alerter for 🔴 server-error alerts (see onError below). No-op when
+// TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID are unset. onFailure logs a coarse
+// status ONLY — the alerter never hands us the token or the request URL.
+const alerter = makeAlerter({
+  botToken: env.TELEGRAM_BOT_TOKEN,
+  chatId: env.TELEGRAM_CHAT_ID,
+  onFailure: ({ status, severity }) =>
+    app.log.warn({ event: 'telegram_alert_failed', status, severity }, 'telegram alert failed'),
+});
+app.log.info({ event: 'alerts.telegram', enabled: alerter.enabled }, 'telegram alerts');
+
 await app.register(cors, {
   origin: (origin, cb) => {
     if (!origin) return cb(null, true);
@@ -238,15 +250,32 @@ await app.register(fastifyTRPCPlugin, {
       // subfields are stripped by the Pino `redact` config above. The
       // `code` (e.g. `42501`, `PGRST202`) is not redacted: it is the
       // diagnostic needle for DB grant/migration failures and is PII-free.
+      const causeCode = (error.cause as { code?: string } | undefined)?.code;
       app.log.error(
         {
           code: error.code,
-          causeCode: (error.cause as { code?: string } | undefined)?.code,
+          causeCode,
           path,
           message: error.message,
         },
         'tRPC error',
       );
+
+      // 🔴 alert on SERVER faults only — client-fault codes (rate-limit, bad
+      // input, auth, not-found) are expected noise, not incidents. Detail is
+      // PII-free by construction: path + tRPC code + the DB error code only
+      // (same redaction reasoning as the log above — never the message/rows).
+      // Fire-and-forget: alert() never throws, so a bad token can't break the
+      // error path. Dedup collapses a flapping endpoint to one alert / window.
+      if (error.code === 'INTERNAL_SERVER_ERROR') {
+        const where = path ?? '<no-path>';
+        void alerter.alert(
+          'error',
+          'API 500',
+          `${where} · ${error.code}${causeCode ? ` · db=${causeCode}` : ''}`,
+          { dedupKey: `api:${where}:${causeCode ?? error.code}` },
+        );
+      }
     },
   } satisfies FastifyTRPCPluginOptions<AppRouter>['trpcOptions'],
 });
