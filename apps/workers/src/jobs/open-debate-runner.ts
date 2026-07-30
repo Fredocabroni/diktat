@@ -27,6 +27,8 @@ import { battleId as toBattleId, userId as toUserId, type BattleMode } from '@di
 import type { invoke as fabricInvoke, ProviderEnv } from '@diktat/ai-fabric';
 import { z } from 'zod';
 
+import type { Alerter } from '@diktat/shared/alerts';
+
 import type { Logger } from '../logger.js';
 import type { ServiceClient } from '../supabase.js';
 
@@ -54,6 +56,7 @@ export type AiVerdict = z.infer<typeof VerdictSchema>;
 export interface OpenDebateRunnerDeps {
   readonly supabase: ServiceClient;
   readonly logger: Logger;
+  readonly alerter?: Alerter;
   readonly invoke: typeof fabricInvoke;
   readonly providerEnv?: ProviderEnv;
   readonly applyDraftsFn?: typeof applyDrafts;
@@ -158,10 +161,10 @@ export function runOpenDebate(battleId: string, deps: OpenDebateRunnerDeps): Run
         stop();
       }
     } catch (err) {
-      deps.logger.error({
-        event: 'open_debate.tick_failed',
-        battleId,
-        message: err instanceof Error ? err.message : String(err),
+      const message = err instanceof Error ? err.message : String(err);
+      deps.logger.error({ event: 'open_debate.tick_failed', battleId, message });
+      void deps.alerter?.alert('error', 'open debate tick failed', `${battleId} · ${message}`, {
+        dedupKey: `workers:battle:open_debate:${battleId}`,
       });
     } finally {
       busy = false;

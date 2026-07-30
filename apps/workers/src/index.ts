@@ -16,6 +16,7 @@ import {
   setCostSink,
   type ProviderEnv,
 } from '@diktat/ai-fabric';
+import { makeAlerter } from '@diktat/shared/alerts';
 import { Client as PgClient } from 'pg';
 
 import { loadEnv, privyReady, webPushReady, type Env } from './env.js';
@@ -32,11 +33,33 @@ const MATCHMAKE_TICK_MS = 1_000;
 const BATTLE_POLLER_TICK_MS = 5_000;
 const SCHEDULER_TICK_MS = 60_000; // ~1 min -- a committed due-row fires within the next minute.
 
+// Telegram alerter — constructed at module scope from RAW process.env (NOT the
+// validated env) so it is available even when loadEnv() throws on a bad var, and
+// so the fatal handlers below can alert on a boot crash. No-op when the token /
+// chat id are unset. onFailure logs a coarse status only (never the token/url).
+const alerter = makeAlerter({
+  botToken: process.env.TELEGRAM_BOT_TOKEN,
+  chatId: process.env.TELEGRAM_CHAT_ID,
+  onFailure: ({ status, severity }) =>
+    console.warn(JSON.stringify({ event: 'telegram_alert_failed', status, severity })),
+});
+
 async function main(): Promise<void> {
   const env = loadEnv();
   const logger = buildLogger(env);
 
   logger.info({ event: 'workers.boot', nodeEnv: env.NODE_ENV });
+
+  // 🟢 Positive boot confirmation, fired once right after env load. On a
+  // never-before-deployed service a silent no-op and a healthy start look
+  // identical; this proves the process came up AND the Telegram path works
+  // end-to-end. Fire-and-forget (the process keeps running).
+  void alerter.alert(
+    'info',
+    'workers booted',
+    `pid ${process.pid} · ${env.NODE_ENV} · alerts=${alerter.enabled}`,
+    { dedupKey: 'workers:boot' },
+  );
 
   // Wire the cross-process AI cost ledger first so any subsequent
   // ai-fabric invocations land on the shared sink. Hydrate the
@@ -75,10 +98,10 @@ async function main(): Promise<void> {
     Promise.all(
       MATCH_MODES.map((mode) =>
         runMatchmakingTick({ redis, supabase, logger }, { mode }).catch((err) => {
-          logger.error({
-            event: 'matchmake.tick_failed',
-            mode,
-            message: err instanceof Error ? err.message : String(err),
+          const message = err instanceof Error ? err.message : String(err);
+          logger.error({ event: 'matchmake.tick_failed', mode, message });
+          void alerter.alert('error', 'matchmake tick failed', `${mode} · ${message}`, {
+            dedupKey: `workers:tick:matchmake:${mode}`,
           });
         }),
       ),
@@ -101,6 +124,10 @@ async function main(): Promise<void> {
     logger,
     invoke: fabricInvoke,
     providerEnv: debateProviderEnv,
+    // Forwarded into the in-process runners so a battle.runner.failed /
+    // open_debate.tick_failed also 🔴-alerts (deduped per battle).
+    runnerDeps: { alerter },
+    openDebateRunnerDeps: { alerter },
   });
   let battlePollerBusy = false;
   const battlePollerInterval = setInterval(() => {
@@ -109,9 +136,10 @@ async function main(): Promise<void> {
     battlePoller
       .scanOnce()
       .catch((err) => {
-        logger.error({
-          event: 'battle.poller.scan_failed',
-          message: err instanceof Error ? err.message : String(err),
+        const message = err instanceof Error ? err.message : String(err);
+        logger.error({ event: 'battle.poller.scan_failed', message });
+        void alerter.alert('error', 'battle poller scan failed', message, {
+          dedupKey: 'workers:tick:poller',
         });
       })
       .finally(() => {
@@ -148,9 +176,10 @@ async function main(): Promise<void> {
       fetch: globalThis.fetch,
     })
       .catch((err) => {
-        logger.error({
-          event: 'scheduler.tick_failed',
-          message: err instanceof Error ? err.message : String(err),
+        const message = err instanceof Error ? err.message : String(err);
+        logger.error({ event: 'scheduler.tick_failed', message });
+        void alerter.alert('error', 'scheduler tick failed', message, {
+          dedupKey: 'workers:tick:scheduler',
         });
       })
       .finally(() => {
@@ -263,7 +292,28 @@ async function buildVapidSender(
   };
 }
 
-void main().catch((err) => {
-  console.error('[diktat-workers] fatal:', err);
+// Fatal-path handler shared by boot failure + uncaught errors. AWAITS the
+// Telegram POST before exit — a fire-and-forget alert would die with the
+// process, so a boot crash would otherwise be silent. Includes pid + uptime so
+// the <=5 restarts from restartPolicyMaxRetries are self-evidently one boot loop
+// rather than byte-identical spam. In-memory dedup can't span restarts (state
+// resets), so these are NOT deduped across processes by design — never-swallow
+// is prioritized over never-repeat; the loop is bounded and self-terminates.
+let fatalHandled = false;
+async function handleFatal(event: string, err: unknown): Promise<void> {
+  if (fatalHandled) process.exit(1);
+  fatalHandled = true;
+  const message = err instanceof Error ? err.message : String(err);
+  console.error(`[diktat-workers] fatal (${event}):`, err);
+  await alerter.alert(
+    'error',
+    'workers fatal',
+    `${event} · pid ${process.pid} · up ${process.uptime().toFixed(1)}s · ${message}`,
+  );
   process.exit(1);
-});
+}
+
+process.on('uncaughtException', (err) => void handleFatal('uncaughtException', err));
+process.on('unhandledRejection', (reason) => void handleFatal('unhandledRejection', reason));
+
+void main().catch((err) => handleFatal('boot', err));

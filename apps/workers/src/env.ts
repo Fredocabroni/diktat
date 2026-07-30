@@ -42,6 +42,15 @@ const envSchema = z.object({
   VAPID_PUBLIC_KEY: z.string().default(''),
   VAPID_PRIVATE_KEY: z.string().default(''),
   VAPID_SUBJECT: z.string().default(''),
+
+  // Telegram alerting (optional). Missing = alerter disabled — NEVER a boot
+  // failure. Kept lenient (plain optional strings, no regex, unlike the api's
+  // chat-id validation) precisely because the alerter is what REPORTS a boot
+  // failure: it must never itself crash boot. The alerter reads these from
+  // process.env directly (so it works even if this schema parse throws on some
+  // other var); they are listed here for completeness + documentation.
+  TELEGRAM_BOT_TOKEN: z.string().optional(),
+  TELEGRAM_CHAT_ID: z.string().optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;
