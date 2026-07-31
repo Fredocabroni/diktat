@@ -62,8 +62,8 @@ export type Env = z.infer<typeof envSchema>;
 // otherwise hard-fail a defaulted enum (NODE_ENV='' → Invalid enum) or an
 // optional regex at boot. '' == unset everywhere; a genuinely-required var that
 // is blank still errors as Required.
-function emptyToUndefined(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const out: NodeJS.ProcessEnv = {};
+function emptyToUndefined(source: NodeJS.ProcessEnv): Record<string, string | undefined> {
+  const out: Record<string, string | undefined> = {};
   for (const key of Object.keys(source)) {
     const v = source[key];
     out[key] = v === '' ? undefined : v;

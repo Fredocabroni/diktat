@@ -82,8 +82,8 @@ export type Env = z.infer<typeof envSchema>;
 // .default()/.optional() only fire on `undefined`, so a blank value would
 // otherwise hard-fail a defaulted field or the optional TELEGRAM_CHAT_ID regex
 // at boot. '' == unset; a genuinely-required var that is blank still errors.
-function emptyToUndefined(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const out: NodeJS.ProcessEnv = {};
+function emptyToUndefined(source: NodeJS.ProcessEnv): Record<string, string | undefined> {
+  const out: Record<string, string | undefined> = {};
   for (const key of Object.keys(source)) {
     const v = source[key];
     out[key] = v === '' ? undefined : v;
