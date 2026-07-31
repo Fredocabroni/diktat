@@ -9,6 +9,8 @@
 // listener uses pg LISTEN/NOTIFY directly and the cost sink uses
 // Upstash REST — both Redis-light, no broker required.
 
+import { pathToFileURL } from 'node:url';
+
 import {
   buildUpstashCostSink,
   hydrateLedgerFromSink,
@@ -324,7 +326,14 @@ async function handleFatal(event: string, err: unknown): Promise<void> {
   process.exit(1);
 }
 
-process.on('uncaughtException', (err) => void handleFatal('uncaughtException', err));
-process.on('unhandledRejection', (reason) => void handleFatal('unhandledRejection', reason));
+// Only auto-run when executed as the entrypoint — NOT when imported (the
+// postbuild assertion import()s this module to verify the dependency graph
+// resolves; it must not trigger loadEnv() / client construction / intervals /
+// process handlers). Module scope otherwise does nothing but construct the
+// (no-op-until-configured) alerter above.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  process.on('uncaughtException', (err) => void handleFatal('uncaughtException', err));
+  process.on('unhandledRejection', (reason) => void handleFatal('unhandledRejection', reason));
 
-void main().catch((err) => handleFatal('boot', err));
+  void main().catch((err) => handleFatal('boot', err));
+}
