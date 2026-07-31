@@ -749,4 +749,54 @@ describe('runBattle — crash safety (PR1: atomic settle + resume + drain)', () 
     expect(applyFn).toHaveBeenCalledTimes(1);
     expect(supa.battleStatus).toBe('settled');
   });
+
+  it('🔴-alerts via deps.alerter when the runner fails (PR B-lite crash hook)', async () => {
+    const supa = buildFakeSupabase({
+      participants: twoPlayers,
+      questions: QUESTIONS,
+      status: 'live',
+      preRounds: ALL_ROUNDS,
+      preAnswers: seedAnswers(),
+    });
+    const logger = buildLogger();
+    const applyFn = vi.fn().mockRejectedValue(new Error('boom-apply')); // settle throws
+    const alert = vi.fn().mockResolvedValue(undefined);
+
+    const handle = runBattle(BATTLE_ID, {
+      supabase: supa.client,
+      logger,
+      applyDraftsFn: applyFn as never,
+      alerter: { alert, enabled: true },
+      now: () => 1_700_000_000_000,
+    });
+    await handle.done;
+
+    expect(hasEvent(logger, 'battle.runner.failed')).toBe(true);
+    expect(alert).toHaveBeenCalledTimes(1);
+    const [severity, title, detail, opts] = alert.mock.calls[0]!;
+    expect(severity).toBe('error');
+    expect(title).toBe('battle runner failed');
+    expect(detail).toContain(BATTLE_ID);
+    expect(opts).toMatchObject({ dedupKey: `workers:battle:runner:${BATTLE_ID}` });
+  });
+
+  it('does not throw when no alerter is provided (optional dep)', async () => {
+    const supa = buildFakeSupabase({
+      participants: twoPlayers,
+      questions: QUESTIONS,
+      status: 'live',
+      preRounds: ALL_ROUNDS,
+      preAnswers: seedAnswers(),
+    });
+    const logger = buildLogger();
+    const applyFn = vi.fn().mockRejectedValue(new Error('boom-apply'));
+    const handle = runBattle(BATTLE_ID, {
+      supabase: supa.client,
+      logger,
+      applyDraftsFn: applyFn as never,
+      now: () => 1_700_000_000_000,
+    });
+    await expect(handle.done).resolves.toBeUndefined();
+    expect(hasEvent(logger, 'battle.runner.failed')).toBe(true);
+  });
 });

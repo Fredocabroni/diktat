@@ -22,6 +22,8 @@ import {
   type UserId,
 } from '@diktat/shared';
 
+import type { Alerter } from '@diktat/shared/alerts';
+
 import type { Logger } from '../logger.js';
 import type { ServiceClient } from '../supabase.js';
 
@@ -39,6 +41,7 @@ const BOT_ACCURACY_PER_TIER = 0.01;
 export interface BattleRunnerDeps {
   readonly supabase: ServiceClient;
   readonly logger: Logger;
+  readonly alerter?: Alerter;
   readonly applyDraftsFn?: typeof applyDrafts;
   readonly now?: () => number;
   readonly setTimeoutFn?: typeof setTimeout;
@@ -223,10 +226,10 @@ export function runBattle(battleId: string, deps: BattleRunnerDeps): RunningBatt
       });
       logger.info({ event: 'battle.runner.settled', battleId });
     } catch (err) {
-      logger.error({
-        event: 'battle.runner.failed',
-        battleId,
-        message: err instanceof Error ? err.message : String(err),
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error({ event: 'battle.runner.failed', battleId, message });
+      void deps.alerter?.alert('error', 'battle runner failed', `${battleId} · ${message}`, {
+        dedupKey: `workers:battle:runner:${battleId}`,
       });
     } finally {
       pendingTimeout = null;
