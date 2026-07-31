@@ -77,8 +77,22 @@ const envSchema = z.object({
 
 export type Env = z.infer<typeof envSchema>;
 
+// Treat empty-string env vars as absent. A platform can deliver a
+// declared-but-unset variable as '' rather than omitting it; Zod
+// .default()/.optional() only fire on `undefined`, so a blank value would
+// otherwise hard-fail a defaulted field or the optional TELEGRAM_CHAT_ID regex
+// at boot. '' == unset; a genuinely-required var that is blank still errors.
+function emptyToUndefined(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const key of Object.keys(source)) {
+    const v = source[key];
+    out[key] = v === '' ? undefined : v;
+  }
+  return out;
+}
+
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
-  const parsed = envSchema.safeParse(source);
+  const parsed = envSchema.safeParse(emptyToUndefined(source));
   if (!parsed.success) {
     const formatted = parsed.error.issues
       .map((i) => `  - ${i.path.join('.')}: ${i.message}`)
