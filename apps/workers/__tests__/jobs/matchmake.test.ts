@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
-import { enqueueUser, runMatchmakingTick, type UpstashLike } from '../../src/jobs/matchmake.js';
+import {
+  enqueueUser,
+  nextMatchmakeDelayMs,
+  runMatchmakingTick,
+  type TickResult,
+  type UpstashLike,
+} from '../../src/jobs/matchmake.js';
 import type { Logger } from '../../src/logger.js';
 import type { ServiceClient } from '../../src/supabase.js';
 
@@ -288,5 +294,37 @@ describe('runMatchmakingTick', () => {
     expect(result.matchesCreated).toBe(0);
     expect(result.botFallbacks).toBe(0);
     expect(supabase.battlesInserted).toEqual([]);
+  });
+});
+
+describe('nextMatchmakeDelayMs — idle backoff cadence', () => {
+  const opts = { activeMs: 1_000, idleMs: 30_000 };
+  const tick = (scanned: number): TickResult => ({
+    scanned,
+    matchesCreated: 0,
+    botFallbacks: 0,
+    errors: 0,
+  });
+
+  it('polls fast (activeMs) when any mode scanned a waiting user', () => {
+    expect(nextMatchmakeDelayMs([tick(0), tick(2)], opts)).toBe(1_000);
+  });
+
+  it('backs off (idleMs) when every mode was empty', () => {
+    expect(nextMatchmakeDelayMs([tick(0), tick(0)], opts)).toBe(30_000);
+  });
+
+  it('backs off (idleMs) when every mode errored (null result)', () => {
+    // A null is a thrown tick (e.g. Upstash over quota) — treated as idle so a
+    // failing Redis backs the poll off instead of hammering at 1s.
+    expect(nextMatchmakeDelayMs([null, null], opts)).toBe(30_000);
+  });
+
+  it('polls fast when one mode errored but the other scanned a waiter', () => {
+    expect(nextMatchmakeDelayMs([null, tick(1)], opts)).toBe(1_000);
+  });
+
+  it('backs off on an empty result set', () => {
+    expect(nextMatchmakeDelayMs([], opts)).toBe(30_000);
   });
 });

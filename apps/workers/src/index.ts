@@ -23,7 +23,12 @@ import { Client as PgClient } from 'pg';
 
 import { loadEnv, privyReady, webPushReady, type Env } from './env.js';
 import { buildBattlePoller } from './jobs/battle-poller.js';
-import { MATCH_MODES, runMatchmakingTick } from './jobs/matchmake.js';
+import {
+  MATCH_MODES,
+  nextMatchmakeDelayMs,
+  runMatchmakingTick,
+  type TickResult,
+} from './jobs/matchmake.js';
 import { startPrivyProvisionListener, type PrivyWalletProvider } from './jobs/privy-provision.js';
 import type { SendOutcome, WebPushSender } from './jobs/push-deliver.js';
 import { buildDefaultHandlers, runSchedulerTick } from './jobs/scheduler.js';
@@ -32,6 +37,12 @@ import { buildRedis } from './redis.js';
 import { buildServiceClient } from './supabase.js';
 
 const MATCHMAKE_TICK_MS = 1_000;
+// Idle backoff: when both queues are empty (or Upstash is erroring), the poll
+// stretches to 30s. At 1s the two-mode ZRANGE poll issues ~172,800 Upstash
+// commands/day and exhausts the free-tier 500k/month cap in ~3 days; at 30s
+// that idle cost drops to ~172,800/month. Reverts to MATCHMAKE_TICK_MS the
+// first pass a mode scans a waiting user (band-ramp + bot-fallback timing).
+const MATCHMAKE_IDLE_TICK_MS = 30_000;
 const BATTLE_POLLER_TICK_MS = 5_000;
 const SCHEDULER_TICK_MS = 60_000; // ~1 min -- a committed due-row fires within the next minute.
 
@@ -93,24 +104,54 @@ async function main(): Promise<void> {
   // out of scope. Phase 3.5 BullMQ migration adds distributed locks.
   // Tick once per mode (trivia + open_debate). Open debate disables bot
   // fallback internally (V1 is human-vs-human).
-  let matchmakingBusy = false;
-  const matchmakingInterval = setInterval(() => {
-    if (matchmakingBusy) return;
-    matchmakingBusy = true;
-    Promise.all(
-      MATCH_MODES.map((mode) =>
-        runMatchmakingTick({ redis, supabase, logger }, { mode }).catch((err) => {
-          const message = err instanceof Error ? err.message : String(err);
-          logger.error({ event: 'matchmake.tick_failed', mode, message });
-          void alerter.alert('error', 'matchmake tick failed', `${mode} · ${message}`, {
-            dedupKey: `workers:tick:matchmake:${mode}`,
+  // Self-rescheduling loop (not setInterval) so the poll cadence can adapt:
+  // 1s while anyone is waiting, MATCHMAKE_IDLE_TICK_MS when both queues are
+  // empty or Upstash is erroring. The next pass is scheduled only in `finally`,
+  // AFTER the current one settles, so passes can never overlap (the old
+  // `matchmakingBusy` re-entrancy guard is unnecessary here).
+  let matchmakingTimer: ReturnType<typeof setTimeout>;
+  let matchmakingStopped = false;
+  // null until the first pass classifies cadence, so the initial state is
+  // logged once; thereafter only transitions log. A stuck-at-1s bug and
+  // correct idle backoff otherwise look identical in the logs.
+  let matchmakingActive: boolean | null = null;
+
+  const runMatchmakingLoop = async (): Promise<void> => {
+    if (matchmakingStopped) return;
+    let results: Array<TickResult | null> = [];
+    try {
+      results = await Promise.all(
+        MATCH_MODES.map((mode) =>
+          runMatchmakingTick({ redis, supabase, logger }, { mode }).catch((err): null => {
+            const message = err instanceof Error ? err.message : String(err);
+            logger.error({ event: 'matchmake.tick_failed', mode, message });
+            void alerter.alert('error', 'matchmake tick failed', `${mode} · ${message}`, {
+              dedupKey: `workers:tick:matchmake:${mode}`,
+            });
+            return null;
+          }),
+        ),
+      );
+    } finally {
+      if (!matchmakingStopped) {
+        const delay = nextMatchmakeDelayMs(results, {
+          activeMs: MATCHMAKE_TICK_MS,
+          idleMs: MATCHMAKE_IDLE_TICK_MS,
+        });
+        const active = delay === MATCHMAKE_TICK_MS;
+        if (active !== matchmakingActive) {
+          matchmakingActive = active;
+          logger.info({
+            event: 'matchmake.cadence',
+            state: active ? 'active' : 'idle',
+            intervalMs: delay,
           });
-        }),
-      ),
-    ).finally(() => {
-      matchmakingBusy = false;
-    });
-  }, MATCHMAKE_TICK_MS);
+        }
+        matchmakingTimer = setTimeout(() => void runMatchmakingLoop(), delay);
+      }
+    }
+  };
+  matchmakingTimer = setTimeout(() => void runMatchmakingLoop(), MATCHMAKE_TICK_MS);
 
   // Battle poller — discovers status='live' battle rows (created by
   // the matchmaking tick above) and spawns the right in-process runner for
@@ -192,7 +233,8 @@ async function main(): Promise<void> {
   const SHUTDOWN_MAX_MS = 12_000;
   const shutdown = (signal: string): void => {
     logger.info({ event: 'workers.shutdown', signal });
-    clearInterval(matchmakingInterval);
+    matchmakingStopped = true;
+    clearTimeout(matchmakingTimer);
     clearInterval(battlePollerInterval);
     clearInterval(schedulerInterval);
     // battlePoller.stop() now DRAINS in-flight battles (applies AP before exit).
