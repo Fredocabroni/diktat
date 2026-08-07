@@ -261,6 +261,26 @@ export async function runMatchmakingTick(
   return { scanned: entries.length, matchesCreated, botFallbacks, errors };
 }
 
+/**
+ * Pick the delay until the next matchmaking loop pass. When any mode
+ * scanned a waiting user this pass, poll fast (`activeMs`) so band-ramp +
+ * bot-fallback timing stay tight; when every mode was empty OR errored
+ * (a `null` entry — that mode's tick threw), back off to `idleMs`.
+ *
+ * Backing off on an idle/failed pass is what keeps a zero-user queue from
+ * hammering Upstash: the flat 1s poll otherwise issues ~172,800 commands/
+ * day (2 modes × 1/s × 86,400s) and exhausts the free-tier 500k/month cap
+ * in ~3 days. At the 30s idle cadence that drops to ~172,800/month.
+ * Pure + deterministic so the cadence decision is unit-tested.
+ */
+export function nextMatchmakeDelayMs(
+  results: ReadonlyArray<TickResult | null>,
+  opts: { activeMs: number; idleMs: number },
+): number {
+  const anyScanned = results.some((r) => r !== null && r.scanned > 0);
+  return anyScanned ? opts.activeMs : opts.idleMs;
+}
+
 function bandForWait(waitMs: number): number {
   if (waitMs <= BAND_RAMP_START_MS) return BAND_BASE_AP;
   if (waitMs >= BAND_RAMP_END_MS) return BAND_MAX_AP;
