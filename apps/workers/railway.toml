@@ -1,14 +1,23 @@
 # Railway service: diktat-workers
-# TODO(railway): create service, set RAILWAY_TOKEN, ENABLE_RAILWAY_DEPLOY=true.
 
 [build]
 builder = "NIXPACKS"
+# Nixpacks runs its own implicit `pnpm install --frozen-lockfile` BEFORE this
+# buildCommand. With no NODE_ENV in [env] below (see comment on startCommand),
+# the implicit install runs in default mode and includes devDeps — turbo,
+# typescript, etc. — so the buildCommand can find `turbo` on $PATH.
 buildCommand = "pnpm install --frozen-lockfile && pnpm turbo build --filter=@diktat/workers"
 
 [deploy]
-startCommand = "node apps/workers/dist/index.js"
+# NODE_ENV=production is prefixed inline on startCommand — applies ONLY at
+# runtime (the moment Railway exec's this string), never to the build phase or
+# Nixpacks's implicit install. Setting NODE_ENV via `[env]` here (or via the
+# Railway dashboard service vars) leaks into the build phase: Nixpacks's
+# implicit install would silently skip every devDep and buildCommand would
+# fail with "turbo: command not found". Inline-on-startCommand is the only
+# place you can set runtime NODE_ENV without it bleeding into the build.
+# Important: REMOVE NODE_ENV from the Railway dashboard service vars before
+# deploying — dashboard env vars apply to build too. Mirrors apps/api/railway.toml.
+startCommand = "NODE_ENV=production node apps/workers/dist/index.js"
 restartPolicyType = "ALWAYS"
 restartPolicyMaxRetries = 5
-
-[env]
-NODE_ENV = "production"
