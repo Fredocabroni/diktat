@@ -127,11 +127,20 @@ jobs:
       # runs in parallel with checkout; a cache miss on pnpm store is the
       # only serial cost.
       - name: Setup pnpm
+        # pnpm/action-setup@v4.4.0 (pinned 2026-09-29). Runs before Node
+        # cache exists and configures the package manager subsequent
+        # steps trust; SHA-pin closes the moved-tag supply-chain window.
+        # Same trust-boundary argument as the ci.yml pins in PR #70.
         uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
         with:
           version: 9.15.9
 
       - name: Setup Node
+        # actions/setup-node@v4.4.0 (pinned 2026-09-29). `cache: pnpm`
+        # enables a post-job cache-save hook with write access to the
+        # GitHub Actions cache layer; a moved tag could inject code at
+        # node-setup before the cache key is scoped. SHA-pin same rationale
+        # as pnpm/action-setup above.
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: .nvmrc

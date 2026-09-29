@@ -16,7 +16,11 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Client } from 'pg';
 
-import { buildInvariantCheckHandler, type WithPgClient } from '../../src/jobs/invariant-check.js';
+import {
+  buildInvariantCheckHandler,
+  scrubForAlert,
+  type WithPgClient,
+} from '../../src/jobs/invariant-check.js';
 import type { Alerter } from '@diktat/shared/alerts';
 import type { ScheduledJobRow } from '../../src/jobs/scheduler.js';
 
@@ -510,10 +514,61 @@ describeDb('invariant-check handler', () => {
   });
 });
 
-// Note: no separate "pure" unit tests. The round-1 security review
-// (finding 4) asked us to keep the SQL query strings and their sibling
-// module internals from being re-exported for external discovery. The
-// overflow assertion in the DB-backed suite above already proves the
-// RESULT_LIMIT ("6+") and IDS_IN_ALERT (5 ids + trailer) invariants;
-// the enum bindings are compile-time guaranteed by the imports in
+// Note: no separate "pure" unit tests for RESULT_LIMIT / IDS_IN_ALERT /
+// enum bindings — round-1 security review (finding 4) asked us to keep
+// the SQL query strings and their sibling module internals from being
+// re-exported for external discovery. The overflow assertion in the
+// DB-backed suite above already proves the RESULT_LIMIT ("6+") and
+// IDS_IN_ALERT (5 ids + trailer) invariants; the enum bindings are
+// compile-time guaranteed by the imports in
 // `apps/workers/src/jobs/invariant-check.ts`.
+
+// ─── Error-message scrubbing (round-2 finding 1) ────────────────────────────
+// Runs in every CI — no DB required. Uses a synthetic throwing withPgClient
+// that mimics a pg connection error whose message embeds a DATABASE_URL.
+
+describe('invariant-check · scrub URL and credential leaks from alerts', () => {
+  it('scrubForAlert redacts URLs and libpq keyword-form credentials', () => {
+    const input =
+      'connect ECONNREFUSED postgresql://alice:s3cret@10.0.0.5:5432/prod ' +
+      'host=10.0.0.5 port=5432 password=leak_this_too user=alice';
+    const out = scrubForAlert(input);
+    expect(out).not.toContain('s3cret');
+    expect(out).not.toContain('leak_this_too');
+    expect(out).not.toContain('10.0.0.5');
+    expect(out).not.toContain('alice');
+    expect(out).toContain('<url-redacted>');
+    expect(out).toContain('password=<redacted>');
+    expect(out).toContain('host=<redacted>');
+    expect(out).toContain('user=<redacted>');
+  });
+
+  it('connection-error path forwards ONLY the scrubbed message to Telegram', async () => {
+    const spy = makeAlertSpy();
+    const throwingPgClient: WithPgClient = async () => {
+      throw new Error(
+        'could not connect to server: connect ECONNREFUSED — ' +
+          'postgresql://root:hunter2@db.internal:5432/diktat',
+      );
+    };
+    const handler = buildInvariantCheckHandler({
+      withPgClient: throwingPgClient,
+      alerter: spy.alerter,
+      logger: silentLogger,
+    });
+
+    await handler(
+      buildRow({ payload: { check_name: 'battle_settled_missing_ap' } }),
+      bareHandlerDeps,
+    );
+
+    expect(spy.calls).toHaveLength(1);
+    const call = spy.calls[0]!;
+    expect(call.severity).toBe('error');
+    expect(call.title).toBe('[invariant] db_connection_error');
+    expect(call.detail).not.toContain('hunter2');
+    expect(call.detail).not.toContain('db.internal');
+    expect(call.detail).not.toContain('root');
+    expect(call.detail).toContain('<url-redacted>');
+  });
+});
