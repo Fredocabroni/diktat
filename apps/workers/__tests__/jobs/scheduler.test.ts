@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import type { Alerter, AlertSeverity } from '@diktat/shared/alerts';
+
 import {
   __testing,
   defaultHandlers,
@@ -95,6 +97,27 @@ function buildSupabase(
 
   state.client = { from: fromImpl, rpc: rpcImpl } as unknown as ServiceClient;
   return state;
+}
+
+interface AlertSpy {
+  readonly alerter: Alerter;
+  readonly calls: Array<{
+    severity: AlertSeverity;
+    title: string;
+    detail: string;
+    dedupKey?: string;
+  }>;
+}
+
+function buildAlertSpy(): AlertSpy {
+  const calls: AlertSpy['calls'] = [];
+  const alerter: Alerter = {
+    enabled: true,
+    alert: async (severity, title, detail, opts) => {
+      calls.push({ severity, title, detail, dedupKey: opts?.dedupKey });
+    },
+  };
+  return { alerter, calls };
 }
 
 function buildLogger(): Logger & { calls: { level: string; obj: object }[] } {
@@ -200,6 +223,69 @@ describe('runSchedulerTick', () => {
     });
     expect(
       logger.calls.find((c) => (c.obj as { event?: string }).event === 'scheduler.dead_letter'),
+    ).toBeDefined();
+  });
+
+  it('fires exactly one error-severity alert on dead_letter with per-job_type dedup (#127)', async () => {
+    const r = row({
+      id: '550e8400-e29b-41d4-a716-446655440000',
+      job_type: 'drop_publish',
+      attempts: 5,
+      max_attempts: 5,
+    });
+    const supabase = buildSupabase({ claimReturn: [r] });
+    const logger = buildLogger();
+    const spy = buildAlertSpy();
+    const handlers: Record<string, JobHandler> = {
+      drop_publish: () => Promise.reject(new Error('handler blew up: reason=x')),
+    };
+
+    await runSchedulerTick({
+      supabase: supabase.client,
+      logger,
+      workerId: 'w1',
+      handlers,
+      alerter: spy.alerter,
+    });
+
+    expect(spy.calls).toHaveLength(1);
+    const call = spy.calls[0]!;
+    expect(call.severity).toBe('error');
+    expect(call.title).toBe('[scheduler] drop_publish dead-lettered');
+    expect(call.dedupKey).toBe('scheduler:dead_letter:drop_publish');
+    // Detail includes job_id, attempts, and last_error prefix.
+    expect(call.detail).toContain('job_id=550e8400-e29b-41d4-a716-446655440000');
+    expect(call.detail).toContain('attempts=5/5');
+    expect(call.detail).toContain('last_error=handler blew up');
+  });
+
+  it('handler_failed (attempts < max) does NOT alert; only dead_letter does (#127)', async () => {
+    const r = row({
+      id: 'retry-1',
+      job_type: 'drop_publish',
+      attempts: 2,
+      max_attempts: 5,
+    });
+    const supabase = buildSupabase({ claimReturn: [r] });
+    const logger = buildLogger();
+    const spy = buildAlertSpy();
+    const handlers: Record<string, JobHandler> = {
+      drop_publish: () => Promise.reject(new Error('will retry')),
+    };
+
+    const result = await runSchedulerTick({
+      supabase: supabase.client,
+      logger,
+      workerId: 'w1',
+      handlers,
+      alerter: spy.alerter,
+    });
+
+    expect(result).toMatchObject({ retried: 1, deadLettered: 0 });
+    expect(spy.calls).toHaveLength(0);
+    // handler_failed is still logged (existing warn line at scheduler.ts:186-192).
+    expect(
+      logger.calls.find((c) => (c.obj as { event?: string }).event === 'scheduler.handler_failed'),
     ).toBeDefined();
   });
 

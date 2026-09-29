@@ -121,28 +121,11 @@ export type DedupMap = Map<string, number>;
  *  client and no-op the close so uncommitted fixtures are visible. */
 export type WithPgClient = <T>(fn: (client: Client) => Promise<T>) => Promise<T>;
 
-// ─── Error-message scrubbing ───────────────────────────────────────────────
-
-/** Redact URL-shaped and libpq keyword-style credential leaks from a
- *  message before it reaches Telegram or the logger. Motivation (round-2
- *  security-review finding 1): `pg` error text on a connection failure can
- *  include `host=<host>` or a copy of the DATABASE_URL authority; if the
- *  URL embeds `user:password@`, the credentials would ride into the alert
- *  channel. Scrub defensively on every catch, even for query paths where
- *  a URL leak is unlikely. Exported for the dedicated unit test.
- *  Applied at both the query-error catch inside `runOneCheck` and the
- *  connection-error catch inside the JobHandler adapter below. */
-export function scrubForAlert(message: string): string {
-  return (
-    message
-      // Any scheme://<authority> URI (postgres[ql], redis[s], http[s], etc.).
-      // The authority segment can carry `user:pass@`; redact the whole URI.
-      .replace(/[a-z][a-z0-9+.-]*:\/\/\S+/gi, '<url-redacted>')
-      // libpq / node-postgres keyword form seen in connection errors:
-      //   "could not translate host name … password=… user=…"
-      .replace(/\b(password|passwd|user|host|port|dbname)\s*=\s*\S+/gi, '$1=<redacted>')
-  );
-}
+// Error-message scrubbing moved to `@diktat/shared/alerts` (scrubMessage,
+// applied inside makeAlerter.alert()). Both the query-error and
+// connection-error paths below hand raw `err.message` to the alerter — the
+// alerter scrubs on the way out, so a caller can never forget it, and every
+// alert-emitting call site in the codebase is covered by construction.
 
 // ─── Core: run one check ───────────────────────────────────────────────────
 
@@ -170,8 +153,7 @@ async function runOneCheck(spec: CheckSpec, opts: RunOneOpts): Promise<void> {
     // severity. Then return; scheduler marks the row done and the next cron
     // cycle re-enqueues. If the query stays broken, every cycle re-alerts,
     // paced by the alerter's own 30-min dedup on this key.
-    const rawMessage = err instanceof Error ? err.message : String(err);
-    const message = scrubForAlert(rawMessage);
+    const message = err instanceof Error ? err.message : String(err);
     opts.logger.error({
       event: 'invariant_check.query_error',
       checkName: spec.name,
@@ -316,10 +298,10 @@ export function buildInvariantCheckHandler(deps: {
       // couldn't create a client). runOneCheck already catches per-query
       // errors above. Alert error-severity; mark done, don't dead-letter.
       // pg connection-error text can carry the DATABASE_URL authority (or
-      // the libpq `host=… password=…` keyword form) — scrub before any
-      // path that lands on Telegram or in the logger. See scrubForAlert().
-      const rawMessage = err instanceof Error ? err.message : String(err);
-      const message = scrubForAlert(rawMessage);
+      // the libpq `host=… password=…` keyword form) — the alerter runs
+      // scrubMessage on both title and detail before send, so passing the
+      // raw error message is safe by construction.
+      const message = err instanceof Error ? err.message : String(err);
       logger.error({
         event: 'invariant_check.connection_error',
         message,

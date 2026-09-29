@@ -229,6 +229,10 @@ async function main(): Promise<void> {
       invoke: fabricInvoke,
       providerEnv: debateProviderEnv,
       fetch: globalThis.fetch,
+      // Issue #127: dead-lettered rows fire an error-severity alert with
+      // per-job_type dedup. Uses the same boot alerter as the tick-failure
+      // path above so both flow through one rate window.
+      alerter,
     })
       .catch((err) => {
         const message = err instanceof Error ? err.message : String(err);
