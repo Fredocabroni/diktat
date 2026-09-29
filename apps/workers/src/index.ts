@@ -23,6 +23,7 @@ import { Client as PgClient } from 'pg';
 
 import { loadEnv, privyReady, webPushReady, type Env } from './env.js';
 import { buildBattlePoller } from './jobs/battle-poller.js';
+import { buildInvariantCheckHandler, withFreshPgClient } from './jobs/invariant-check.js';
 import {
   MATCH_MODES,
   nextMatchmakeDelayMs,
@@ -202,7 +203,18 @@ async function main(): Promise<void> {
   // attached at boot via buildDefaultHandlers because its handler closes
   // over the VAPID sender; all other handlers are static module-level
   // exports off scheduler.ts.
-  const schedulerHandlers = buildDefaultHandlers({ webPushSender });
+  // Handler registry: the static defaults plus an `invariant_check` handler
+  // whose runtime deps (raw pg client factory + the boot alerter) aren't
+  // available at module-load time. See apps/workers/src/jobs/invariant-check.ts
+  // and the sibling `[invariant] …` alert grep bindings in the alerter.
+  const schedulerHandlers = Object.freeze({
+    ...buildDefaultHandlers({ webPushSender }),
+    invariant_check: buildInvariantCheckHandler({
+      withPgClient: (fn) => withFreshPgClient(env.DATABASE_URL, fn),
+      alerter,
+      logger,
+    }),
+  });
   const schedulerWorkerId = `workers-${process.pid}-${Date.now()}`;
   let schedulerBusy = false;
   const schedulerInterval = setInterval(() => {
