@@ -21,6 +21,7 @@
 // their own job_types.
 
 import type { invoke as fabricInvoke, ProviderEnv } from '@diktat/ai-fabric';
+import { scrubMessage, type Alerter } from '@diktat/shared/alerts';
 
 import { dropPublishHandler } from './drop-publish.js';
 import { factCheckOrchestratorHandler } from './fact-check-orchestrator.js';
@@ -80,6 +81,11 @@ export interface SchedulerDeps {
   readonly invoke?: typeof fabricInvoke;
   readonly providerEnv?: ProviderEnv;
   readonly fetch?: typeof globalThis.fetch;
+  /** Optional alerter — when present, dead-lettered rows fire an
+   *  error-severity Telegram alert. When absent (unit tests without an
+   *  alerter), the dead-letter is logged only, matching the pre-#127
+   *  behaviour. */
+  readonly alerter?: Alerter;
 }
 
 /** Tunables. Conservative defaults; not env-driven for now. */
@@ -167,7 +173,13 @@ export async function runSchedulerTick(deps: SchedulerDeps): Promise<TickResult>
       await markRowDone(deps, row);
       result.succeeded += 1;
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      // Scrub AT EXTRACTION — before slicing, before markRowDead (which
+      // writes to scheduled_jobs.last_error), before logger.error, before
+      // the alert-detail slice. All downstream sinks see the scrubbed
+      // string. Security-review round 4 finding: handler-thrown errors on
+      // a code path that touches DATABASE_URL (e.g. any handler doing raw
+      // pg work) can carry the DSN into the log sink otherwise.
+      const message = scrubMessage(err instanceof Error ? err.message : String(err));
       if (row.attempts >= row.max_attempts) {
         await markRowDead(deps, row, message);
         result.deadLettered += 1;
@@ -178,6 +190,23 @@ export async function runSchedulerTick(deps: SchedulerDeps): Promise<TickResult>
           attempts: row.attempts,
           message,
         });
+        // Issue #127: dead_letter is the terminal state — retries have
+        // already exhausted, no one is watching this row again. Fire an
+        // error-severity Telegram alert so a silently-broken handler is
+        // surfaced within one scheduler tick. Dedup per-job_type keeps a
+        // cataclysm where 20 rows dead-letter at once from spamming; the
+        // alerter's rate cap is the flood safety net beyond that.
+        // Fire-and-forget: alert() never throws and awaits are bounded by
+        // its internal 5s POST timeout, but the scheduler tick's tail
+        // shouldn't wait on Telegram.
+        if (deps.alerter) {
+          void deps.alerter.alert(
+            'error',
+            `[scheduler] ${row.job_type} dead-lettered`,
+            `job_id=${row.id}\nattempts=${row.attempts}/${row.max_attempts}\nlast_error=${message.slice(0, 240)}`,
+            { dedupKey: `scheduler:dead_letter:${row.job_type}` },
+          );
+        }
       } else {
         const backoffMs = backoffMsFor(row.attempts);
         await markRowRetry(deps, row, message, backoffMs);

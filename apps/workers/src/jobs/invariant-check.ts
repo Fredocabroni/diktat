@@ -28,7 +28,7 @@
 
 import type { Client } from 'pg';
 
-import { makeAlerter, type Alerter } from '@diktat/shared/alerts';
+import { makeAlerter, scrubMessage, type Alerter } from '@diktat/shared/alerts';
 import { BattleStatusSchema, ApReasonSchema } from '@diktat/shared';
 
 import type { JobHandler, ScheduledJobRow } from './scheduler.js';
@@ -121,28 +121,13 @@ export type DedupMap = Map<string, number>;
  *  client and no-op the close so uncommitted fixtures are visible. */
 export type WithPgClient = <T>(fn: (client: Client) => Promise<T>) => Promise<T>;
 
-// ─── Error-message scrubbing ───────────────────────────────────────────────
-
-/** Redact URL-shaped and libpq keyword-style credential leaks from a
- *  message before it reaches Telegram or the logger. Motivation (round-2
- *  security-review finding 1): `pg` error text on a connection failure can
- *  include `host=<host>` or a copy of the DATABASE_URL authority; if the
- *  URL embeds `user:password@`, the credentials would ride into the alert
- *  channel. Scrub defensively on every catch, even for query paths where
- *  a URL leak is unlikely. Exported for the dedicated unit test.
- *  Applied at both the query-error catch inside `runOneCheck` and the
- *  connection-error catch inside the JobHandler adapter below. */
-export function scrubForAlert(message: string): string {
-  return (
-    message
-      // Any scheme://<authority> URI (postgres[ql], redis[s], http[s], etc.).
-      // The authority segment can carry `user:pass@`; redact the whole URI.
-      .replace(/[a-z][a-z0-9+.-]*:\/\/\S+/gi, '<url-redacted>')
-      // libpq / node-postgres keyword form seen in connection errors:
-      //   "could not translate host name … password=… user=…"
-      .replace(/\b(password|passwd|user|host|port|dbname)\s*=\s*\S+/gi, '$1=<redacted>')
-  );
-}
+// Error-message scrubbing lives in `@diktat/shared/alerts` (scrubMessage,
+// also applied inside makeAlerter.alert() as belt-and-suspenders). Both
+// catch paths below scrub AT EXTRACTION — before the message reaches
+// logger.error(...) — so the log sink (pino stdout → Axiom) never sees an
+// unredacted DSN or credential leak either. Security-review round 4
+// finding: without scrub-at-extraction the log path leaks credentials even
+// when the Telegram path is safe.
 
 // ─── Core: run one check ───────────────────────────────────────────────────
 
@@ -170,8 +155,7 @@ async function runOneCheck(spec: CheckSpec, opts: RunOneOpts): Promise<void> {
     // severity. Then return; scheduler marks the row done and the next cron
     // cycle re-enqueues. If the query stays broken, every cycle re-alerts,
     // paced by the alerter's own 30-min dedup on this key.
-    const rawMessage = err instanceof Error ? err.message : String(err);
-    const message = scrubForAlert(rawMessage);
+    const message = scrubMessage(err instanceof Error ? err.message : String(err));
     opts.logger.error({
       event: 'invariant_check.query_error',
       checkName: spec.name,
@@ -316,10 +300,10 @@ export function buildInvariantCheckHandler(deps: {
       // couldn't create a client). runOneCheck already catches per-query
       // errors above. Alert error-severity; mark done, don't dead-letter.
       // pg connection-error text can carry the DATABASE_URL authority (or
-      // the libpq `host=… password=…` keyword form) — scrub before any
-      // path that lands on Telegram or in the logger. See scrubForAlert().
-      const rawMessage = err instanceof Error ? err.message : String(err);
-      const message = scrubForAlert(rawMessage);
+      // the libpq `host=… password=…` keyword form) — scrub at extraction
+      // so BOTH the Telegram path AND the log line at logger.error() below
+      // hand out only the redacted string.
+      const message = scrubMessage(err instanceof Error ? err.message : String(err));
       logger.error({
         event: 'invariant_check.connection_error',
         message,

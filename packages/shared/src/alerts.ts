@@ -64,6 +64,42 @@ export function escapeHtml(s: string): string {
 }
 
 /**
+ * Redact URL-shaped and libpq keyword-style credential leaks from error text
+ * before it reaches Telegram. Scrubs BOTH title and detail inside `alert()`
+ * so every caller — scheduler dead-letter path, boot fatal, tick-failure
+ * handlers, per-handler self-alerts — gets it for free.
+ *
+ * Motivation: `pg` / node error messages on a connection failure can embed
+ * the DATABASE_URL authority (`postgres://user:pass@host:port/db`) or the
+ * libpq keyword form (`host=… password=… user=…`). Any string that reaches
+ * the Telegram channel via these two shapes is one crash-log line away from
+ * exfiltrating credentials to the alerts group.
+ *
+ * The scrub is intentionally coarse — it errs toward over-redaction of any
+ * `scheme://...` URI or `key=value` credential pair. UUIDs, job_type names,
+ * numbers, and plain error prose survive untouched (see the alerts.test.ts
+ * passthrough suite).
+ */
+export function scrubMessage(text: string): string {
+  return (
+    text
+      // Any scheme://<authority> URI (postgres[ql], redis[s], http[s], etc.).
+      // The authority segment can carry `user:pass@`; redact the whole URI.
+      .replace(/[a-z][a-z0-9+.-]*:\/\/\S+/gi, '<url-redacted>')
+      // libpq / node-postgres keyword form seen in connection errors:
+      //   "could not translate host name … password=… user=…"
+      // Plus generic credential keywords seen in HTTP-adapter errors and
+      // config-dump traces: token=, secret=, api_key=. `key` alone is too
+      // broad (hits JSON-stringified `key=value` prose); require the specific
+      // credential variants.
+      .replace(
+        /\b(password|passwd|user|host|port|dbname|sslmode|token|secret|api_key)\s*=\s*\S+/gi,
+        '$1=<redacted>',
+      )
+  );
+}
+
+/**
  * Clamp to Telegram's 4096-char limit WITHOUT cutting mid-entity/tag (a dangling
  * `&am` or `<b` would 400, and the catch would swallow it silently). Strips any
  * trailing partial HTML entity/tag from the cut point, then appends an ellipsis.
@@ -165,10 +201,15 @@ export function makeAlerter(cfg: AlerterConfig = {}): Alerter {
       windowCount += 1;
       if (summaryCount > 0) windowCount += 1; // the summary itself counts toward the window
 
-      // Pre-slice raw detail to bound work, escape, assemble, then clamp so the
-      // final HTML can't exceed the limit or end on a partial entity/tag.
+      // Pre-slice raw detail to bound work, scrub credentials, escape, assemble,
+      // then clamp so the final HTML can't exceed the limit or end on a partial
+      // entity/tag. Scrub runs on BOTH title and detail — a caller that puts
+      // error text in a title (e.g. "scheduler dead_letter: <msg>") must still
+      // be covered. See scrubMessage() for motivation.
+      const scrubbedTitle = scrubMessage(title);
+      const scrubbedDetail = scrubMessage(detail.slice(0, TELEGRAM_MAX));
       const text = clampToTelegram(
-        `${EMOJI[severity]} <b>${escapeHtml(title)}</b>\n${escapeHtml(detail.slice(0, TELEGRAM_MAX))}`,
+        `${EMOJI[severity]} <b>${escapeHtml(scrubbedTitle)}</b>\n${escapeHtml(scrubbedDetail)}`,
       );
       // --- End critical section; only awaited network posts below.
       if (summaryCount > 0) {

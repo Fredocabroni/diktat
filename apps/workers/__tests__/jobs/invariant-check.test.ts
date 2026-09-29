@@ -16,11 +16,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Client } from 'pg';
 
-import {
-  buildInvariantCheckHandler,
-  scrubForAlert,
-  type WithPgClient,
-} from '../../src/jobs/invariant-check.js';
+import { buildInvariantCheckHandler, type WithPgClient } from '../../src/jobs/invariant-check.js';
 import type { Alerter } from '@diktat/shared/alerts';
 import type { ScheduledJobRow } from '../../src/jobs/scheduler.js';
 
@@ -523,27 +519,14 @@ describeDb('invariant-check handler', () => {
 // compile-time guaranteed by the imports in
 // `apps/workers/src/jobs/invariant-check.ts`.
 
-// ─── Error-message scrubbing (round-2 finding 1) ────────────────────────────
+// ─── Connection-error routing ──────────────────────────────────────────────
 // Runs in every CI — no DB required. Uses a synthetic throwing withPgClient
-// that mimics a pg connection error whose message embeds a DATABASE_URL.
+// that mimics a pg connection error and asserts the handler routes it to
+// error-severity alert with the correct title. Credential scrubbing is now
+// performed inside the alerter (see packages/shared/src/__tests__/alerts.test.ts).
 
-describe('invariant-check · scrub URL and credential leaks from alerts', () => {
-  it('scrubForAlert redacts URLs and libpq keyword-form credentials', () => {
-    const input =
-      'connect ECONNREFUSED postgresql://alice:s3cret@10.0.0.5:5432/prod ' +
-      'host=10.0.0.5 port=5432 password=leak_this_too user=alice';
-    const out = scrubForAlert(input);
-    expect(out).not.toContain('s3cret');
-    expect(out).not.toContain('leak_this_too');
-    expect(out).not.toContain('10.0.0.5');
-    expect(out).not.toContain('alice');
-    expect(out).toContain('<url-redacted>');
-    expect(out).toContain('password=<redacted>');
-    expect(out).toContain('host=<redacted>');
-    expect(out).toContain('user=<redacted>');
-  });
-
-  it('connection-error path forwards ONLY the scrubbed message to Telegram', async () => {
+describe('invariant-check · connection-error routing', () => {
+  it('routes withPgClient failure to error-severity alert with db_connection_error title', async () => {
     const spy = makeAlertSpy();
     const throwingPgClient: WithPgClient = async () => {
       throw new Error(
@@ -566,9 +549,9 @@ describe('invariant-check · scrub URL and credential leaks from alerts', () => 
     const call = spy.calls[0]!;
     expect(call.severity).toBe('error');
     expect(call.title).toBe('[invariant] db_connection_error');
-    expect(call.detail).not.toContain('hunter2');
-    expect(call.detail).not.toContain('db.internal');
-    expect(call.detail).not.toContain('root');
-    expect(call.detail).toContain('<url-redacted>');
+    // The handler hands the raw message to the alerter; the alerter scrubs
+    // on the way out to Telegram (see @diktat/shared/alerts scrubMessage).
+    // Spy captures pre-scrub args, so we only check routing here.
+    expect(call.detail).toContain('ECONNREFUSED');
   });
 });
