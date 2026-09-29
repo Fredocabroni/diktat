@@ -88,7 +88,14 @@ export function scrubMessage(text: string): string {
       .replace(/[a-z][a-z0-9+.-]*:\/\/\S+/gi, '<url-redacted>')
       // libpq / node-postgres keyword form seen in connection errors:
       //   "could not translate host name … password=… user=…"
-      .replace(/\b(password|passwd|user|host|port|dbname|sslmode)\s*=\s*\S+/gi, '$1=<redacted>')
+      // Plus generic credential keywords seen in HTTP-adapter errors and
+      // config-dump traces: token=, secret=, api_key=. `key` alone is too
+      // broad (hits JSON-stringified `key=value` prose); require the specific
+      // credential variants.
+      .replace(
+        /\b(password|passwd|user|host|port|dbname|sslmode|token|secret|api_key)\s*=\s*\S+/gi,
+        '$1=<redacted>',
+      )
   );
 }
 

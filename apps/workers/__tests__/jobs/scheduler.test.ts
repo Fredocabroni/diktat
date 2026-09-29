@@ -259,6 +259,57 @@ describe('runSchedulerTick', () => {
     expect(call.detail).toContain('last_error=handler blew up');
   });
 
+  it('dead_letter alert detail is scrubbed at extraction (#127 round-4)', async () => {
+    const r = row({
+      id: 'aa000000-0000-4000-8000-000000000abc',
+      job_type: 'drop_publish',
+      attempts: 5,
+      max_attempts: 5,
+    });
+    const supabase = buildSupabase({ claimReturn: [r] });
+    const logger = buildLogger();
+    const spy = buildAlertSpy();
+    // Error message with a DSN + credential-keyword — mimics a pg
+    // connection failure raised from inside a handler.
+    const errText =
+      'ECONNREFUSED postgres://alice:s3cret@db.internal:5432/prod host=db.internal token=t_abc';
+    const handlers: Record<string, JobHandler> = {
+      drop_publish: () => Promise.reject(new Error(errText)),
+    };
+
+    await runSchedulerTick({
+      supabase: supabase.client,
+      logger,
+      workerId: 'w1',
+      handlers,
+      alerter: spy.alerter,
+    });
+
+    // (1) alert detail was scrubbed BEFORE the 240-char slice.
+    expect(spy.calls).toHaveLength(1);
+    const alertDetail = spy.calls[0]!.detail;
+    expect(alertDetail).not.toContain('s3cret');
+    expect(alertDetail).not.toContain('db.internal');
+    expect(alertDetail).not.toContain('t_abc');
+    expect(alertDetail).toContain('<url-redacted>');
+    expect(alertDetail).toContain('host=<redacted>');
+    expect(alertDetail).toContain('token=<redacted>');
+    // (2) logger.error saw the scrubbed string too — this is the log-sink
+    // (Axiom) path the security-reviewer round-4 finding was about.
+    const deadLetterLog = logger.calls.find(
+      (c) => (c.obj as { event?: string }).event === 'scheduler.dead_letter',
+    );
+    expect(deadLetterLog).toBeDefined();
+    const logged = (deadLetterLog!.obj as { message: string }).message;
+    expect(logged).not.toContain('s3cret');
+    expect(logged).not.toContain('db.internal');
+    expect(logged).not.toContain('t_abc');
+    // (3) scheduled_jobs.last_error was written with the scrubbed string
+    // (markRowDead persists it) — closes the DB-sink leak too.
+    expect(supabase.updates[0]!.patch.last_error).not.toContain('s3cret');
+    expect(supabase.updates[0]!.patch.last_error).toContain('<url-redacted>');
+  });
+
   it('handler_failed (attempts < max) does NOT alert; only dead_letter does (#127)', async () => {
     const r = row({
       id: 'retry-1',

@@ -28,7 +28,7 @@
 
 import type { Client } from 'pg';
 
-import { makeAlerter, type Alerter } from '@diktat/shared/alerts';
+import { makeAlerter, scrubMessage, type Alerter } from '@diktat/shared/alerts';
 import { BattleStatusSchema, ApReasonSchema } from '@diktat/shared';
 
 import type { JobHandler, ScheduledJobRow } from './scheduler.js';
@@ -121,11 +121,13 @@ export type DedupMap = Map<string, number>;
  *  client and no-op the close so uncommitted fixtures are visible. */
 export type WithPgClient = <T>(fn: (client: Client) => Promise<T>) => Promise<T>;
 
-// Error-message scrubbing moved to `@diktat/shared/alerts` (scrubMessage,
-// applied inside makeAlerter.alert()). Both the query-error and
-// connection-error paths below hand raw `err.message` to the alerter — the
-// alerter scrubs on the way out, so a caller can never forget it, and every
-// alert-emitting call site in the codebase is covered by construction.
+// Error-message scrubbing lives in `@diktat/shared/alerts` (scrubMessage,
+// also applied inside makeAlerter.alert() as belt-and-suspenders). Both
+// catch paths below scrub AT EXTRACTION — before the message reaches
+// logger.error(...) — so the log sink (pino stdout → Axiom) never sees an
+// unredacted DSN or credential leak either. Security-review round 4
+// finding: without scrub-at-extraction the log path leaks credentials even
+// when the Telegram path is safe.
 
 // ─── Core: run one check ───────────────────────────────────────────────────
 
@@ -153,7 +155,7 @@ async function runOneCheck(spec: CheckSpec, opts: RunOneOpts): Promise<void> {
     // severity. Then return; scheduler marks the row done and the next cron
     // cycle re-enqueues. If the query stays broken, every cycle re-alerts,
     // paced by the alerter's own 30-min dedup on this key.
-    const message = err instanceof Error ? err.message : String(err);
+    const message = scrubMessage(err instanceof Error ? err.message : String(err));
     opts.logger.error({
       event: 'invariant_check.query_error',
       checkName: spec.name,
@@ -298,10 +300,10 @@ export function buildInvariantCheckHandler(deps: {
       // couldn't create a client). runOneCheck already catches per-query
       // errors above. Alert error-severity; mark done, don't dead-letter.
       // pg connection-error text can carry the DATABASE_URL authority (or
-      // the libpq `host=… password=…` keyword form) — the alerter runs
-      // scrubMessage on both title and detail before send, so passing the
-      // raw error message is safe by construction.
-      const message = err instanceof Error ? err.message : String(err);
+      // the libpq `host=… password=…` keyword form) — scrub at extraction
+      // so BOTH the Telegram path AND the log line at logger.error() below
+      // hand out only the redacted string.
+      const message = scrubMessage(err instanceof Error ? err.message : String(err));
       logger.error({
         event: 'invariant_check.connection_error',
         message,

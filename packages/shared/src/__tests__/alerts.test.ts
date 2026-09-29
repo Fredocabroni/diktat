@@ -175,6 +175,37 @@ describe('scrubMessage', () => {
     expect(out).toBe(input);
   });
 
+  it('redacts token=, secret=, and api_key= (positive — round-4 additions)', () => {
+    const cases: Array<[string, string, string]> = [
+      // [input, banned substring, expected redacted keyword form]
+      [
+        'upstream 401 · token=eyJhbGciOiJIUzI1NiJ9.abc.def',
+        'eyJhbGciOiJIUzI1NiJ9',
+        'token=<redacted>',
+      ],
+      ['auth failed secret=sk-live-abc123def456', 'sk-live-abc123def456', 'secret=<redacted>'],
+      [
+        'fetch 403 body: {"error":"unauthorized"} api_key=pk_prod_xyz789',
+        'pk_prod_xyz789',
+        'api_key=<redacted>',
+      ],
+    ];
+    for (const [input, banned, expected] of cases) {
+      const out = scrubMessage(input);
+      expect(out).not.toContain(banned);
+      expect(out).toContain(expected);
+    }
+  });
+
+  it('does not redact bare "key=" (guard — reviewer suggested key= but that hits JSON prose)', () => {
+    const input = 'malformed payload: {"key":"foo","value":"bar"} · retrying';
+    const out = scrubMessage(input);
+    // `key=` alone was DELIBERATELY excluded — it would falsely match
+    // JSON serialisation and object-toString formats. See the scrub
+    // regex comment in alerts.ts.
+    expect(out).toBe(input);
+  });
+
   it('leaves UUIDs untouched (passthrough — guards against over-greedy \\S+)', () => {
     const input = 'job_id=550e8400-e29b-41d4-a716-446655440000 dead-lettered';
     const out = scrubMessage(input);

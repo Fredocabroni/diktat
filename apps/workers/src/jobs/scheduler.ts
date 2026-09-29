@@ -21,7 +21,7 @@
 // their own job_types.
 
 import type { invoke as fabricInvoke, ProviderEnv } from '@diktat/ai-fabric';
-import type { Alerter } from '@diktat/shared/alerts';
+import { scrubMessage, type Alerter } from '@diktat/shared/alerts';
 
 import { dropPublishHandler } from './drop-publish.js';
 import { factCheckOrchestratorHandler } from './fact-check-orchestrator.js';
@@ -173,7 +173,13 @@ export async function runSchedulerTick(deps: SchedulerDeps): Promise<TickResult>
       await markRowDone(deps, row);
       result.succeeded += 1;
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      // Scrub AT EXTRACTION — before slicing, before markRowDead (which
+      // writes to scheduled_jobs.last_error), before logger.error, before
+      // the alert-detail slice. All downstream sinks see the scrubbed
+      // string. Security-review round 4 finding: handler-thrown errors on
+      // a code path that touches DATABASE_URL (e.g. any handler doing raw
+      // pg work) can carry the DSN into the log sink otherwise.
+      const message = scrubMessage(err instanceof Error ? err.message : String(err));
       if (row.attempts >= row.max_attempts) {
         await markRowDead(deps, row, message);
         result.deadLettered += 1;
