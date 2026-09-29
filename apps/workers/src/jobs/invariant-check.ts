@@ -246,10 +246,19 @@ export async function runInvariantChecks(opts: {
   /** Optional filter, primarily for tests. */
   readonly only?: readonly CheckName[];
 }): Promise<void> {
-  // Bounded per-statement timeout on this session. `SET` (not `SET LOCAL`)
-  // covers both cases: outside a txn (runtime) and inside one (tests do
-  // their own BEGIN/ROLLBACK, so `SET` persists only until ROLLBACK).
-  await opts.client.query(`SET statement_timeout = ${STATEMENT_TIMEOUT_MS}`);
+  // Bounded per-statement timeout, parameterised (never string-interpolated
+  // — see security review round 1 finding 1) and transaction-local
+  // (is_local=true, third arg) so the setting can never survive onto a
+  // reused connection — see finding 2. Caller-contract: `opts.client` must
+  // already be inside a transaction. Runtime `withFreshPgClient` opens a
+  // BEGIN before invoking us; tests hold their own transaction open via
+  // `beforeEach`. `set_config(is_local=true)` outside a txn silently degrades
+  // to per-statement scope, which is fine but the contract above keeps it
+  // predictable across future callers.
+  await opts.client.query(`SELECT set_config($1, $2, true)`, [
+    'statement_timeout',
+    String(STATEMENT_TIMEOUT_MS),
+  ]);
 
   const now = opts.now ?? Date.now;
   const filter = opts.only ? new Set<CheckName>(opts.only) : null;
@@ -338,24 +347,31 @@ export async function withFreshPgClient<T>(
   const client = new Client({ connectionString });
   await client.connect();
   try {
-    return await fn(client);
+    // Wrap the whole check-set in a transaction so `runInvariantChecks`'s
+    // `set_config($, $, true)` binds tx-local — the setting is guaranteed to
+    // die with the transaction, never leaking onto a reused connection even
+    // if a future refactor points this at a shared pool. The checks are
+    // read-only, so ROLLBACK is semantically equivalent to COMMIT; prefer
+    // ROLLBACK so anything a check ever writes by accident is undone.
+    await client.query('BEGIN READ ONLY');
+    try {
+      return await fn(client);
+    } finally {
+      await client.query('ROLLBACK');
+    }
   } finally {
     await client.end();
   }
 }
 
-// ─── Test surface ──────────────────────────────────────────────────────────
-
-export const __testing = {
-  SQL_BATTLE_SETTLED_MISSING_AP,
-  SQL_PREDICTION_MISSING_STAKE,
-  RESULT_LIMIT,
-  IDS_IN_ALERT,
-  DEDUP_TTL_MS,
-  STATEMENT_TIMEOUT_MS,
-  BATTLE_STATUS_SETTLED,
-  AP_REASON_PREDICTION_STAKE,
-};
+// No `__testing` re-export block. Motivation (round-1 security-review
+// finding 4): the compiled production bundle must not surface the SQL
+// query strings or module-internal knobs under a name an attacker with
+// artifact-read access can discover. The DB-backed handler test at
+// `apps/workers/__tests__/jobs/invariant-check.test.ts` proves the
+// RESULT_LIMIT ("6+" title) and IDS_IN_ALERT (five-id body + trailer)
+// behaviours via the overflow fixture, and the enum bindings above are
+// compile-time guaranteed by the imports from `@diktat/shared`.
 
 // Re-export the alerter factory so a caller wiring this handler in a
 // non-standard place (e.g. a script) has one canonical import path.

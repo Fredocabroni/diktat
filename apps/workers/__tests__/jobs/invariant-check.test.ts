@@ -16,11 +16,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Client } from 'pg';
 
-import {
-  __testing,
-  buildInvariantCheckHandler,
-  type WithPgClient,
-} from '../../src/jobs/invariant-check.js';
+import { buildInvariantCheckHandler, type WithPgClient } from '../../src/jobs/invariant-check.js';
 import type { Alerter } from '@diktat/shared/alerts';
 import type { ScheduledJobRow } from '../../src/jobs/scheduler.js';
 
@@ -437,6 +433,13 @@ describeDb('invariant-check handler', () => {
         50,
       ]);
       // Reset the request context so the invariant query runs as postgres.
+      // NOTE (round-1 security-review finding 6): `SET LOCAL role` above is
+      // txn-scoped and would revert automatically at the beforeEach ROLLBACK,
+      // so this `RESET ROLE` is defence-in-depth for readability, not the
+      // load-bearing cleanup. Any future variant that switches to a session-
+      // scoped `SET ROLE` (not `SET LOCAL`) MUST also install a matching
+      // `RESET ROLE` in `afterEach` — otherwise the next test would inherit
+      // the authenticated role and RLS would silently suppress rows.
       await client.query(`RESET ROLE`);
       await client.query(`SELECT set_config('request.jwt.claims', '', true)`);
 
@@ -507,18 +510,10 @@ describeDb('invariant-check handler', () => {
   });
 });
 
-// ─── Pure-function unit tests (run in every CI, no DB needed) ─────────────
-
-describe('invariant-check pure', () => {
-  it('exposes stable enum bindings', () => {
-    expect(__testing.BATTLE_STATUS_SETTLED).toBe('settled');
-    expect(__testing.AP_REASON_PREDICTION_STAKE).toBe('prediction_stake');
-  });
-
-  it('LIMIT and IDS_IN_ALERT are in sync', () => {
-    expect(__testing.RESULT_LIMIT).toBe(6);
-    expect(__testing.IDS_IN_ALERT).toBe(5);
-    // Overflow flag must trip when returning exactly RESULT_LIMIT rows.
-    expect(__testing.RESULT_LIMIT).toBeGreaterThan(__testing.IDS_IN_ALERT);
-  });
-});
+// Note: no separate "pure" unit tests. The round-1 security review
+// (finding 4) asked us to keep the SQL query strings and their sibling
+// module internals from being re-exported for external discovery. The
+// overflow assertion in the DB-backed suite above already proves the
+// RESULT_LIMIT ("6+") and IDS_IN_ALERT (5 ids + trailer) invariants;
+// the enum bindings are compile-time guaranteed by the imports in
+// `apps/workers/src/jobs/invariant-check.ts`.
