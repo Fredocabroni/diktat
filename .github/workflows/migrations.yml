@@ -21,12 +21,30 @@ on:
     branches: [main]
     paths:
       - "supabase/migrations/**"
+      - "supabase/tests/sql/**"
       - ".github/workflows/migrations.yml"
+      # Invariant monitor: handler + test + the writers whose outputs it
+      # validates. A writer refactor (settle order, ref_type/ref_id shape,
+      # apply_ap_drafts / place_prediction wiring) that drifts from the
+      # monitor's query MUST re-run this job -- that's the whole point.
+      - "apps/workers/src/jobs/invariant-check.ts"
+      - "apps/workers/__tests__/jobs/invariant-check.test.ts"
+      - "apps/workers/src/jobs/battle-runner.ts"
+      - "apps/workers/src/jobs/open-debate-runner.ts"
+      - "packages/ap-engine/**"
+      - "packages/shared/src/enums.ts"
   push:
     branches: [main]
     paths:
       - "supabase/migrations/**"
+      - "supabase/tests/sql/**"
       - ".github/workflows/migrations.yml"
+      - "apps/workers/src/jobs/invariant-check.ts"
+      - "apps/workers/__tests__/jobs/invariant-check.test.ts"
+      - "apps/workers/src/jobs/battle-runner.ts"
+      - "apps/workers/src/jobs/open-debate-runner.ts"
+      - "packages/ap-engine/**"
+      - "packages/shared/src/enums.ts"
 
 permissions:
   contents: read
@@ -103,3 +121,56 @@ jobs:
             psql "postgresql://postgres:postgres@127.0.0.1:54322/postgres" \
               -v ON_ERROR_STOP=1 -f "$f"
           done
+
+      # Install workspace deps for the TS handler test. The install runs
+      # after the DB is already up so the boot cost from `supabase start`
+      # runs in parallel with checkout; a cache miss on pnpm store is the
+      # only serial cost.
+      - name: Setup pnpm
+        # pnpm/action-setup@v4.4.0 (pinned 2026-09-29). Runs before Node
+        # cache exists and configures the package manager subsequent
+        # steps trust; SHA-pin closes the moved-tag supply-chain window.
+        # Same trust-boundary argument as the ci.yml pins in PR #70.
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 9.15.9
+
+      - name: Setup Node
+        # actions/setup-node@v4.4.0 (pinned 2026-09-29). `cache: pnpm`
+        # enables a post-job cache-save hook with write access to the
+        # GitHub Actions cache layer; a moved tag could inject code at
+        # node-setup before the cache key is scoped. SHA-pin same rationale
+        # as pnpm/action-setup above.
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # TS invariant-check tests. TEST_DATABASE_URL points at the local
+      # supabase Postgres started above (127.0.0.1:54322). DIKTAT_DB_TESTS_REQUIRED
+      # tells the test file to FAIL if TEST_DATABASE_URL is unexpectedly missing
+      # -- inside THIS job a silent skip would defeat the whole point of the
+      # invariant monitor.
+      #
+      # `pnpm turbo test` (not `pnpm --filter … test`) is required so
+      # workers' internal workspace deps (`@diktat/shared`, `@diktat/ai-fabric`,
+      # `@diktat/ap-engine`) build first -- vitest resolves `@diktat/shared`
+      # to `packages/shared/dist/index.js`, which the raw script does not
+      # create. The turbo pipeline's `test: { dependsOn: ["^build"] }` clause
+      # in turbo.json handles that.
+      - name: TS invariant-check tests (DB-backed)
+        env:
+          # The `postgres:postgres` credential below is the default the
+          # Supabase local CLI hardcodes for its ephemeral loopback stack;
+          # it is scoped to 127.0.0.1:54322 on this runner, torn down when
+          # the job ends, and has NO relationship to any hosted project.
+          # NEVER use this shape as a template for real DB credentials —
+          # any hosted `DATABASE_URL` MUST come from a GitHub secret and be
+          # referenced as `${{ secrets.* }}` at a minimum. (Round-1
+          # security-review finding 5 — contributor-pattern hygiene.)
+          TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
+          DIKTAT_DB_TESTS_REQUIRED: "1"
+        run: pnpm turbo test --filter=@diktat/workers -- invariant-check
