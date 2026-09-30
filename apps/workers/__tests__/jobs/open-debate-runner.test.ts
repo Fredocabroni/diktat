@@ -763,7 +763,7 @@ describe('runOpenDebateTick resume on scored verdict', () => {
     expect(applyDraftsFn).toHaveBeenCalledTimes(1);
   });
 
-  it('TEST 3: unresolved-tie resume flips battle to settled with null winner; no AP drafts', async () => {
+  it('TEST 3: unresolved-tie resume flips battle to VOID with null winner; no AP drafts (#127 H8)', async () => {
     const state = resumeBaseState();
     seedScoredVerdict(state, {
       battleId: BID,
@@ -792,8 +792,11 @@ describe('runOpenDebateTick resume on scored verdict', () => {
     expect(invoke).not.toHaveBeenCalled();
     // AP drafts NOT attempted -- no winner means no settleBattle call.
     expect(applyDraftsFn).not.toHaveBeenCalled();
-    // Battle still flipped to settled with null winner.
-    expect(state.battle!.status).toBe('settled');
+    // #127 H8: unresolved resume now marks battle 'void' (was 'settled'
+    // with null winner in the pre-H8 code path — silent-empty debate).
+    // Requires the battles_status_check migration
+    // (20260930010000_battles_add_void_status) applied in prod first.
+    expect(state.battle!.status).toBe('void');
     expect(state.battle!.winner_user_id).toBeNull();
   });
 
