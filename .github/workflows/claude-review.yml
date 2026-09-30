@@ -4,36 +4,33 @@ on:
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened]
-    # Cost cut 1 (Issue #127 follow-up): workflow-level `paths:` filter.
-    # Verified safe via `gh api repos/.../branches/main/protection` → 404
-    # "Branch not protected" and empty rulesets — no reviewer is a required
-    # status check, so a paths-skip cannot leave a merge blocked pending.
-    # If branch protection is ever enabled with a reviewer marked required,
-    # remove this filter (and rely on the per-job `code` classifier + the
-    # per-reviewer path filters below).
-    paths:
-      - "apps/**"
-      - "packages/**"
-      - "supabase/migrations/**"
-      - ".github/**"
-      - "package.json"
-      - "pnpm-lock.yaml"
-      - "pnpm-workspace.yaml"
-      - "turbo.json"
-      - "tsconfig*.json"
-      - "eslint.config.*"
-      - "vitest.config.*"
-      - "vite.config.*"
-      - ".nvmrc"
-      - ".npmrc"
-      - "supabase/config.toml"
+    # Cost cut 1 (Issue #127 follow-up): workflow-level filter, EXPRESSED
+    # AS `paths-ignore` instead of `paths`. Round-1 security-reviewer M4
+    # flagged the allowlist shape as a blind spot for security-relevant
+    # surfaces (Dockerfiles, supabase/functions/**, .env.example, root
+    # shell scripts, Makefile, etc.) that don't appear in a small
+    # allowlist. Flipping to `paths-ignore` reverses the default:
+    # anything NOT listed here fires the workflow. Only pure-docs pushes
+    # skip. Verified safe against merge blocking via
+    # `gh api repos/.../branches/main/protection` → 404 "Branch not
+    # protected" and empty rulesets — no reviewer is a required status
+    # check, so a skip cannot leave a merge blocked pending. Re-check
+    # this if branch protection lands.
+    paths-ignore:
+      - "docs/**"
+      - "README*"
+      - "*.md"
 
-# Cost cut 4: cancel the previous run for this PR when a new push lands.
-# Kills the double-billing we hit on rapid fix-up cycles — the whole point
-# of a fix-up is that the earlier run's output is stale.
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+# Concurrency lives at the JOB level (see the `review` job below) with
+# per-matrix-leg groups + a per-leg `cancel-in-progress` expression. This
+# lets copy-linter and addiction-auditor cancel on rapid re-push (Cost
+# cut 4) while security-reviewer NEVER cancels mid-flight. Round-1
+# security-reviewer M3 flagged that cancelling a security review on a
+# rapid re-push, without an automated merge-gate backstop, could
+# theoretically let a bad-actor race slip a review; since there is no
+# branch protection today, the safest posture is "security-reviewer
+# always completes." Copy + addiction findings are advisory-comment
+# only and safe to cancel.
 
 permissions:
   contents: read
@@ -139,9 +136,30 @@ jobs:
     # which starved addiction-auditor (see PR #23). 12 min covers setup
     # (~1-2 min) plus one Claude review with comfortable headroom.
     timeout-minutes: 12
+    # Per-reviewer concurrency (Cost cut 4, hardened per round-1 M3):
+    # - group name includes matrix.reviewer.name so each leg gets its
+    #   own group, avoiding cross-leg serialization.
+    # - cancel-in-progress is `true` for copy-linter and addiction-auditor
+    #   (advisory-comment reviewers safe to cancel on rapid re-push) and
+    #   `false` for security-reviewer (never cancel a security review
+    #   mid-flight; the previous run always completes before a new push
+    #   queues behind it).
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number }}-${{ matrix.reviewer.name }}
+      cancel-in-progress: ${{ matrix.reviewer.name != 'security-reviewer' }}
     # Gate via repo Variable (Settings → Secrets and variables → Variables):
     #   set ENABLE_CLAUDE_REVIEW=true once ANTHROPIC_API_KEY secret is configured.
     if: ${{ vars.ENABLE_CLAUDE_REVIEW == 'true' }}
+    # Round-1 L2: consolidate the "should this reviewer run?" predicate
+    # into a single job-level env var. All four conditional steps below
+    # (Install / Compute diff / Run / Post) now read `env.SHOULD_RUN`,
+    # eliminating the divergence risk of maintaining four copies of the
+    # same 3-clause OR.
+    env:
+      SHOULD_RUN: >-
+        ${{ (matrix.reviewer.name == 'security-reviewer' && needs.changes.outputs.code == 'true')
+            || (matrix.reviewer.name == 'copy-linter' && needs.changes.outputs.copy == 'true')
+            || (matrix.reviewer.name == 'addiction-auditor' && needs.changes.outputs.addiction == 'true') }}
     strategy:
       # One reviewer timing out must not cancel the other two.
       fail-fast: false
@@ -217,10 +235,7 @@ jobs:
       # default-pull velocity. Bump deliberately via the stable
       # promotion cadence. PR #71 round-2 MED.
       - name: Install Claude Code
-        if: >-
-          (matrix.reviewer.name == 'security-reviewer' && needs.changes.outputs.code == 'true')
-          || (matrix.reviewer.name == 'copy-linter' && needs.changes.outputs.copy == 'true')
-          || (matrix.reviewer.name == 'addiction-auditor' && needs.changes.outputs.addiction == 'true')
+        if: ${{ env.SHOULD_RUN == 'true' }}
         run: npm i -g @anthropic-ai/claude-code@2.1.176
 
       # Compute the PR diff for the diff-only reviewers. No GH_TOKEN
@@ -231,15 +246,23 @@ jobs:
       # addiction; skipped for security-reviewer which continues to
       # scope via the prompt's "on this PR's diff" language and its
       # own subagent read pattern.
+      #
+      # Round-1 M2: `github.base_ref` is piped through env instead of
+      # interpolated directly into the shell command. Same posture as
+      # REVIEW_PROMPT / REVIEW_MODEL below — checked-in workflow YAML
+      # is trusted, but consistent env-quoting removes the shell-word-
+      # boundary attack surface across the whole workflow.
       - name: Compute PR diff (copy + addiction only)
         if: >-
-          (matrix.reviewer.name == 'copy-linter' && needs.changes.outputs.copy == 'true')
-          || (matrix.reviewer.name == 'addiction-auditor' && needs.changes.outputs.addiction == 'true')
+          ${{ env.SHOULD_RUN == 'true'
+              && matrix.reviewer.name != 'security-reviewer' }}
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
           set -euo pipefail
           # Base ref is checked out fetch-depth: 0, so origin/<base>
           # exists locally.
-          git diff "origin/${{ github.base_ref }}...HEAD" > pr.diff
+          git diff "origin/${BASE_REF}...HEAD" > pr.diff
           # Log size so an empty diff is visible in the workflow log.
           wc -l pr.diff
 
@@ -259,10 +282,7 @@ jobs:
       #     could exfiltrate it via any subcommand. Now the token lives
       #     only in the Post step.
       - name: Run ${{ matrix.reviewer.name }}
-        if: >-
-          (matrix.reviewer.name == 'security-reviewer' && needs.changes.outputs.code == 'true')
-          || (matrix.reviewer.name == 'copy-linter' && needs.changes.outputs.copy == 'true')
-          || (matrix.reviewer.name == 'addiction-auditor' && needs.changes.outputs.addiction == 'true')
+        if: ${{ env.SHOULD_RUN == 'true' }}
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           REVIEW_PROMPT: ${{ matrix.reviewer.prompt }}
@@ -301,10 +321,7 @@ jobs:
       # which couldn't tell a legitimate empty from a credit-error
       # body that just lacked a header.
       - name: Post review
-        if: >-
-          (matrix.reviewer.name == 'security-reviewer' && needs.changes.outputs.code == 'true')
-          || (matrix.reviewer.name == 'copy-linter' && needs.changes.outputs.copy == 'true')
-          || (matrix.reviewer.name == 'addiction-auditor' && needs.changes.outputs.addiction == 'true')
+        if: ${{ env.SHOULD_RUN == 'true' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -354,13 +371,23 @@ jobs:
       # so a skipped review reads as a designed outcome, not a misconfig.
       # security-reviewer keeps the wide gate (any code diff), so its
       # skip is docs-only which is captured in the audit line below.
+      #
+      # Round-1 HIGH: `matrix.reviewer.name` is piped through env
+      # (REVIEWER_NAME) rather than interpolated into the `echo`
+      # command directly. Consistent with REVIEW_PROMPT / REVIEW_MODEL
+      # elsewhere. matrix.reviewer.name is checked-in YAML today, but
+      # keeping every matrix.* interpolation to `env:` closes the class
+      # of "future edit pulls the value from a PR-controlled source"
+      # regressions at the pattern level.
       - name: Audit — reviewer skipped (out-of-scope for this PR)
         if: >-
           (matrix.reviewer.name == 'copy-linter' && needs.changes.outputs.copy != 'true')
           || (matrix.reviewer.name == 'addiction-auditor' && needs.changes.outputs.addiction != 'true')
+        env:
+          REVIEWER_NAME: ${{ matrix.reviewer.name }}
         run: |
-          echo "${{ matrix.reviewer.name }} — diff does not touch relevant paths, skipped" >> "$GITHUB_STEP_SUMMARY"
-          echo "${{ matrix.reviewer.name }} — diff does not touch relevant paths, skipped"
+          echo "$REVIEWER_NAME — diff does not touch relevant paths, skipped" >> "$GITHUB_STEP_SUMMARY"
+          echo "$REVIEWER_NAME — diff does not touch relevant paths, skipped"
 
       # Docs-only path: emit a visible "this was intentional" signal
       # into the run summary so a skipped review reads as a designed
