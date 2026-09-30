@@ -198,7 +198,9 @@ export async function runOpenDebateTick(
 ): Promise<TickOutcome> {
   const battle = await fetchBattle(deps.supabase, battleId);
   if (!battle) return { phase: 'error', detail: { reason: 'battle_not_found' } };
-  if (battle.status === 'settled' || battle.status === 'cancelled') {
+  if (battle.status === 'settled' || battle.status === 'cancelled' || battle.status === 'void') {
+    // 'void' (#127 H8): a debate that ended without enough participation
+    // is terminal — no re-tick, no re-settle.
     return { phase: 'already_settled' };
   }
   if (battle.mode !== 'open_debate') {
@@ -366,6 +368,28 @@ async function scoreAndSettle(
     await applyApSettlementFromSnapshot(deps, battle, settlementInputs);
   }
 
+  // #127 H8 — unresolved debates end as `status='void'`, not 'settled'.
+  // The prior code marked null-winner debates settled and dropped the
+  // decidedBy='unresolved' signal into a log line no participant sees.
+  // Now they explicitly resolve to a distinct DB status the UI can
+  // render as "not enough participation, no winner". No refund path
+  // — open_debate does not currently debit an entry stake (verified
+  // via matchmake.ts:391-392 which writes `entry_ap: 0` on both seats).
+  //
+  // Q1 invariant is unaffected: `where b.status = 'settled'` excludes
+  // void rows by construction.
+  if (decision.decidedBy === 'unresolved' || decision.winnerUserId === null) {
+    await markBattleVoid(deps.supabase, battle.id, settledAt);
+    deps.logger.info({
+      event: 'open_debate.voided',
+      battleId: battle.id,
+      reason: 'no_participation',
+      voterCount: tally.voter_count,
+      aiAvailable: aiVerdict !== null,
+    });
+    return;
+  }
+
   // Mark battle settled.
   await markBattleSettled(deps.supabase, battle.id, decision.winnerUserId, settledAt);
 
@@ -421,6 +445,20 @@ async function resumeSettlement(
   // still flip to settled; AP just won't auto-recover).
   if (winnerUserId && snapshot) {
     await applyApSettlementFromSnapshot(deps, battle, snapshot);
+  }
+
+  // #127 H8 — a null-winner verdict from an old crash resume also
+  // flips to `status='void'` rather than `settled`, matching the
+  // first-pass path above. Snapshot-less resume (pre-snapshot code
+  // paths) with a winner still marks settled; snapshot-less with no
+  // winner is void.
+  if (winnerUserId === null) {
+    await markBattleVoid(deps.supabase, battle.id, settledAt);
+    deps.logger.info({
+      event: 'open_debate.voided_on_resume',
+      battleId: battle.id,
+    });
+    return;
   }
 
   await markBattleSettled(deps.supabase, battle.id, winnerUserId, settledAt);
@@ -808,6 +846,24 @@ async function markBattleSettled(
     .update({ status: 'settled', winner_user_id: winnerUserId, ended_at: settledAtIso })
     .eq('id', battleId)) as { error: { message: string } | null };
   if (error) throw new Error(`markBattleSettled: ${error.message}`);
+}
+
+// #127 H8 — void an open_debate that ended without a winner. Requires
+// the battles_status_check migration (20260930010000_battles_add_void_status)
+// to have been applied to prod first; otherwise the UPDATE fails the
+// check constraint. Called for the `decidedBy='unresolved'` path (zero
+// votes + AI unavailable or null-decision).
+async function markBattleVoid(
+  supabase: ServiceClient,
+  battleId: string,
+  endedAtIso: string,
+): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { error } = (await (supabase as any)
+    .from('battles')
+    .update({ status: 'void', winner_user_id: null, ended_at: endedAtIso })
+    .eq('id', battleId)) as { error: { message: string } | null };
+  if (error) throw new Error(`markBattleVoid: ${error.message}`);
 }
 
 // ---------------------------------------------------------------------------

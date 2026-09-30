@@ -171,6 +171,14 @@ export function OpenDebateClient({
           currentUserId={currentUserId}
         />
       );
+    case 'voided_no_participation':
+      // #127 H8 — an open_debate that ended with zero votes AND an AI
+      // tiebreaker that couldn't decide (or was unavailable). Both sides
+      // see the same explanation. No refund path — open_debate does
+      // not currently debit an entry stake.
+      return (
+        <StatusPanel text="This debate ended without enough participation to declare a winner." />
+      );
   }
 }
 
@@ -193,7 +201,8 @@ type CurrentState =
   | { kind: 'awaiting_final_vote_participant'; verdictDeadline: string | null }
   | { kind: 'awaiting_final_vote_observer'; verdictDeadline: string | null }
   | { kind: 'scored' }
-  | { kind: 'settled_without_verdict_round' };
+  | { kind: 'settled_without_verdict_round' }
+  | { kind: 'voided_no_participation' };
 
 function computeCurrentState(input: {
   participants: ParticipantRow[];
@@ -204,6 +213,13 @@ function computeCurrentState(input: {
 }): CurrentState | null {
   const { participants, rounds, argumentsList, currentUserId, battleStatus } = input;
   const isParticipant = participants.some((p) => p.user_id === currentUserId);
+
+  // #127 H8 — a debate the workers marked `status='void'` reached its
+  // terminal "not enough participation, no winner" state. Render that
+  // explicitly to both participants and observers.
+  if (battleStatus === 'void') {
+    return { kind: 'voided_no_participation' };
+  }
 
   if (rounds.length === 0) {
     return { kind: 'waiting_for_first_round' };
