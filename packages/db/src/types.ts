@@ -633,6 +633,7 @@ export type Database = {
         Row: {
           after_position: number;
           before_position: number;
+          client_key: string | null;
           created_at: string;
           id: string;
           topic_id: string;
@@ -641,6 +642,7 @@ export type Database = {
         Insert: {
           after_position: number;
           before_position: number;
+          client_key?: string | null;
           created_at?: string;
           id?: string;
           topic_id: string;
@@ -649,6 +651,7 @@ export type Database = {
         Update: {
           after_position?: number;
           before_position?: number;
+          client_key?: string | null;
           created_at?: string;
           id?: string;
           topic_id?: string;
