@@ -50,6 +50,14 @@ export const BattleSettleInputSchema = z.object({
     userId: UserIdSchema,
     apBefore: z.number().int().nonnegative(),
     tier: TierSchema,
+    /**
+     * True when this participant is a bot (users.is_bot). Bots must
+     * never accumulate AP or ghost credit — their drafts are dropped
+     * inside settleBattle. Defaults to false so pre-#127-H1 callers
+     * that don't yet forward is_bot degrade to the previous behavior
+     * (all drafts emitted) rather than silently dropping human drafts.
+     */
+    isBot: z.boolean().default(false),
   }),
   loser: z.object({
     userId: UserIdSchema,
@@ -57,6 +65,12 @@ export const BattleSettleInputSchema = z.object({
     tier: TierSchema,
     consecutiveLosses: z.number().int().nonnegative(),
     reductionsUsed: z.number().int().nonnegative(),
+    /**
+     * True when this participant is a bot. Loser drafts for bots are
+     * dropped too — a `battle_loss` row with `user_id = <bot>` also
+     * inflates the ap_transactions ledger. See winner.isBot.
+     */
+    isBot: z.boolean().default(false),
   }),
 });
 export type BattleSettleInput = z.infer<typeof BattleSettleInputSchema>;

@@ -251,6 +251,83 @@ begin
   raise notice 'overflow PASS: LIMIT 6 clamps → runtime signals "6+"';
 end $$;
 
+-- ---------------------------------------------------------------------------
+-- LEGIT-bot-won (#127 H1): a settled battle where the WINNER is a bot.
+-- Post-fix, settleBattle drops the winner's battle_win + ghost_credit drafts
+-- and emits ONLY the human loser's zero-delta battle_loss row. That row
+-- alone satisfies Q1's `(ref_type='battle', ref_id=b.id)` join. This test
+-- proves the invariant does NOT fire on legitimately bot-won battles.
+-- (Bot-vs-bot is impossible per matchmake.ts:188; not tested here.)
+-- ---------------------------------------------------------------------------
+
+-- Provision a bot user through the canonical trigger path, then flip is_bot.
+insert into auth.users (instance_id, id, aud, role, email, created_at, updated_at) values
+  ('00000000-0000-0000-0000-000000000000',
+   'c1000001-0000-0000-0000-000000000003', 'authenticated', 'authenticated',
+   'iq1-bot@test.local', now(), now());
+update public.users set is_bot = true
+  where id = 'c1000001-0000-0000-0000-000000000003';
+
+insert into public.battles (id, mode, status, winner_user_id, started_at, ended_at)
+values (
+  'bb100001-0000-0000-0000-0000000000b0', 'trivia', 'settled',
+  'c1000001-0000-0000-0000-000000000003',   -- bot wins
+  now() - interval '20 min', now() - interval '10 min'
+);
+
+do $$
+declare
+  ignored jsonb;
+begin
+  -- Post-#127-H1 draft shape for (bot_winner, human_loser, isPractice=true):
+  -- ONE row — the human loser's zero-delta battle_loss. No battle_win /
+  -- ghost_credit for the bot. `apply_ap_drafts` still writes zero-delta
+  -- rows (mig 20260713120000_persist_tier_id_in_settlement.sql:132-149).
+  ignored := public.apply_ap_drafts(jsonb_build_array(
+    jsonb_build_object(
+      'user_id', 'b1000001-0000-0000-0000-000000000002'::text,
+      'delta',   0,
+      'reason',  'battle_loss',
+      'ref_type', 'battle',
+      'ref_id',  'bb100001-0000-0000-0000-0000000000b0'::text,
+      'idempotency_key', 'test:iq1:bot-won:loss',
+      'is_practice', true
+    )
+  ));
+end $$;
+
+do $$
+declare
+  n integer;
+begin
+  -- The bot-won battle must NOT be counted by Q1 — it has a ledger row.
+  n := pg_temp.q1_count();
+  -- Total BAD count is unchanged from the overflow assertion above (6),
+  -- because the bot-won battle is legit (ledger present) and does not
+  -- add to the BAD set.
+  if n <> 6 then
+    raise exception 'LEGIT-bot-won FAIL: expected 6 (unchanged), got %', n;
+  end if;
+  raise notice 'LEGIT-bot-won PASS: human loser row satisfies Q1 for bot-won battle';
+end $$;
+
+-- Also confirm the bot user carries ZERO ap_transactions rows keyed by
+-- (ref_type='battle', ref_id=b.id) — the whole point of the H1 fix.
+do $$
+declare
+  n integer;
+begin
+  select count(*) into n from public.ap_transactions t
+    join public.users u on u.id = t.user_id
+    where u.is_bot = true
+      and t.ref_type = 'battle'
+      and t.ref_id = 'bb100001-0000-0000-0000-0000000000b0';
+  if n <> 0 then
+    raise exception 'LEGIT-bot-won FAIL: expected 0 bot ledger rows for the battle, got %', n;
+  end if;
+  raise notice 'LEGIT-bot-won PASS: zero bot ap_transactions rows for the battle';
+end $$;
+
 rollback;
 
 \echo 'invariant_check_battles.test.sql — all cases passed'

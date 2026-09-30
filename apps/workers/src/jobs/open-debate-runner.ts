@@ -601,6 +601,10 @@ async function applyApSettlementFromSnapshot(
       userId: toUserId(snapshot.winner.user_id),
       apBefore: snapshot.winner.ap_before,
       tier: snapshot.winner.tier as Tier,
+      // Open debate never pairs bots (matchmake.ts:188 —
+      // `allowBotFallback = mode === 'trivia'`). Set isBot=false
+      // defensively; #127 H1's settle-side filter is a no-op here.
+      isBot: false,
     },
     loser: {
       userId: toUserId(snapshot.loser.user_id),
@@ -608,6 +612,7 @@ async function applyApSettlementFromSnapshot(
       tier: snapshot.loser.tier as Tier,
       consecutiveLosses: snapshot.loser.consecutive_losses,
       reductionsUsed: snapshot.loser.reductions_used,
+      isBot: false,
     },
   });
 

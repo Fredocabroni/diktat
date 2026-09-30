@@ -14,8 +14,15 @@ const baseInput = (overrides: Partial<BattleSettleInput> = {}): BattleSettleInpu
   mode: 'trivia',
   status: 'settled',
   isPractice: false,
-  winner: { userId: WINNER, apBefore: 2000, tier: 4 },
-  loser: { userId: LOSER, apBefore: 2000, tier: 4, consecutiveLosses: 0, reductionsUsed: 0 },
+  winner: { userId: WINNER, apBefore: 2000, tier: 4, isBot: false },
+  loser: {
+    userId: LOSER,
+    apBefore: 2000,
+    tier: 4,
+    consecutiveLosses: 0,
+    reductionsUsed: 0,
+    isBot: false,
+  },
   ...overrides,
 });
 
@@ -35,8 +42,15 @@ describe('settleBattle', () => {
   it('adds ghost_credit when winner is at a non-payout tier (0–2)', () => {
     const drafts = settleBattle(
       baseInput({
-        winner: { userId: WINNER, apBefore: 50, tier: 0 },
-        loser: { userId: LOSER, apBefore: 50, tier: 0, consecutiveLosses: 0, reductionsUsed: 0 },
+        winner: { userId: WINNER, apBefore: 50, tier: 0, isBot: false },
+        loser: {
+          userId: LOSER,
+          apBefore: 50,
+          tier: 0,
+          consecutiveLosses: 0,
+          reductionsUsed: 0,
+          isBot: false,
+        },
       }),
     );
     expect(drafts).toHaveLength(3);
@@ -79,5 +93,114 @@ describe('settleBattle', () => {
     expect(practiceWin.isPractice).toBe(true);
     expect(practiceLoss.isPractice).toBe(true);
     expect(realWin.isPractice).toBe(false);
+  });
+
+  // #127 H1 — bot-win AP inflation. Bots must never carry rows in
+  // ap_transactions. The invariant Q1 (battle_settled_missing_ap) still
+  // requires at least one row per settled battle keyed on
+  // (ref_type='battle', ref_id=battleId) — which is preserved because
+  // matchmaking never produces bot-vs-bot (see settle.ts header).
+  describe('#127 H1 — bot-win AP inflation', () => {
+    it('skips both winner drafts when the winner is a bot; keeps human loser battle_loss (zero-delta under isPractice)', () => {
+      const drafts = settleBattle(
+        baseInput({
+          isPractice: true,
+          winner: { userId: WINNER, apBefore: 50, tier: 0, isBot: true },
+          loser: {
+            userId: LOSER,
+            apBefore: 50,
+            tier: 0,
+            consecutiveLosses: 0,
+            reductionsUsed: 0,
+            isBot: false,
+          },
+        }),
+      );
+
+      // Only one row: the human loser's zero-delta battle_loss.
+      expect(drafts).toHaveLength(1);
+      expect(drafts[0]!.reason).toBe('battle_loss');
+      expect(drafts[0]!.userId).toBe(LOSER);
+      expect(drafts[0]!.delta).toBe(0);
+      // No battle_win / ghost_credit for the bot user under any reason.
+      expect(drafts.find((d) => d.userId === WINNER)).toBeUndefined();
+    });
+
+    it('skips loser draft when the loser is a bot; keeps human winner battle_win', () => {
+      // Human seeker beat a fallback bot. Human's battle_win emitted.
+      // No battle_loss for the bot.
+      const drafts = settleBattle(
+        baseInput({
+          isPractice: true,
+          winner: { userId: WINNER, apBefore: 2000, tier: 4, isBot: false },
+          loser: {
+            userId: LOSER,
+            apBefore: 2000,
+            tier: 4,
+            consecutiveLosses: 0,
+            reductionsUsed: 0,
+            isBot: true,
+          },
+        }),
+      );
+
+      expect(drafts).toHaveLength(1);
+      expect(drafts[0]!.reason).toBe('battle_win');
+      expect(drafts[0]!.userId).toBe(WINNER);
+      // No draft for the bot loser under any reason.
+      expect(drafts.find((d) => d.userId === LOSER)).toBeUndefined();
+    });
+
+    it('bot-vs-bot THROWS (round-2 M3 on #139: matchmake forbids the shape, so it must fail loudly rather than settle silently with no ledger rows / trip Q1)', () => {
+      expect(() =>
+        settleBattle(
+          baseInput({
+            isPractice: true,
+            winner: { userId: WINNER, apBefore: 2000, tier: 4, isBot: true },
+            loser: {
+              userId: LOSER,
+              apBefore: 2000,
+              tier: 4,
+              consecutiveLosses: 0,
+              reductionsUsed: 0,
+              isBot: true,
+            },
+          }),
+        ),
+      ).toThrow(/bot-vs-bot/i);
+    });
+
+    it('bot winner at ghost-eligible tier does NOT compute ghost earnings (round-2 M1 on #139)', () => {
+      // Winner is a bot at tier 0 (ghost-eligible if human). The fix
+      // moves computeGhostEarnings BEHIND the `!winner.isBot` guard, so
+      // no ghost math runs for a bot winner. We can't spy on
+      // `computeGhostEarnings` without dependency injection, so we
+      // assert the observable contract: drafts contain no ghost_credit
+      // entry and the winner user (bot) has no draft at all.
+      const drafts = settleBattle(
+        baseInput({
+          isPractice: true,
+          // Tier 0 (Iron) — the tier that mints ghost_credit for humans.
+          winner: { userId: WINNER, apBefore: 50, tier: 0, isBot: true },
+          loser: {
+            userId: LOSER,
+            apBefore: 50,
+            tier: 0,
+            consecutiveLosses: 0,
+            reductionsUsed: 0,
+            isBot: false,
+          },
+        }),
+      );
+
+      // Zero ghost_credit rows.
+      expect(drafts.find((d) => d.reason === 'ghost_credit')).toBeUndefined();
+      // Zero drafts for the bot user under any reason.
+      expect(drafts.find((d) => d.userId === WINNER)).toBeUndefined();
+      // The parallel human-winner control case at tier 0 emits a
+      // ghost_credit draft (see the standalone "adds ghost_credit when
+      // winner is at a non-payout tier (0-2)" test above at line ~35);
+      // proving absence here confirms the bot-guard short-circuit.
+    });
   });
 });
