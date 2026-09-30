@@ -1,10 +1,25 @@
 // Drop state machine. Fetches today's Drop via trpc.feed.list, branches
 // into one of three render states, and wires stance actions to
 // trpc.feed.recordShift. Sits inside the (app) auth-gated layout.
+//
+// Per-submit idempotency (#127 H11 PR B2):
+//   * On tap, generate crypto.randomUUID() as `clientKey` unless there is
+//     already a pending key for this topic (i.e. a prior tap that hasn't
+//     resolved yet — either mid-flight or failed with the button now
+//     showing "tap to retry"). In that case reuse the SAME key so the
+//     retry hits the server's 23505 idempotency path and returns the
+//     original row instead of writing a duplicate.
+//   * On success, delete the key. The NEXT tap on the same topic — a
+//     genuine change-of-mind — mints a fresh key and writes a new row.
+//   * On failure, keep the key AND surface a small inline "couldn't
+//     save — tap to retry" affordance so the user knows the stance did
+//     not stick. `.mutateAsync` inside try/catch is the only path so a
+//     rejected promise cannot silently die like the pre-fix `.mutate()`
+//     did.
 
 'use client';
 
-import { useCallback } from 'react';
+import { useCallback, useRef, useState } from 'react';
 
 import { trpc } from '../../lib/trpc';
 
@@ -62,14 +77,46 @@ export function DropFeedClient(): React.JSX.Element {
   const list = trpc.feed.list.useQuery();
   const recordShift = trpc.feed.recordShift.useMutation();
 
+  // Pending client_key per topic. A ref (not state) because updates
+  // don't need to trigger a re-render; the mutation object's own
+  // isPending / the `saveError` state below drive the UI.
+  const pendingKeys = useRef<Map<string, string>>(new Map());
+  // Per-topic "last save failed" flag so the UI can show a retry
+  // affordance. Cleared on the next successful save for that topic.
+  const [saveErrorTopicId, setSaveErrorTopicId] = useState<string | null>(null);
+
   const onStance = useCallback(
-    (topicId: string, action: StanceAction) => {
+    async (topicId: string, action: StanceAction) => {
       if (action === 'skip') return;
-      recordShift.mutate({
-        topicId,
-        beforePosition: 0,
-        afterPosition: action === 'agree' ? 1 : -1,
-      });
+      // Reuse an existing pending key for this topic (a retry after a
+      // failed submit) OR mint a new one. On success we clear the entry
+      // so the NEXT tap always gets a fresh key — which is what makes
+      // change-of-mind write a new row rather than idempotently return
+      // the previous one.
+      let clientKey = pendingKeys.current.get(topicId);
+      if (!clientKey) {
+        clientKey = crypto.randomUUID();
+        pendingKeys.current.set(topicId, clientKey);
+      }
+      try {
+        await recordShift.mutateAsync({
+          topicId,
+          beforePosition: 0,
+          afterPosition: action === 'agree' ? 1 : -1,
+          clientKey,
+        });
+        pendingKeys.current.delete(topicId);
+        // Clear any stale error banner for THIS topic; other topics'
+        // errors are unaffected.
+        setSaveErrorTopicId((current) => (current === topicId ? null : current));
+      } catch {
+        // Retain the pending key. The next tap on this topic reuses it,
+        // so the server's 23505 idempotency path returns the original
+        // row if the failure was after the write hit the DB, or a
+        // fresh insert if it was earlier. Either way the user does not
+        // double-write.
+        setSaveErrorTopicId(topicId);
+      }
     },
     [recordShift],
   );
@@ -103,8 +150,9 @@ export function DropFeedClient(): React.JSX.Element {
         <DropFlow
           topic={state.topic}
           variant={state.kind === 'live' ? 'live' : 'pre_drop'}
-          onStance={(action) => onStance(state.topic.id, action)}
+          onStance={(action) => void onStance(state.topic.id, action)}
           disabled={recordShift.isPending}
+          saveError={saveErrorTopicId === state.topic.id}
         />
       ) : null}
     </section>
@@ -116,9 +164,16 @@ interface DropFlowProps {
   readonly variant: DropCardVariant;
   readonly onStance: (action: StanceAction) => void;
   readonly disabled: boolean;
+  readonly saveError: boolean;
 }
 
-function DropFlow({ topic, variant, onStance, disabled }: DropFlowProps): React.JSX.Element {
+function DropFlow({
+  topic,
+  variant,
+  onStance,
+  disabled,
+  saveError,
+}: DropFlowProps): React.JSX.Element {
   return (
     <div className="flex flex-col gap-4">
       <DropCard
@@ -128,6 +183,15 @@ function DropFlow({ topic, variant, onStance, disabled }: DropFlowProps): React.
         disabled={disabled}
         banner={topic.isBlockExhausted ? <BlockExhaustedBanner /> : null}
       />
+      {saveError ? (
+        <p
+          role="status"
+          aria-live="polite"
+          className="rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger"
+        >
+          Couldn&rsquo;t save your stance. Tap again to retry.
+        </p>
+      ) : null}
       {variant === 'pre_drop' ? <NextDropCountdown /> : null}
     </div>
   );
