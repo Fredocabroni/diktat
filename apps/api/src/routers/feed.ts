@@ -153,10 +153,15 @@ export const feedRouter = router({
             // Should be unreachable — 23505 means a matching row exists.
             // If we can't fetch it, prefer INTERNAL_SERVER_ERROR to a
             // silent success (never fabricate an insert result).
+            //
+            // Cause is wrapped as `new Error(code)` so the raw
+            // PostgrestError's message/details/hint (which can carry
+            // schema/constraint names) never reaches the tRPC wire
+            // response. Round-2 security-reviewer Medium.
             throw new TRPCError({
               code: 'INTERNAL_SERVER_ERROR',
               message: 'Failed to reconcile duplicate opinion shift.',
-              cause: lookupError ?? error,
+              cause: new Error(lookupError?.code ?? error?.code ?? 'db_error'),
             });
           }
           return {
@@ -167,10 +172,11 @@ export const feedRouter = router({
             createdAt: existing.created_at,
           };
         }
+        // Same wire-safety wrap as the 23505 fallback above.
         throw new TRPCError({
           code: 'INTERNAL_SERVER_ERROR',
           message: 'Failed to record opinion shift.',
-          cause: error,
+          cause: new Error(error?.code ?? 'db_error'),
         });
       }
       if (!data) {
