@@ -155,6 +155,13 @@ jobs:
     # (Install / Compute diff / Run / Post) now read `env.SHOULD_RUN`,
     # eliminating the divergence risk of maintaining four copies of the
     # same 3-clause OR.
+    #
+    # Round-2 L1: SHOULD_RUN is a STRING ("true" / "false"), not a
+    # boolean. Every consumer below tests explicitly against the
+    # string 'true' (`env.SHOULD_RUN == 'true'`). NEVER write
+    # `if: ${{ env.SHOULD_RUN }}` — the string 'false' is truthy in
+    # a bare boolean context and would run the step unconditionally,
+    # including the ANTHROPIC_API_KEY-bearing Run step.
     env:
       SHOULD_RUN: >-
         ${{ (matrix.reviewer.name == 'security-reviewer' && needs.changes.outputs.code == 'true')
