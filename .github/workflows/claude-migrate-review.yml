@@ -7,6 +7,25 @@ on:
       - "supabase/migrations/**"
       - "packages/db/**"
 
+# Concurrency lives at the JOB level on the `schema-review` job below
+# (PR #143 round-2 security-review M1). schema-reviewer is the load-
+# bearing RLS / FK / privilege guard for migration PRs — cancelling it
+# mid-flight while no branch-protection status check requires it to
+# complete would let a developer race a trivial follow-up commit to
+# suppress the review and merge before the fresh run finishes. Setting
+# `cancel-in-progress: false` on the job means a new push queues behind
+# the in-flight review; the previous run always completes.
+#
+# Re-check this posture if branch protection is ever enabled on `main`
+# with schema-reviewer marked as a required status check — under that
+# gate, `cancel-in-progress: true` is safe again because a cancelled
+# run leaves the check pending and blocks the merge until a fresh run
+# completes.
+#
+# The `changes` classifier job intentionally has no concurrency block
+# below — it's cheap, idempotent, produces no security output, and
+# GitHub's default fire-forever behavior is fine there.
+
 permissions:
   contents: read
   pull-requests: write
@@ -65,6 +84,12 @@ jobs:
     needs: [changes]
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Never cancel a schema review mid-flight — see workflow header
+    # comment for the rationale. If a new push arrives while this job
+    # is running, GitHub queues the new run behind this one.
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number }}-schema-review
+      cancel-in-progress: false
     # Gate via repo Variable: set ENABLE_CLAUDE_REVIEW=true to activate
     if: ${{ vars.ENABLE_CLAUDE_REVIEW == 'true' }}
     steps:
