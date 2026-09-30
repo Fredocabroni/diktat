@@ -129,19 +129,51 @@ describe('feedRouter.recordShift', () => {
     expect(calls.ops).toEqual([]);
   });
 
-  it('rejects a missing / non-uuid clientKey at the input schema (H11 B2)', async () => {
-    const { db, calls } = fakeDb('opinion_shifts', { data: null, error: null });
+  it('accepts a request with NO clientKey — legacy path for stale PWA clients (H11 B2 fix-up)', async () => {
+    // A cached PWA bundle from before B2 shipped has no clientKey field
+    // in its outgoing tRPC input. That must continue to work: the row
+    // is inserted with client_key = NULL, the partial unique index
+    // (which excludes NULL rows) does not apply, and the response looks
+    // exactly like any other successful record. Regression until the
+    // rollout finishes and the field is tightened to required.
+    const row = {
+      id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+      topic_id: TOPIC_ID,
+      before_position: 0,
+      after_position: 1,
+      created_at: '2026-04-25T00:00:00.000Z',
+    };
+    const { db, calls } = fakeDb('opinion_shifts', { data: row, error: null });
     const caller = appRouter.createCaller(makeCtx({ db }));
 
-    await expect(
-      caller.feed.recordShift({
-        topicId: TOPIC_ID,
-        beforePosition: 0,
-        afterPosition: 1,
-        // @ts-expect-error — deliberately omit the required field
-        clientKey: undefined,
-      }),
-    ).rejects.toBeInstanceOf(TRPCError);
+    const result = await caller.feed.recordShift({
+      topicId: TOPIC_ID,
+      beforePosition: 0,
+      afterPosition: 1,
+      // clientKey omitted — legacy path
+    });
+
+    expect(result).toEqual({
+      id: row.id,
+      topicId: row.topic_id,
+      beforePosition: 0,
+      afterPosition: 1,
+      createdAt: row.created_at,
+    });
+    // Confirm the insert did NOT carry a client_key field — the payload
+    // matches the pre-B2 shape byte-for-byte.
+    const insertOp = calls.ops.find((o) => o.op === 'insert');
+    expect(insertOp).toBeDefined();
+    const payload = insertOp!.args[0] as Record<string, unknown>;
+    expect('client_key' in payload).toBe(false);
+  });
+
+  it('rejects a present-but-non-uuid clientKey at the input schema (H11 B2)', async () => {
+    // If the client bothered to send the field, it must be a uuid. This
+    // catches contributor-side breakage without silently dropping the
+    // idempotency guarantee.
+    const { db, calls } = fakeDb('opinion_shifts', { data: null, error: null });
+    const caller = appRouter.createCaller(makeCtx({ db }));
 
     await expect(
       caller.feed.recordShift({
@@ -152,7 +184,7 @@ describe('feedRouter.recordShift', () => {
       }),
     ).rejects.toBeInstanceOf(TRPCError);
 
-    // Both rejections happened at the schema layer.
+    // Rejected at the schema layer — never hit the DB.
     expect(calls.ops).toEqual([]);
   });
 
