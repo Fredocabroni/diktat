@@ -1,4 +1,9 @@
 -- Migration: extend public.battles.status enum to include 'void'.
+-- Up:   drop and re-add battles_status_check to accept an additional
+--       allowed value 'void'; no data mutation, no default change.
+-- Down: see `-- Rollback (reference, not auto-run):` block below —
+--       set any status='void' rows back to 'cancelled', then re-swap
+--       the CHECK constraint back to the pre-migration shape.
 --
 -- Motivation (#127 H8): an open_debate that ends with zero votes AND an
 -- AI tiebreaker that can't decide (or is unavailable) has no winner. The
