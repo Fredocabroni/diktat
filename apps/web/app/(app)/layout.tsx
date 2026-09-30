@@ -34,7 +34,8 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
   // as the original .eq('id', user.id) shape — the function locks to
   // auth.uid() inside its body.
   //
-  // Error posture (PR #44 round-2 security-reviewer MEDIUM-1):
+  // Error posture (PR #44 round-2 security-reviewer MEDIUM-1, extended
+  // for #127 audit H12):
   // - Fail-open (the round-1 shape) lets an un-onboarded user reach
   //   the authenticated shell on any transient RPC error.
   // - Fail-closed (redirect to /onboard/welcome on error) bounces an
@@ -47,11 +48,24 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
   //   jarring extra click for someone already onboarded).
   // - So: one retry, then render an inline error and let the user
   //   refresh. Closes the fail-open without trapping onboarded users.
+  //
+  // A `null` profile is treated identically to an RPC error. When
+  // `get_user_self()` succeeds but returns zero rows (e.g. `handle_new_user`
+  // trigger failed post-auth-insert, or the `public.users` row was manually
+  // removed), the earlier `if (profile && !profile.onboarded_at)` guard
+  // short-circuited to false and let the un-onboarded, handle-less user
+  // reach the authenticated shell — where every component that assumes a
+  // valid handle breaks. There is no product state in which reaching the
+  // shell without a public.users row is correct; render the same inline
+  // error as the RPC-error branch.
   let profileResult = await supabase.rpc('get_user_self');
   if (profileResult.error) {
     profileResult = await supabase.rpc('get_user_self');
   }
-  if (profileResult.error) {
+  const profile = profileResult.error
+    ? null
+    : ((profileResult.data?.[0] ?? null) as { onboarded_at: string | null } | null);
+  if (!profile) {
     return (
       <main className="mx-auto flex min-h-dvh max-w-md flex-col justify-center px-6">
         <h1 className="font-display text-2xl font-bold text-text-primary">
@@ -63,8 +77,7 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
       </main>
     );
   }
-  const profile = (profileResult.data?.[0] ?? null) as { onboarded_at: string | null } | null;
-  if (profile && !profile.onboarded_at) redirect('/onboard/welcome');
+  if (!profile.onboarded_at) redirect('/onboard/welcome');
 
   return (
     <>
