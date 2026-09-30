@@ -7,6 +7,14 @@ on:
       - "supabase/migrations/**"
       - "packages/db/**"
 
+# Cost cut 4: cancel the previous run for this PR when a new push lands.
+# Matches the concurrency block on claude-review.yml so both reviewer
+# workflows share the same cancel-in-progress posture. Fix-up cycles
+# stop double-billing.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
   pull-requests: write

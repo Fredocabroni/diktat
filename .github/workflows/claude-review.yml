@@ -4,6 +4,36 @@ on:
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened]
+    # Cost cut 1 (Issue #127 follow-up): workflow-level `paths:` filter.
+    # Verified safe via `gh api repos/.../branches/main/protection` → 404
+    # "Branch not protected" and empty rulesets — no reviewer is a required
+    # status check, so a paths-skip cannot leave a merge blocked pending.
+    # If branch protection is ever enabled with a reviewer marked required,
+    # remove this filter (and rely on the per-job `code` classifier + the
+    # per-reviewer path filters below).
+    paths:
+      - "apps/**"
+      - "packages/**"
+      - "supabase/migrations/**"
+      - ".github/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "turbo.json"
+      - "tsconfig*.json"
+      - "eslint.config.*"
+      - "vitest.config.*"
+      - "vite.config.*"
+      - ".nvmrc"
+      - ".npmrc"
+      - "supabase/config.toml"
+
+# Cost cut 4: cancel the previous run for this PR when a new push lands.
+# Kills the double-billing we hit on rapid fix-up cycles — the whole point
+# of a fix-up is that the earlier run's output is stale.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -11,13 +41,15 @@ permissions:
 
 jobs:
   # ----------------------------------------------------------------------
-  # Docs-only guard. Classifies the PR diff into `code` and `docs`
-  # outputs. Reviewer matrix jobs gate their agent-run + post steps on
-  # `code == 'true'`; a docs-only PR concludes each reviewer job
-  # SUCCESS without invoking `claude -p` and without burning Anthropic
-  # credits. Closes the recurring docs-only context-bleed pattern
-  # (PRs #47, #49, #50, #54, #55, #57, plus PR #56's final docs-commit
-  # cycle) that needed admin-override merges.
+  # Docs-only guard + per-reviewer scope guard. Classifies the PR diff
+  # into four booleans: `code` (any code touched), `docs` (any docs
+  # touched), `copy` (any copy-linter-relevant path), and `addiction`
+  # (any addiction-auditor-relevant path). Reviewer matrix jobs gate
+  # their agent-run + post steps on both `code == 'true'` AND (for
+  # copy/addiction) their per-reviewer output. Closes the recurring
+  # docs-only context-bleed pattern (PRs #47, #49, #50, #54, #55, #57,
+  # plus PR #56's final docs-commit cycle) and the "copy-linter reports
+  # findings in files this PR didn't touch" pattern (PR #133).
   #
   # Pin posture: dorny/paths-filter is SHA-pinned because it's the
   # action that decides whether the security reviewer runs — a moved
@@ -33,6 +65,8 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
       docs: ${{ steps.filter.outputs.docs }}
+      copy: ${{ steps.filter.outputs.copy }}
+      addiction: ${{ steps.filter.outputs.addiction }}
     steps:
       # actions/checkout@v4.2.2 — SHA-pinned. The `changes` classifier
       # output gates whether the agent runs at all, so the checkout is
@@ -68,6 +102,33 @@ jobs:
               - 'docs/**'
               - 'README*'
               - '*.md'
+            # Cost cut 2 (copy-linter): fire only on user-facing surfaces.
+            # Anything not on this list — routers, workers, migrations,
+            # generated types — has no user-facing copy for the linter
+            # to review.
+            copy:
+              - 'apps/web/**/*.tsx'
+              - 'apps/web/**/*.ts'
+              - 'apps/bots/**/templates/**'
+              - 'packages/ai-fabric/src/prompts/**'
+              - 'packages/ui/src/**/*.tsx'
+            # Cost cut 2 (addiction-auditor): fire only on engagement-
+            # mechanic surfaces. Trigger set matches the "engagement
+            # mechanic" definition in .claude/agents/addiction-auditor.md
+            # (notifications, streaks, matchmaking, loss/win flows,
+            # onboarding hooks, retention loops, auto-play/auto-load).
+            addiction:
+              - 'apps/web/**'
+              - 'apps/workers/src/jobs/matchmake.ts'
+              - 'apps/workers/src/jobs/battle-runner.ts'
+              - 'apps/workers/src/jobs/open-debate-runner.ts'
+              - 'apps/workers/src/jobs/drop-publish.ts'
+              - 'apps/workers/src/jobs/risk-push.ts'
+              - 'apps/workers/src/jobs/local-boundary-sweep.ts'
+              - 'apps/workers/src/jobs/push-deliver.ts'
+              - 'packages/ap-engine/**'
+              - 'packages/ai-fabric/src/prompts/**'
+              - 'docs/ADDICTION_ARCHITECTURE.md'
 
   review:
     name: ${{ matrix.reviewer.name }}
@@ -86,12 +147,32 @@ jobs:
       fail-fast: false
       matrix:
         reviewer:
+          # security-reviewer stays on Sonnet 4.6. The load-bearing
+          # reviewer — the one that caught the raw-cause leak on PR #137
+          # round 1. Not the place to save pennies.
           - name: security-reviewer
+            model: claude-sonnet-4-6
+            scope: full
             prompt: "Run the security-reviewer subagent on this PR's diff. Output ONLY the review report in markdown. The VERY FIRST non-blank line of your output MUST be a markdown header (e.g. '# Security Review') — do not precede it with any preamble, and do not follow the report with any closing summary, meta-comment, or note about the report itself (e.g. never write 'the report above is complete'). The report IS your entire output. Do NOT edit files, request write or file permissions, run shell commands, or take any tool action of any kind. You are a read-only reviewer: if the diff has defects, name them and recommend the fix IN THE REPORT — never apply or offer to apply changes yourself. A human approves every change."
+          # copy-linter → Haiku 4.5. Checklist-based pattern matching;
+          # Haiku is capable at ~5-10× lower per-token cost. Also gated
+          # via `changes.outputs.copy` so it only fires when a
+          # user-facing surface changed.
+          # Diff-only: prompt tells the agent it can ONLY report findings
+          # on lines that appear in the fed PR diff at `./pr.diff`.
           - name: copy-linter
-            prompt: "Run the copy-linter subagent on apps/web/**/*.tsx, apps/bots/**/templates/**, and any packages/ai-fabric/src/prompts/* files changed in this PR. Output ONLY the review report in markdown. The VERY FIRST non-blank line of your output MUST be a markdown header (e.g. '# Copy Review') — do not precede it with any preamble, and do not follow the report with any closing summary, meta-comment, or note about the report itself (e.g. never write 'the report above is complete'). The report IS your entire output. Do NOT edit files, request write or file permissions, run shell commands, or take any tool action of any kind. You are a read-only reviewer: if the diff has defects, name them and recommend the fix IN THE REPORT — never apply or offer to apply changes yourself. A human approves every change."
+            model: claude-haiku-4-5-20251001
+            scope: diff-only
+            prompt: "Run the copy-linter subagent on the PR diff at ./pr.diff. Report findings ONLY on lines added or modified in that diff — never on untouched surrounding code, never on files not in the diff. If a violation is on a line that appears in the diff hunk, include it; if the violation is in a file the diff doesn't touch, omit it entirely. Output ONLY the review report in markdown. The VERY FIRST non-blank line of your output MUST be a markdown header (e.g. '# Copy Review') — do not precede it with any preamble, and do not follow the report with any closing summary, meta-comment, or note about the report itself. The report IS your entire output. Do NOT edit files, request write or file permissions, run shell commands, or take any tool action of any kind. You are a read-only reviewer: if the diff has defects, name them and recommend the fix IN THE REPORT — never apply or offer to apply changes yourself. A human approves every change."
+          # addiction-auditor stays on Sonnet 4.6. Its judgment calls
+          # (§11 anti-patterns, §12 trust test) are load-bearing when
+          # they trigger; it just runs rarely now that it's gated by
+          # `changes.outputs.addiction`.
+          # Diff-only: same constraint as copy-linter.
           - name: addiction-auditor
-            prompt: "Run the addiction-auditor subagent on engagement-mechanic changes in this PR. Output ONLY the review report in markdown. The VERY FIRST non-blank line of your output MUST be a markdown header (e.g. '# Addiction Audit') — do not precede it with any preamble, and do not follow the report with any closing summary, meta-comment, or note about the report itself (e.g. never write 'the report above is complete'). The report IS your entire output. Do NOT edit files, request write or file permissions, run shell commands, or take any tool action of any kind. You are a read-only reviewer: if the diff has defects, name them and recommend the fix IN THE REPORT — never apply or offer to apply changes yourself. A human approves every change."
+            model: claude-sonnet-4-6
+            scope: diff-only
+            prompt: "Run the addiction-auditor subagent on engagement-mechanic changes in the PR diff at ./pr.diff. Report findings ONLY on lines added or modified in that diff — never on untouched surrounding code, never on files not in the diff. If a mechanic is defined on a line that appears in the diff hunk, audit it; if the mechanic is in a file the diff doesn't touch, omit it entirely. Output ONLY the review report in markdown. The VERY FIRST non-blank line of your output MUST be a markdown header (e.g. '# Addiction Audit') — do not precede it with any preamble, and do not follow the report with any closing summary, meta-comment, or note about the report itself. The report IS your entire output. Do NOT edit files, request write or file permissions, run shell commands, or take any tool action of any kind. You are a read-only reviewer: if the diff has defects, name them and recommend the fix IN THE REPORT — never apply or offer to apply changes yourself. A human approves every change."
     steps:
       # actions/checkout@v4.2.2 — SHA-pinned. The agent runs against
       # whatever ends up in the working tree; a moved `v4` tag could
@@ -136,8 +217,31 @@ jobs:
       # default-pull velocity. Bump deliberately via the stable
       # promotion cadence. PR #71 round-2 MED.
       - name: Install Claude Code
-        if: ${{ needs.changes.outputs.code == 'true' || needs.changes.outputs.docs == 'false' }}
+        if: >-
+          (matrix.reviewer.name == 'security-reviewer' && needs.changes.outputs.code == 'true')
+          || (matrix.reviewer.name == 'copy-linter' && needs.changes.outputs.copy == 'true')
+          || (matrix.reviewer.name == 'addiction-auditor' && needs.changes.outputs.addiction == 'true')
         run: npm i -g @anthropic-ai/claude-code@2.1.176
+
+      # Compute the PR diff for the diff-only reviewers. No GH_TOKEN
+      # needed: the fetch-depth: 0 checkout above gave us both refs,
+      # so `git diff origin/<base>...HEAD` reproduces exactly what a
+      # PR-diff view shows. Written to ./pr.diff, which the reviewer
+      # step reads by filename via the prompt. Runs for both copy +
+      # addiction; skipped for security-reviewer which continues to
+      # scope via the prompt's "on this PR's diff" language and its
+      # own subagent read pattern.
+      - name: Compute PR diff (copy + addiction only)
+        if: >-
+          (matrix.reviewer.name == 'copy-linter' && needs.changes.outputs.copy == 'true')
+          || (matrix.reviewer.name == 'addiction-auditor' && needs.changes.outputs.addiction == 'true')
+        run: |
+          set -euo pipefail
+          # Base ref is checked out fetch-depth: 0, so origin/<base>
+          # exists locally.
+          git diff "origin/${{ github.base_ref }}...HEAD" > pr.diff
+          # Log size so an empty diff is visible in the workflow log.
+          wc -l pr.diff
 
       # The reviewer step CAPTURES agent stdout to a file and does NOT
       # have GH_TOKEN in its env. The Post step (next) reads the file
@@ -155,10 +259,14 @@ jobs:
       #     could exfiltrate it via any subcommand. Now the token lives
       #     only in the Post step.
       - name: Run ${{ matrix.reviewer.name }}
-        if: ${{ needs.changes.outputs.code == 'true' || needs.changes.outputs.docs == 'false' }}
+        if: >-
+          (matrix.reviewer.name == 'security-reviewer' && needs.changes.outputs.code == 'true')
+          || (matrix.reviewer.name == 'copy-linter' && needs.changes.outputs.copy == 'true')
+          || (matrix.reviewer.name == 'addiction-auditor' && needs.changes.outputs.addiction == 'true')
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           REVIEW_PROMPT: ${{ matrix.reviewer.prompt }}
+          REVIEW_MODEL: ${{ matrix.reviewer.model }}
         # The previous `|| true` swallowed claude -p's exit code,
         # silently green-stamping any API failure as "no scope" (PRs
         # #48, #49, #50 — Anthropic credit exhaustion). We now CAPTURE
@@ -180,7 +288,7 @@ jobs:
         run: |
           set +e
           claude -p "$REVIEW_PROMPT" \
-            --model claude-sonnet-4-6 \
+            --model "$REVIEW_MODEL" \
             --output-format text > review_output.md
           echo "$?" > review_exit_code
           set -e
@@ -193,7 +301,10 @@ jobs:
       # which couldn't tell a legitimate empty from a credit-error
       # body that just lacked a header.
       - name: Post review
-        if: ${{ needs.changes.outputs.code == 'true' || needs.changes.outputs.docs == 'false' }}
+        if: >-
+          (matrix.reviewer.name == 'security-reviewer' && needs.changes.outputs.code == 'true')
+          || (matrix.reviewer.name == 'copy-linter' && needs.changes.outputs.copy == 'true')
+          || (matrix.reviewer.name == 'addiction-auditor' && needs.changes.outputs.addiction == 'true')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -236,6 +347,20 @@ jobs:
             echo "::endgroup::"
             exit 1
           fi
+
+      # Skipped-scope signal per reviewer. Cost cut 2 gates copy and
+      # addiction out of the run entirely on unrelated PRs; this step
+      # emits a visible "this was intentional" line in the run summary
+      # so a skipped review reads as a designed outcome, not a misconfig.
+      # security-reviewer keeps the wide gate (any code diff), so its
+      # skip is docs-only which is captured in the audit line below.
+      - name: Audit — reviewer skipped (out-of-scope for this PR)
+        if: >-
+          (matrix.reviewer.name == 'copy-linter' && needs.changes.outputs.copy != 'true')
+          || (matrix.reviewer.name == 'addiction-auditor' && needs.changes.outputs.addiction != 'true')
+        run: |
+          echo "${{ matrix.reviewer.name }} — diff does not touch relevant paths, skipped" >> "$GITHUB_STEP_SUMMARY"
+          echo "${{ matrix.reviewer.name }} — diff does not touch relevant paths, skipped"
 
       # Docs-only path: emit a visible "this was intentional" signal
       # into the run summary so a skipped review reads as a designed
