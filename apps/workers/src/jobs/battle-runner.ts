@@ -549,6 +549,10 @@ async function settle(opts: {
       userId: toUserId(winner.user_id),
       apBefore: winner.current_ap,
       tier: winner.tier_id as Tier,
+      // #127 H1 — bot winners must not receive AP or ghost credit.
+      // settleBattle drops the battle_win + ghost_credit drafts when
+      // isBot=true. See packages/ap-engine/src/settle.ts.
+      isBot: winner.is_bot,
     },
     loser: {
       userId: toUserId(loser.user_id),
@@ -556,6 +560,8 @@ async function settle(opts: {
       tier: loser.tier_id as Tier,
       consecutiveLosses: loser.consecutive_losses,
       reductionsUsed: loser.reductions_used,
+      // Bot losers likewise carry no battle_loss row. See settle.ts.
+      isBot: loser.is_bot,
     },
   });
 
