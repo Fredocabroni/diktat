@@ -40,11 +40,21 @@
 --   - `updated_at` is maintained by the handler (not a trigger) so the
 --     code path owns the invariant and tests can assert against it
 --     without needing a DB round-trip for the trigger.
+--   - `adapter` is CHECK-constrained to `^[a-z0-9_]{1,64}$`. The handler
+--     passes the adapter's registry name verbatim into the UPSERT; the
+--     registry today is a hardcoded TS enum, but the CHECK pins the
+--     invariant into the schema so a future runtime-driven registry
+--     (plugin loader, DB-driven adapter list, YAML config) can't
+--     silently introduce an adapter name with whitespace, slashes, or
+--     punctuation that would complicate downstream dashboards, log
+--     grepping, or admin-console linking. Round-3 security-reviewer
+--     M2 on PR #154.
 
 begin;
 
 create table public.news_adapter_health (
-  adapter text primary key,
+  adapter text primary key
+    check (adapter ~ '^[a-z0-9_]{1,64}$'),
   last_success_at timestamptz,
   last_fresh_insert_at timestamptz,
   last_fetched_count integer not null default 0,
