@@ -138,14 +138,18 @@ async function seedOne(
 
   const userId = created.user.id;
 
-  // The handle_new_user trigger fired during createUser. Override the
-  // generated handle, pin AP, mark as bot.
+  // The handle_new_user trigger fired during createUser and set
+  // is_bot = true at creation time (from the app_metadata signal we
+  // passed above → raw_app_meta_data->>'is_bot'='true'). The sibling
+  // migration 20261001050000 makes users.is_bot immutable
+  // post-creation, so we only override mutable columns here (handle,
+  // current_ap). An is_bot: true in this UPDATE would be blocked by
+  // the users_is_bot_immutable_check trigger.
   const { error: updateUsersErr } = (await supabase
     .from('users')
     .update({
       handle: spec.handle,
       current_ap: spec.ap,
-      is_bot: true,
     })
     .eq('id', userId)) as { error: { message: string } | null };
   if (updateUsersErr) {
