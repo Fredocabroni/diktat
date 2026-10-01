@@ -261,12 +261,18 @@ end $$;
 -- ---------------------------------------------------------------------------
 
 -- Provision a bot user through the canonical trigger path, then flip is_bot.
+-- The users_is_bot_immutability_trigger (migration 20261001010000) now
+-- blocks post-insert flips, so this test disables the trigger locally
+-- (test-only operational path, matches the pattern in
+-- users_is_bot_immutable.test.sql's seed section).
 insert into auth.users (instance_id, id, aud, role, email, created_at, updated_at) values
   ('00000000-0000-0000-0000-000000000000',
    'c1000001-0000-0000-0000-000000000003', 'authenticated', 'authenticated',
    'iq1-bot@test.local', now(), now());
+alter table public.users disable trigger users_is_bot_immutable_check;
 update public.users set is_bot = true
   where id = 'c1000001-0000-0000-0000-000000000003';
+alter table public.users enable trigger users_is_bot_immutable_check;
 
 insert into public.battles (id, mode, status, winner_user_id, started_at, ended_at)
 values (
