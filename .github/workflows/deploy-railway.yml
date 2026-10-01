@@ -111,23 +111,11 @@ jobs:
       - name: Install Railway CLI
         run: npm i -g @railway/cli@5.20.0
 
-      # Stamp the deployed commit SHA into apps/<svc>/.deploy-sha so the
-      # service's boot log + the workers Telegram alert can echo it back
-      # (resolveDeploySha from @diktat/shared/deploy-sha). `railway up`
-      # uploads a snapshot and does NOT populate RAILWAY_GIT_COMMIT_SHA,
-      # verified 2026-10-01 — see the item-1 deploy's empty commit field
-      # in Railway metadata. Without this stamp both services boot with
-      # commit=unknown and we can't tell a legitimate advance from a
-      # redeploy-of-same-commit (the 2026-09-30 round-2 scenario).
-      #
-      # GITHUB_SHA is piped through env, not interpolated into the shell
-      # body, same hardening pattern as REVIEWER_NAME in
-      # claude-review.yml.
-      - name: Stamp .deploy-sha
-        env:
-          GITHUB_SHA: ${{ github.sha }}
-        run: |
-          echo -n "$GITHUB_SHA" > "apps/${{ matrix.service }}/.deploy-sha"
+      # (The earlier `Stamp .deploy-sha` step was removed on 2026-10-01
+      # with the GHA deploy path's retirement. Railway's own git
+      # auto-deploy populates `RAILWAY_GIT_COMMIT_SHA` on the running
+      # container, which `resolveDeploySha` reads directly — no file
+      # stamp needed. See `packages/shared/src/deploy-sha.ts`.)
 
       - name: Deploy
         env:
