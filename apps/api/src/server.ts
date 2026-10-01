@@ -3,6 +3,7 @@ import cors from '@fastify/cors';
 import { fastifyTRPCPlugin, type FastifyTRPCPluginOptions } from '@trpc/server/adapters/fastify';
 import Fastify from 'fastify';
 
+import { checkJwtIssuer } from './activation-safety.js';
 import { buildContext, getOrBuildRedis, normalizeIpToCidr, type RedisClient } from './context.js';
 import { decideCorsOrigin } from './cors-origin.js';
 import { loadEnv } from './env.js';
@@ -86,6 +87,28 @@ if (webOriginsFailure) {
       reason: webOriginsFailure.reason,
       nodeEnv: env.NODE_ENV,
       message: webOriginsFailure.message,
+    }),
+  );
+  process.exit(1);
+}
+
+// Third activation-safety gate (#169): SUPABASE_JWT_ISSUER required in
+// non-dev/test. Factored into ./activation-safety.ts so the predicate
+// is unit-testable without booting Fastify. Same exclusion-list posture
+// as the TRUSTED_PROXY_HOPS and WEB_ORIGINS gates above — fails CLOSED
+// on unknown NODE_ENV values. Also catches an empty-string env var: the
+// loadEnv() layer coerces '' → undefined via emptyToUndefined() before
+// Zod sees it, so an operator who sets SUPABASE_JWT_ISSUER='' on the
+// Railway service hits THIS gate rather than silently booting without
+// the issuer claim being checked by jose.jwtVerify in context.ts.
+const jwtIssuerFailure = checkJwtIssuer(env);
+if (jwtIssuerFailure) {
+  console.error(
+    JSON.stringify({
+      event: 'boot.activation_safety_failed',
+      reason: jwtIssuerFailure.reason,
+      nodeEnv: env.NODE_ENV,
+      message: jwtIssuerFailure.message,
     }),
   );
   process.exit(1);
