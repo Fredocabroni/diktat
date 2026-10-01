@@ -635,10 +635,14 @@ begin
   if v_src is null then
     raise exception 'step 15 FAIL: internal.dead_man_tick() not found';
   end if;
-  -- Case-insensitive match for `for update` anywhere in the body. The
-  -- lock is only called from this function body today, so a lone
-  -- `for update` string there is unambiguous.
-  if v_src !~* '\bfor\s+update\b' then
+  -- Case-insensitive substring match for `for update` anywhere in the
+  -- body. The lock is only used from this function body today, so a
+  -- lone `for update` string there is unambiguous. Using `position`
+  -- on `lower(v_src)` (not a POSIX regex) because pg's POSIX regex
+  -- flavour doesn't recognise `\s` — a `~*` with `\s` matches
+  -- literally nothing, which is how the first revision of this
+  -- assertion silently false-failed.
+  if position('for update' in lower(v_src)) = 0 then
     raise exception 'step 15 FAIL: dead_man_tick body does not contain FOR UPDATE (round-3 HIGH-1 regression)';
   end if;
 end $$;
