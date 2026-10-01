@@ -12,6 +12,35 @@ builder = "NIXPACKS"
 # only the build step itself; no second install required.
 buildCommand = "pnpm turbo build --filter=@diktat/api"
 
+# Railway's git auto-deploy is the single source of truth for this
+# service's deploys (GHA deploy-railway.yml is intentionally disabled
+# — see its header). An unscoped auto-deploy would re-deploy api on
+# every workers-only merge, which is noisy and (on 2026-09-30) caused
+# a four-rapid-merge burst that superseded workers' aa70e57 deploy
+# while a sibling api deploy was mid-flight. Scoping api here keeps
+# api still only when its dependency set changes.
+#
+# Dependency set derived from apps/api/package.json workspace
+# `@diktat/*` imports (direct + transitive):
+#   api → auth → db + shared, db, shared
+# Plus root config files that invalidate every Nixpacks build layer.
+# `apps/workers/**` is deliberately absent — workers deps are
+# disjoint, and workers' own railway.toml intentionally watches
+# everything (the full packages set is in its import graph).
+watchPatterns = [
+  "apps/api/**",
+  "packages/auth/**",
+  "packages/db/**",
+  "packages/shared/**",
+  "package.json",
+  "pnpm-lock.yaml",
+  "pnpm-workspace.yaml",
+  "turbo.json",
+  "tsconfig*.json",
+  ".nvmrc",
+  ".npmrc",
+]
+
 [deploy]
 # NODE_ENV=production is prefixed inline on startCommand — applies ONLY at
 # runtime (the moment Railway exec's this string), never to the build
