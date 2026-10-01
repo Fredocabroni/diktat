@@ -63,12 +63,10 @@ async function main(): Promise<void> {
   const env = loadEnv();
   const logger = buildLogger(env);
 
-  // Deployed commit SHA for the boot log + the Telegram alert. Order:
-  // RAILWAY_GIT_COMMIT_SHA → GIT_SHA → ./.deploy-sha file → 'unknown'.
-  // On `railway up` snapshot deploys, RAILWAY_GIT_COMMIT_SHA is empty
-  // (verified 2026-10-01); the deploy-railway.yml workflow writes
-  // apps/workers/.deploy-sha before uploading, so the file path covers
-  // CI-triggered deploys. Local `pnpm dev` lands on 'unknown'.
+  // Deployed commit SHA for the boot log + the Telegram alert. Railway's
+  // git auto-deploy sets RAILWAY_GIT_COMMIT_SHA on the running container;
+  // anything outside that path (local `pnpm dev`, tests) lands on
+  // 'unknown'. See packages/shared/src/deploy-sha.ts for the hex guard.
   const deploySha = resolveDeploySha();
 
   logger.info({ event: 'workers.boot', nodeEnv: env.NODE_ENV, commit: deploySha });
