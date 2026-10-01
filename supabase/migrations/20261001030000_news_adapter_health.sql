@@ -24,9 +24,16 @@
 --     feed can succeed (HTTP 200, well-formed RSS) but produce zero
 --     fresh inserts because every item is already in the dedup table.
 --     That's exactly the failure the 24h warn is designed to catch.
---   - `last_error_message` is text, no truncation column constraint
---     (adapter errors are small; a hostile upstream can't force a 10GB
---     error string past the pg_net 10MB cap already in place).
+--   - `last_error_message` is text with a 4096-octet CHECK cap. Round-2
+--     security-reviewer M2: the pg_net 10MB feed-body cap is on the
+--     RSS fetch path, not on this write — a parser error on a
+--     malformed XML or JSON feed can produce a tens-of-KB message
+--     string that lands directly here. The cap keeps a pathological
+--     error from inflating the row to pathological size; 4096 bytes
+--     is well above any legitimate error prose we've seen and well
+--     below "row explodes." Handler-side truncation (in the sibling
+--     code PR #155) belt-and-suspenders this by capping with the same
+--     limit before writing.
 --   - `updated_at` is maintained by the handler (not a trigger) so the
 --     code path owns the invariant and tests can assert against it
 --     without needing a DB round-trip for the trigger.
@@ -40,7 +47,8 @@ create table public.news_adapter_health (
   last_fetched_count integer not null default 0,
   last_fresh_count integer not null default 0,
   last_error_at timestamptz,
-  last_error_message text,
+  last_error_message text
+    check (last_error_message is null or octet_length(last_error_message) <= 4096),
   updated_at timestamptz not null default now()
 );
 
