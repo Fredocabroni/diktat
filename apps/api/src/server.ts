@@ -143,9 +143,9 @@ const app = Fastify({
 // the boot log, verify the public client IP shows up) reads this line.
 //
 // `commit` resolves the deployed git SHA (short form) from
-// RAILWAY_GIT_COMMIT_SHA → GIT_SHA → ./.deploy-sha, else 'unknown'. On
-// `railway up` snapshot deploys the Railway env var is empty, so the
-// deploy-railway.yml workflow writes apps/api/.deploy-sha before upload.
+// RAILWAY_GIT_COMMIT_SHA, else 'unknown'. Railway's git auto-deploy
+// populates that env var on the running container; local dev lands on
+// 'unknown'. See packages/shared/src/deploy-sha.ts for the hex guard.
 app.log.info(
   {
     event: 'boot.started',
