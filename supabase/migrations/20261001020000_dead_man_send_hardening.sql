@@ -63,14 +63,46 @@
 --   the live prod posture before any REVOKE lands via its own
 --   dedicated migration.
 --
--- Rollback (reference, not auto-run):
---   create or replace function internal.dead_man_send(p_message text)
---     returns bigint ... (restore 20260929230000's body);
---   create or replace function internal.dead_man_tick() ...
---   alter table internal.dead_man_state
---     drop column if exists last_send_request_id,
---     drop column if exists pending_action,
---     drop column if exists pending_since;
+-- Rollback (reference, not auto-run). To fully revert this migration,
+-- apply the following, in order, inside a single transaction:
+--
+--   1. Drop the two-argument send overload introduced here:
+--      drop function if exists internal.dead_man_send(text, text);
+--
+--   2. Restore the one-argument internal.dead_man_send(text) body
+--      verbatim from the prior migration
+--      supabase/migrations/20260929230000_dead_man_switch.sql
+--      (its final CREATE OR REPLACE for that function; copy the
+--      function body text literally, including the `security
+--      definer set search_path = ''` prelude and the vault-secret
+--      reads).
+--      revoke execute on function internal.dead_man_send(text) from public;
+--      grant  execute on function internal.dead_man_send(text) to service_role;
+--
+--   3. Restore internal.dead_man_tick() body verbatim from the
+--      prior migration 20260929230000_dead_man_switch.sql (its
+--      final CREATE OR REPLACE for that function). The pre-fix
+--      body: reads v_state, calls dead_man_should_fire(), on
+--      action='fire' calls dead_man_send(message) then
+--      dead_man_record('fire'), on action='recover' calls
+--      dead_man_send(message) then dead_man_record('recover'). No
+--      FOR UPDATE, no pending_since logic, no NULL-pending guard.
+--      revoke execute on function internal.dead_man_tick() from public;
+--      grant  execute on function internal.dead_man_tick() to service_role;
+--
+--   4. Drop the three new state columns:
+--      alter table internal.dead_man_state
+--        drop column if exists last_send_request_id,
+--        drop column if exists pending_action,
+--        drop column if exists pending_since;
+--
+-- Note: pg_cron jobs that reference internal.dead_man_tick() are
+-- unaffected (the function keeps its name across the restore). The
+-- 20260929230000 migration file is the source of truth for the
+-- pre-fix function bodies — do not transcribe them into this
+-- comment because the bodies are tens of lines long and the
+-- indirection via "see 20260929230000" prevents the two copies
+-- from drifting if that file ever gets amended.
 
 begin;
 
