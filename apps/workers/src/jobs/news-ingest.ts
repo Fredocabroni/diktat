@@ -25,6 +25,7 @@
 //   - All adapter fetches go through the injected fetch impl so tests
 //     can substitute without hitting the network.
 
+import { scrubMessage } from '@diktat/shared/alerts';
 import Parser from 'rss-parser';
 
 import { classifyUrl, normalizeHost, type SourceCategory } from '@diktat/ai-fabric';
@@ -363,7 +364,7 @@ async function ingestOne(
   try {
     candidates = await adapter.fetch(fetchImpl);
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = scrubMessage(err instanceof Error ? err.message : String(err));
     deps.logger.warn({
       event: 'news_ingest.adapter_failed',
       adapter: adapter.name,

@@ -23,6 +23,8 @@
 // approach has no Redis dependency, which lets PR #13 land before the
 // workers infra (PR #14, gated on Upstash provisioning).
 
+import { scrubMessage } from '@diktat/shared/alerts';
+
 import type { Logger } from '../logger.js';
 import type { ServiceClient } from '../supabase.js';
 
@@ -153,7 +155,7 @@ export async function handlePrivyProvision(
         userId,
         attempt: attempt + 1,
         backoffMs: backoff,
-        message: err instanceof Error ? err.message : String(err),
+        message: scrubMessage(err instanceof Error ? err.message : String(err)),
       });
       if (attempt < RETRY_BACKOFF_MS.length - 1) {
         await sleep(backoff);
@@ -164,7 +166,7 @@ export async function handlePrivyProvision(
   logger.error({
     event: 'privy.failed',
     userId,
-    message: lastError instanceof Error ? lastError.message : String(lastError),
+    message: scrubMessage(lastError instanceof Error ? lastError.message : String(lastError)),
   });
   return { status: 'failed', reason: 'retries_exhausted' };
 }
@@ -214,14 +216,14 @@ export function startPrivyProvisionListener(deps: ListenerDeps): ListenerHandle 
         // until stop() ends the client (which raises an error event).
         await new Promise<void>((resolve) => {
           client.on('error', (err) => {
-            logger.warn({ event: 'privy.listener_error', message: err.message });
+            logger.warn({ event: 'privy.listener_error', message: scrubMessage(err.message) });
             resolve();
           });
         });
       } catch (err) {
         logger.warn({
           event: 'privy.listener_connect_failed',
-          message: err instanceof Error ? err.message : String(err),
+          message: scrubMessage(err instanceof Error ? err.message : String(err)),
         });
       } finally {
         try {

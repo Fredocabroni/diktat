@@ -15,6 +15,7 @@
 // mechanism".
 
 import { applyDrafts, idempotencyKeyFor, settleBattle, type Tier } from '@diktat/ap-engine';
+import { scrubMessage } from '@diktat/shared/alerts';
 import {
   battleId as toBattleId,
   userId as toUserId,
@@ -226,7 +227,7 @@ export function runBattle(battleId: string, deps: BattleRunnerDeps): RunningBatt
       });
       logger.info({ event: 'battle.runner.settled', battleId });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = scrubMessage(err instanceof Error ? err.message : String(err));
       logger.error({ event: 'battle.runner.failed', battleId, message });
       void deps.alerter?.alert('error', 'battle runner failed', `${battleId} · ${message}`, {
         dedupKey: `workers:battle:runner:${battleId}`,

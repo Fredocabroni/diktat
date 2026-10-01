@@ -52,6 +52,8 @@
 
 import { createHash } from 'crypto';
 
+import { scrubMessage } from '@diktat/shared/alerts';
+
 import {
   DROP_HEADLINE_REWRITE_SYSTEM_PROMPT,
   buildDropHeadlineUserPrompt,
@@ -501,7 +503,7 @@ async function rewriteHeadlineSafely(
     deps.logger.warn({
       event: 'drop_publish.rewrite_failed',
       candidateId: candidate.id,
-      message: err instanceof Error ? err.message : String(err),
+      message: scrubMessage(err instanceof Error ? err.message : String(err)),
     });
     return empty;
   }

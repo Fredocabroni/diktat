@@ -23,6 +23,7 @@
 // Tick logic is exposed as runOpenDebateTick() for unit testing.
 
 import { applyDrafts, settleBattle, type Tier } from '@diktat/ap-engine';
+import { scrubMessage } from '@diktat/shared/alerts';
 import { battleId as toBattleId, userId as toUserId, type BattleMode } from '@diktat/shared';
 import type { invoke as fabricInvoke, ProviderEnv } from '@diktat/ai-fabric';
 import { z } from 'zod';
@@ -161,7 +162,7 @@ export function runOpenDebate(battleId: string, deps: OpenDebateRunnerDeps): Run
         stop();
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = scrubMessage(err instanceof Error ? err.message : String(err));
       deps.logger.error({ event: 'open_debate.tick_failed', battleId, message });
       void deps.alerter?.alert('error', 'open debate tick failed', `${battleId} · ${message}`, {
         dedupKey: `workers:battle:open_debate:${battleId}`,
@@ -494,7 +495,7 @@ async function callAi(
   } catch (err) {
     deps.logger.warn({
       event: 'open_debate.scorer_failed',
-      message: err instanceof Error ? err.message : String(err),
+      message: scrubMessage(err instanceof Error ? err.message : String(err)),
     });
     return null;
   }

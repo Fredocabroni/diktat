@@ -131,7 +131,7 @@ export async function runSchedulerTick(deps: SchedulerDeps): Promise<TickResult>
   } catch (err) {
     deps.logger.error({
       event: 'scheduler.reap_failed',
-      message: err instanceof Error ? err.message : String(err),
+      message: scrubMessage(err instanceof Error ? err.message : String(err)),
     });
     result.errors += 1;
   }
@@ -144,7 +144,7 @@ export async function runSchedulerTick(deps: SchedulerDeps): Promise<TickResult>
   } catch (err) {
     deps.logger.error({
       event: 'scheduler.claim_failed',
-      message: err instanceof Error ? err.message : String(err),
+      message: scrubMessage(err instanceof Error ? err.message : String(err)),
     });
     result.errors += 1;
     return result;

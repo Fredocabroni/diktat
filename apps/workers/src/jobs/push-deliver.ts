@@ -35,6 +35,8 @@
 //   6. Stamp delivery_status into this row's own payload — never back
 //      into the source risk_push row's payload (immutable decision trail).
 
+import { scrubMessage } from '@diktat/shared/alerts';
+
 import type { JobHandler, ScheduledJobRow } from './scheduler.js';
 
 const STALENESS_WINDOW_MS = 15 * 60 * 1000;
@@ -231,7 +233,7 @@ export function buildPushDeliverHandler(sender: WebPushSender | null): JobHandle
         outcome = {
           kind: 'transient',
           statusCode: 0,
-          message: truncateMessage(err instanceof Error ? err.message : String(err)),
+          message: truncateMessage(scrubMessage(err instanceof Error ? err.message : String(err))),
         };
       }
 

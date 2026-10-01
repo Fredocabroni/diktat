@@ -20,6 +20,8 @@
 // match. Single-instance assumption keeps this safe; Phase 3.5 BullMQ
 // migration adds proper distributed locks.
 
+import { scrubMessage } from '@diktat/shared/alerts';
+
 import type { ServiceClient } from '../supabase.js';
 import type { Logger } from '../logger.js';
 
@@ -216,7 +218,7 @@ export async function runMatchmakingTick(
       } catch (err) {
         deps.logger.error({
           event: 'matchmake.create_failed',
-          message: err instanceof Error ? err.message : String(err),
+          message: scrubMessage(err instanceof Error ? err.message : String(err)),
           mode,
           seeker: seeker.userId,
           partner: partner.userId,
@@ -238,7 +240,7 @@ export async function runMatchmakingTick(
       } catch (err) {
         deps.logger.error({
           event: 'matchmake.bot_fallback_failed',
-          message: err instanceof Error ? err.message : String(err),
+          message: scrubMessage(err instanceof Error ? err.message : String(err)),
           mode,
           seeker: seeker.userId,
         });
