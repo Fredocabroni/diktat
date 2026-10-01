@@ -20,18 +20,19 @@ buildCommand = "pnpm turbo build --filter=@diktat/api"
 # while a sibling api deploy was mid-flight. Scoping api here keeps
 # api still only when its dependency set changes.
 #
-# Dependency set derived from apps/api/package.json workspace
-# `@diktat/*` imports (direct + transitive):
-#   api → auth → db + shared, db, shared
-# Plus root config files that invalidate every Nixpacks build layer.
-# `apps/workers/**` is deliberately absent — workers deps are
-# disjoint, and workers' own railway.toml intentionally watches
-# everything (the full packages set is in its import graph).
+# Scope: apps/api/** + packages/** (ALL packages) + root config.
+# Deliberately broader than the api's direct @diktat/* import graph
+# (today: auth, db, shared). Over-deploying is cheap — a Nixpacks
+# rebuild on an api-adjacent package change is tens of seconds, and
+# the service is healthchecked. Under-deploying is the real bug: a
+# future api dependency on packages/ai-fabric or any new workspace
+# would silently skip api redeploys until this toml is updated to
+# match. Operator ask (2026-10-01): "Over-deploying is cheap;
+# missing a change is the bug." `apps/workers/**` and `apps/bots/**`
+# are deliberately absent — api does not import either.
 watchPatterns = [
   "apps/api/**",
-  "packages/auth/**",
-  "packages/db/**",
-  "packages/shared/**",
+  "packages/**",
   "package.json",
   "pnpm-lock.yaml",
   "pnpm-workspace.yaml",
