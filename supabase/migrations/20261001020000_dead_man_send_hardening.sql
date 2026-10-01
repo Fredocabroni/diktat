@@ -12,6 +12,22 @@
 --       to their 20260929230000 shape; revoke INSERT grant stays safe
 --       since pg_net ships without PUBLIC inserts.
 --
+-- Round-3 security-reviewer findings addressed (operator-ask, 2026-10-01):
+--
+--   (R3 HIGH-1) Concurrent dead_man_tick calls could both pass should_fire
+--   and both call dead_man_send — the "double-fire" race on rare pg_cron
+--   double-fires / operator-manual ticks. Fix: SELECT ... FOR UPDATE on
+--   internal.dead_man_state (single row, id=1) at the top of
+--   dead_man_tick. Serialises concurrent ticks for the duration of the
+--   function body; released on COMMIT.
+--
+--   (R3 HIGH-2) If an operator or a future backfill set
+--   last_send_request_id without also setting pending_action, the 200-
+--   confirm branch's dead_man_record(NULL) raised, the tick aborted,
+--   and the slot sat wedged until the 10-min force-clear caught it.
+--   Fix: guard the record() call on pending_action IS NOT NULL;
+--   when NULL, emit a NOTICE and still clear the slot cleanly.
+--
 -- Round-1 security-reviewer findings addressed:
 --
 --   (HIGH-1) Original timeout guard keyed on `last_alert_at`, which is
@@ -184,7 +200,24 @@ declare
   v_message    text;
   v_err_msg    text;
 begin
-  select * into v_state from internal.dead_man_state where id = 1;
+  -- Round-3 HIGH-1 (operator-ask fix): take a row lock on the state
+  -- row for the full tick. pg_cron can double-fire a job in rare
+  -- cases (clock skew on the primary, LISTEN/NOTIFY delivery
+  -- race, operator-triggered manual tick), and without the lock
+  -- two concurrent tick() calls both see pending_action=null,
+  -- both pass should_fire(), and both call dead_man_send — the
+  -- "double-fire" the reviewer flagged. FOR UPDATE serialises the
+  -- ticks: the second tick blocks on the SELECT until the first
+  -- tick commits (either having stashed a pending slot or recorded
+  -- a terminal action), at which point the second tick re-reads
+  -- fresh state and no-ops at should_fire().
+  --
+  -- The lock is held for the whole function body, released on COMMIT.
+  -- Trade-off: a tick holding this lock while waiting for pg_net
+  -- (http_post is non-blocking, so the actual wall-clock cost of the
+  -- held lock is milliseconds) will delay a concurrent tick by the
+  -- same amount. At the pg_cron 5-min cadence this is unobservable.
+  select * into v_state from internal.dead_man_state where id = 1 for update;
 
   -- Step 1: confirm the previous send's delivery, if one is pending.
   if v_state.last_send_request_id is not null then
@@ -218,7 +251,26 @@ begin
        and v_response.error_msg is null
        and coalesce(v_response.timed_out, false) = false then
       -- Delivered. Record the pending action, clear the pending slot.
-      perform internal.dead_man_record(v_state.pending_action);
+      --
+      -- Round-3 HIGH-2 (operator-ask fix): guard against pending_action
+      -- being NULL. In the normal flow dead_man_send stamps
+      -- pending_action in the same UPDATE that stamps
+      -- last_send_request_id, so this case is unreachable from
+      -- supported entry paths. The branch exists for two edge cases:
+      -- (a) a manual INSERT / UPDATE on internal.dead_man_state that
+      -- set last_send_request_id without pending_action (operator
+      -- debugging); (b) a future migration that nulls one column
+      -- without the other during a backfill. Without the guard,
+      -- dead_man_record(NULL) raises inside this transaction, the
+      -- tick aborts, and the slot sits wedged until the 10-min
+      -- force-clear catches it. With the guard, the tick clears the
+      -- slot cleanly and emits a NOTICE so the operator sees why.
+      if v_state.pending_action is null then
+        raise notice 'dead_man_tick: confirmed 200 for request_id=% but pending_action is NULL (manual-insert / backfill artifact?); clearing slot without recording',
+          v_state.last_send_request_id;
+      else
+        perform internal.dead_man_record(v_state.pending_action);
+      end if;
       update internal.dead_man_state
         set last_send_request_id = null,
             pending_action       = null,

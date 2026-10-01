@@ -551,6 +551,97 @@ begin
   end if;
 end $$;
 
+-- ───────────────────────────────────────────────────────────────────────────
+-- Step 14: NULL pending_action on confirmed 200 — tick does NOT raise, does
+-- NOT advance last_action, DOES clear the slot cleanly (round-3 HIGH-2).
+--
+-- Setup: manually set a pending_slot WITHOUT pending_action (as a backfill
+-- artifact or operator debug would). Insert a 200 response. Run the tick.
+--
+-- Pre-fix behaviour: dead_man_record(NULL) raised, tick aborted, slot
+-- stayed wedged until the 10-min force-clear caught it. Post-fix: the
+-- 200-branch guards on pending_action IS NOT NULL and emits a NOTICE.
+-- ───────────────────────────────────────────────────────────────────────────
+
+update internal.dead_man_state
+   set last_action='quiet',
+       last_alert_at=null,
+       last_recover_at=null,
+       last_send_request_id=77777777,
+       pending_action=null,
+       pending_since=now() - interval '2 minutes'
+ where id=1;
+
+insert into net._http_response (id, status_code, timed_out, error_msg)
+values (77777777, 200, false, null);
+
+do $$
+declare
+  s_before  internal.dead_man_state%rowtype;
+  s_after   internal.dead_man_state%rowtype;
+begin
+  select * into s_before from internal.dead_man_state where id=1;
+
+  -- The pre-fix path would raise 'invalid action: null' here.
+  perform internal.dead_man_tick();
+
+  select * into s_after from internal.dead_man_state where id=1;
+
+  -- Slot cleared.
+  if s_after.last_send_request_id is not null then
+    raise exception 'step 14 FAIL: NULL-pending confirm did not clear last_send_request_id (got %)',
+      s_after.last_send_request_id;
+  end if;
+  if s_after.pending_action is not null then
+    raise exception 'step 14 FAIL: NULL-pending confirm did not clear pending_action (got %)',
+      s_after.pending_action;
+  end if;
+  if s_after.pending_since is not null then
+    raise exception 'step 14 FAIL: NULL-pending confirm did not clear pending_since (got %)',
+      s_after.pending_since;
+  end if;
+  -- record() was NOT called: last_action and last_alert_at unchanged
+  -- from s_before (which has last_action='quiet', last_alert_at=null).
+  if s_after.last_action is distinct from s_before.last_action then
+    raise exception 'step 14 FAIL: NULL-pending confirm advanced last_action (before %, after %) — record() ran in error',
+      s_before.last_action, s_after.last_action;
+  end if;
+  if s_after.last_alert_at is distinct from s_before.last_alert_at then
+    raise exception 'step 14 FAIL: NULL-pending confirm advanced last_alert_at (before %, after %) — record() ran in error',
+      s_before.last_alert_at, s_after.last_alert_at;
+  end if;
+end $$;
+
+-- ───────────────────────────────────────────────────────────────────────────
+-- Step 15: FOR UPDATE on internal.dead_man_state is present in
+-- dead_man_tick (round-3 HIGH-1 regression guard).
+--
+-- Structural assertion against pg_proc.prosrc. Testing concurrent-tick
+-- serialisation behaviourally would require two psql sessions; this
+-- script is single-session. The function body is small and the FOR
+-- UPDATE clause is load-bearing — if a future edit drops it (either
+-- by accident or by rewrite), this assertion fires immediately.
+-- ───────────────────────────────────────────────────────────────────────────
+
+do $$
+declare
+  v_src text;
+begin
+  select prosrc into v_src
+    from pg_proc
+    where pronamespace = 'internal'::regnamespace
+      and proname = 'dead_man_tick';
+  if v_src is null then
+    raise exception 'step 15 FAIL: internal.dead_man_tick() not found';
+  end if;
+  -- Case-insensitive match for `for update` anywhere in the body. The
+  -- lock is only called from this function body today, so a lone
+  -- `for update` string there is unambiguous.
+  if v_src !~* '\bfor\s+update\b' then
+    raise exception 'step 15 FAIL: dead_man_tick body does not contain FOR UPDATE (round-3 HIGH-1 regression)';
+  end if;
+end $$;
+
 -- Rollback: leave the DB clean for the next test. All fixtures (vault
 -- secrets, heartbeat jobs, _http_response rows) were inserted inside
 -- this transaction; ROLLBACK below drops them.
