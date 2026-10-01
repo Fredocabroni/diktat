@@ -582,26 +582,27 @@ declare
 begin
   select * into s_before from internal.dead_man_state where id=1;
 
-  -- The pre-fix path would raise 'invalid action: null' here.
+  -- The pre-fix path would raise 'invalid action: null' here (because
+  -- the 200-confirm branch called dead_man_record(NULL)).
   perform internal.dead_man_tick();
 
   select * into s_after from internal.dead_man_state where id=1;
 
-  -- Slot cleared.
-  if s_after.last_send_request_id is not null then
-    raise exception 'step 14 FAIL: NULL-pending confirm did not clear last_send_request_id (got %)',
-      s_after.last_send_request_id;
+  -- (1) The wedged request_id (77777777) was cleared. The decision
+  --     phase re-synthesises a fresh send on the same tick because the
+  --     heartbeat is still 25-min stale and last_action stayed 'quiet'
+  --     (record was NOT called), so a non-null last_send_request_id
+  --     that is DIFFERENT from 77777777 is the right observable —
+  --     identical shape to step 12.
+  if s_after.last_send_request_id = 77777777 then
+    raise exception 'step 14 FAIL: NULL-pending confirm did not clear wedged request_id (still 77777777)';
   end if;
-  if s_after.pending_action is not null then
-    raise exception 'step 14 FAIL: NULL-pending confirm did not clear pending_action (got %)',
-      s_after.pending_action;
-  end if;
-  if s_after.pending_since is not null then
-    raise exception 'step 14 FAIL: NULL-pending confirm did not clear pending_since (got %)',
-      s_after.pending_since;
-  end if;
-  -- record() was NOT called: last_action and last_alert_at unchanged
-  -- from s_before (which has last_action='quiet', last_alert_at=null).
+
+  -- (2) record() was NOT called: last_action stayed 'quiet' and
+  --     last_alert_at stayed null. This is the load-bearing assertion
+  --     — the pre-fix bug was that dead_man_record(NULL) threw and
+  --     aborted the tick; post-fix the branch skips record() while
+  --     still clearing the slot.
   if s_after.last_action is distinct from s_before.last_action then
     raise exception 'step 14 FAIL: NULL-pending confirm advanced last_action (before %, after %) — record() ran in error',
       s_before.last_action, s_after.last_action;
