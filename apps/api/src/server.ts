@@ -5,6 +5,11 @@ import Fastify from 'fastify';
 
 import { buildContext, getOrBuildRedis, normalizeIpToCidr, type RedisClient } from './context.js';
 import { loadEnv } from './env.js';
+import {
+  evaluateOriginGate,
+  NO_ORIGIN_ALLOWED_PATHS,
+  ORIGIN_GATE_REJECTED_BODY,
+} from './origin-gate.js';
 import { buildOuterHookBlockedBody, OUTER_HOOK_WINDOW_SEC } from './outer-hook.js';
 import { checkGlobalOuterHook, extractRetryAfterSec } from './rate-limit.js';
 import { appRouter, type AppRouter } from './routers/index.js';
@@ -153,15 +158,43 @@ app.log.info(
   'telegram alerts',
 );
 
+// Origin-presence gate. Runs BEFORE @fastify/cors registers its own
+// hooks so rejection short-circuits the request lifecycle without CORS
+// response headers (the caller never sent an Origin to allow). Exempt
+// paths — currently `/health` for Railway's liveness probe — are listed
+// and justified in `./origin-gate.ts`. See #168.
+app.addHook('onRequest', async (request, reply) => {
+  const decision = evaluateOriginGate({
+    url: request.url,
+    originHeader: request.headers.origin,
+  });
+  if (decision.reject) {
+    return reply.code(403).send(ORIGIN_GATE_REJECTED_BODY);
+  }
+});
+
 await app.register(cors, {
   origin: (origin, cb) => {
-    if (!origin) return cb(null, true);
+    // The origin-presence gate above has already rejected any non-exempt
+    // path reaching this callback with an undefined origin. A no-origin
+    // request landing here must be an exempt path (e.g. `/health`); we
+    // STILL deny CORS allow-origin headers to it — the caller is
+    // server-to-server and does not consume CORS headers anyway, so
+    // declining is defense-in-depth with no legitimate caller harmed.
+    // Flipped from `cb(null, true)` per PR #82 security-reviewer MED.
+    if (!origin) return cb(null, false);
     cb(null, env.WEB_ORIGINS.includes(origin));
   },
   // Bearer-auth only; no cookies on this API surface. Leaving credentials off
   // narrows the blast radius if a future origin is allow-listed by mistake.
   credentials: false,
 });
+
+// Reference `NO_ORIGIN_ALLOWED_PATHS` so an untouched import does not
+// trigger the "unused export" lint. The symbol is re-exported for
+// server-side code (future admin routes, operational scripts) that
+// needs to coordinate with the gate's allowlist without re-declaring it.
+void NO_ORIGIN_ALLOWED_PATHS;
 
 // Outer-hook global IP-keyed ceiling. Runs BEFORE the tRPC plugin's
 // route handlers. Exempts `/health` (declared in
