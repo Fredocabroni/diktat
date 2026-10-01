@@ -66,13 +66,26 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
     ? null
     : ((profileResult.data?.[0] ?? null) as { onboarded_at: string | null } | null);
   if (!profile) {
+    // Recovery affordance (#148). The fail-closed branch above was a dead
+    // end — refresh keeps looping back here when the public.users row
+    // genuinely doesn't exist (rare: handle_new_user trigger failure at
+    // signup). A mailto gives the user a known escape to a human. Option
+    // (a) from the issue; (b) server-side repair RPC is deferred until
+    // the incident rate warrants it.
     return (
       <main className="mx-auto flex min-h-dvh max-w-md flex-col justify-center px-6">
         <h1 className="font-display text-2xl font-bold text-text-primary">
           Couldn&rsquo;t load your profile.
         </h1>
         <p className="mt-3 text-sm text-text-secondary">
-          Something went wrong on our side. Refresh to try again.
+          Refresh to try again. If it keeps failing, email{' '}
+          <a
+            href="mailto:support@diktat.app?subject=Can%27t%20load%20my%20profile"
+            className="text-text-primary underline underline-offset-2 hover:text-brand-accent"
+          >
+            support@diktat.app
+          </a>{' '}
+          with your account email and we&rsquo;ll fix it.
         </p>
       </main>
     );
