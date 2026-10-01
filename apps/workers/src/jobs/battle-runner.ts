@@ -386,7 +386,7 @@ async function emitRound(opts: {
     .maybeSingle()) as { data: { id: string } | null; error: { message: string } | null };
 
   if (selError || !existing) {
-    throw new Error(`emitRound: ${selError?.message ?? 'no row after conflict'}`);
+    throw new Error(`emitRound: ${scrubMessage(selError?.message ?? 'no row after conflict')}`);
   }
   return existing.id;
 }
@@ -515,7 +515,7 @@ async function settle(opts: {
   };
 
   if (answersErr || !answers) {
-    throw new Error(`settle.fetchAnswers: ${answersErr?.message ?? 'no rows'}`);
+    throw new Error(`settle.fetchAnswers: ${scrubMessage(answersErr?.message ?? 'no rows')}`);
   }
 
   const stats = new Map<string, { correct: number; latency: number }>();

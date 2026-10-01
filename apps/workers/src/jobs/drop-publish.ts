@@ -274,7 +274,7 @@ export const dropPublishHandler: JobHandler = async (row, deps) => {
     data: ActiveCandidate[] | null;
     error: { message: string } | null;
   };
-  if (candErr) throw new Error(`drop_publish: fetch candidates: ${candErr.message}`);
+  if (candErr) throw new Error(`drop_publish: fetch candidates: ${scrubMessage(candErr.message)}`);
   const candidates = candData ?? [];
   if (candidates.length === 0) {
     await stampPayload(deps, row.id, { ...row.payload, no_candidates: true });
@@ -294,7 +294,8 @@ export const dropPublishHandler: JobHandler = async (row, deps) => {
     data: { dedup_cluster_id: string }[] | null;
     error: { message: string } | null;
   };
-  if (blockedErr) throw new Error(`drop_publish: fetch blocked clusters: ${blockedErr.message}`);
+  if (blockedErr)
+    throw new Error(`drop_publish: fetch blocked clusters: ${scrubMessage(blockedErr.message)}`);
   const blockedClusters = new Set((blockedData ?? []).map((r) => r.dedup_cluster_id));
 
   // (3-6) Select.
@@ -343,7 +344,9 @@ export const dropPublishHandler: JobHandler = async (row, deps) => {
     .select('id')
     .single()) as { data: { id: string } | null; error: { message: string } | null };
   if (topicErr || !topicData) {
-    throw new Error(`drop_publish: insert news_topics: ${topicErr?.message ?? 'no row'}`);
+    throw new Error(
+      `drop_publish: insert news_topics: ${scrubMessage(topicErr?.message ?? 'no row')}`,
+    );
   }
 
   // (9) Auto-fact-check enqueue. Only when the rewrite produced a
@@ -553,7 +556,7 @@ async function enqueueDropFactCheck(
   if (selectErr || !claimRow) {
     deps.logger.warn({
       event: 'drop_publish.fact_check_select_failed',
-      message: selectErr?.message ?? 'no row',
+      message: scrubMessage(selectErr?.message ?? 'no row'),
     });
     return false;
   }

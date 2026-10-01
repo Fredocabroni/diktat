@@ -383,7 +383,7 @@ async function createBattle(
     .maybeSingle()) as { data: { id: string } | null; error: { message: string } | null };
 
   if (battleErr || !battle) {
-    throw new Error(`battles insert failed: ${battleErr?.message ?? 'no row'}`);
+    throw new Error(`battles insert failed: ${scrubMessage(battleErr?.message ?? 'no row')}`);
   }
   const battleId = battle.id;
 
@@ -395,7 +395,7 @@ async function createBattle(
   ])) as { error: { message: string } | null };
 
   if (partsErr) {
-    throw new Error(`battle_participants insert failed: ${partsErr.message}`);
+    throw new Error(`battle_participants insert failed: ${scrubMessage(partsErr.message)}`);
   }
 
   // Clear queue meta + mark both users as matched.

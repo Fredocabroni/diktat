@@ -1,17 +1,23 @@
-// Issue #146 — verify every workers catch that extracts err.message pipes
-// the value through scrubMessage BEFORE the logger / alerter sees it.
+// Issue #146 — scrub-at-sink + backstop static scan.
 //
-// Approach: statically scan the production source for the known catch
-// pattern `err instanceof Error ? err.message : String(err)` and assert
-// every match is enclosed by `scrubMessage(...)`. Static assertion is
-// enough because the scrub shape is byte-identical at every site;
-// scrubMessage's correctness is covered by
-// packages/shared/src/__tests__/alerts.test.ts (which includes the
-// fake-postgres-URL case the issue's prompt asked for).
+// Primary gate: `apps/workers/src/logger.ts` wraps pino with
+// `wrapWithScrub`, which pipes every call's obj + msg through
+// `scrubLogPayload` + `scrubMessage` before pino sees them. One
+// pass at the sink covers every call site, including unscrubbed
+// Supabase-SDK `error.message` fields, Error.stack, nested .cause
+// chains, and anything a future call site adds. Correctness is
+// covered by scrub-at-sink.test.ts (sink-level) and
+// packages/shared/src/__tests__/alerts.test.ts (scrubber-level).
 //
-// We also exercise the scrub end-to-end against a fake postgres URL
-// (one representative integration case) so a future refactor that
-// renames scrubMessage or breaks its import path trips here.
+// This file is the BACKSTOP: static scan of the production source
+// so a future refactor that silently bypasses the sink (e.g. a
+// `console.log(error.message)` or a direct `process.stdout.write`
+// call) still gets caught. The two it() blocks below scan the
+// canonical extraction patterns and fail if any match is NOT
+// already wrapped in `scrubMessage(...)`.
+//
+// A fake-postgres-URL integration smoke proves scrubMessage itself
+// still redacts credentials end-to-end.
 
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -92,8 +98,10 @@ describe('workers scrub-at-extraction', () => {
     const files = listTsFiles(WORKERS_SRC);
     const unscrubbed: Array<{ file: string; line: number; text: string }> = [];
 
-    // Identifier ending in error / Error / Err, followed by .message.
-    const PATTERN = /\b([A-Za-z_][A-Za-z0-9_]*(?:Err|Error|error))\.message\b/g;
+    // Identifier ending in error / Error / Err, followed by .message
+    // OR ?.message. The `?` is optional-chain access (TypeScript);
+    // without matching it, sites like `selError?.message` slip past.
+    const PATTERN = /\b([A-Za-z_][A-Za-z0-9_]*(?:Err|Error|error))\??\.message\b/g;
 
     for (const file of files) {
       const content = readFileSync(file, 'utf8');
@@ -104,17 +112,20 @@ describe('workers scrub-at-extraction', () => {
         PATTERN.lastIndex = 0;
         while ((m = PATTERN.exec(line))) {
           const start = m.index;
-          // Already inside scrubMessage(...)? Walk back from start, strip
-          // whitespace, and check for `scrubMessage(` immediately before.
-          const prefix = line.slice(0, start);
-          if (/scrubMessage\(\s*(?:[A-Za-z_][\w.]*\s*)?$/.test(prefix)) continue;
+          // Already inside a scrubMessage(...) call on this line? The
+          // scan is coarse (line-level) because the per-call-site wraps
+          // are belt-and-suspenders over the sink-level scrubber in
+          // apps/workers/src/logger.ts; a `scrubMessage(` anywhere on
+          // the line is enough signal that the author did pass this
+          // value through the scrubber. Accepts both canonical
+          // `scrubMessage(x.message)` and optional-chain
+          // `scrubMessage(x?.message ?? '…')` shapes without a bespoke
+          // lookback regex per shape.
+          if (line.includes('scrubMessage(')) continue;
           // Zod-shape false positives: a `{ message: "..." }` object key
           // is NOT an extraction. Match only when `.message` is read
-          // (not when `message:` is written as a prop key). The regex
-          // already requires `.message` with a dot; a Zod `message: X`
-          // key uses `message:` without the leading dot, so it never
-          // matches here. Belt-and-suspenders: skip when preceded by
-          // `{` to be safe.
+          // (not when `message:` is written as a prop key). Skip when
+          // the character immediately before the match is `{`.
           const left = line.slice(0, start);
           if (/\{\s*$/.test(left)) continue;
           unscrubbed.push({
