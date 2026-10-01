@@ -351,6 +351,15 @@ begin
   if s_row.last_send_request_id is null then
     raise exception 'step 10 FAIL: tick did not stash last_send_request_id';
   end if;
+  -- Round-1 HIGH-1: pending_since is stamped at send time (not next-tick
+  -- confirmation). Must be set alongside the request_id.
+  if s_row.pending_since is null then
+    raise exception 'step 10 FAIL: tick did not stash pending_since';
+  end if;
+  if s_row.pending_since < now() - interval '5 seconds' then
+    raise exception 'step 10 FAIL: pending_since looks stale (got %)',
+      s_row.pending_since;
+  end if;
   -- CRITICAL: last_action must NOT be 'fire' yet — the record() call is
   -- deferred until the next tick confirms delivery. If this assertion
   -- fails, the inline record() of pre-hardening behavior has leaked back.
@@ -398,6 +407,10 @@ begin
   if s_row.last_send_request_id is not null then
     raise exception 'step 11 FAIL: confirmed-200 tick did not clear last_send_request_id (got %)',
       s_row.last_send_request_id;
+  end if;
+  if s_row.pending_since is not null then
+    raise exception 'step 11 FAIL: confirmed-200 tick did not clear pending_since (got %)',
+      s_row.pending_since;
   end if;
   if s_row.last_alert_at is null then
     raise exception 'step 11 FAIL: record(fire) did not stamp last_alert_at';
@@ -478,6 +491,63 @@ begin
   if s_after.pending_action is distinct from 'fire' then
     raise exception 'step 12 FAIL: expected pending_action=fire after re-synthesis, got %',
       s_after.pending_action;
+  end if;
+end $$;
+
+-- ───────────────────────────────────────────────────────────────────────────
+-- Step 13: FORCE-CLEAR after >10 min of no response row — HIGH-1 regression
+-- guard.
+--
+-- The pre-fix 10-min force-clear keyed on `last_alert_at`, which is only
+-- stamped by NEXT-tick confirmation. On a first-ever fire cycle
+-- (`last_alert_at IS NULL`) the guard short-circuited and the pending
+-- slot was wedged forever. The fix keys on `pending_since` (set inside
+-- dead_man_send alongside the request_id).
+--
+-- Setup: reset state to a "first-ever fire" shape (last_alert_at=null),
+-- stash a pending slot with pending_since 11 min ago, run the tick
+-- without a corresponding net._http_response row.
+--
+-- Expect: force-clear fires. The slot (last_send_request_id, pending_action,
+-- pending_since) is wiped. last_alert_at stays NULL — this guard is
+-- about surviving the first-cycle case specifically.
+-- ───────────────────────────────────────────────────────────────────────────
+
+update internal.dead_man_state
+   set last_action='quiet',
+       last_alert_at=null,
+       last_recover_at=null,
+       last_send_request_id=99999999,
+       pending_action='fire',
+       pending_since=now() - interval '11 minutes'
+ where id=1;
+
+do $$
+declare
+  s_after  internal.dead_man_state%rowtype;
+begin
+  -- No net._http_response row exists for request_id=99999999, and
+  -- pending_since is 11 min ago — force-clear path.
+  perform internal.dead_man_tick();
+
+  select * into s_after from internal.dead_man_state where id=1;
+
+  if s_after.last_send_request_id is not null then
+    raise exception 'step 13 FAIL: wedged-pending force-clear did not wipe last_send_request_id (got %)',
+      s_after.last_send_request_id;
+  end if;
+  if s_after.pending_action is not null then
+    raise exception 'step 13 FAIL: wedged-pending force-clear did not wipe pending_action (got %)',
+      s_after.pending_action;
+  end if;
+  -- pending_since should be either null (force-clear wiped it) OR set
+  -- fresh by the SAME tick's decision phase (if should_fire re-fired).
+  -- Both are correct — the hard contract is just "the wedged 11-min-ago
+  -- value is gone".
+  if s_after.pending_since is not null
+     and s_after.pending_since < now() - interval '5 seconds' then
+    raise exception 'step 13 FAIL: wedged-pending force-clear left stale pending_since (got %)',
+      s_after.pending_since;
   end if;
 end $$;
 

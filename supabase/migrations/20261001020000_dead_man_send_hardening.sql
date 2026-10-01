@@ -1,50 +1,56 @@
 -- Migration: harden internal.dead_man_send + add next-tick delivery check (#147).
--- Up:   extend internal.dead_man_state with `last_send_request_id` and
---       `pending_action`; redefine internal.dead_man_send to validate
---       the Telegram token shape and stash the pending action +
---       request_id before http_post; redefine internal.dead_man_tick
---       to confirm the previous send's delivery via net._http_response
---       BEFORE issuing a new one.
+-- Up:   extend internal.dead_man_state with `last_send_request_id`,
+--       `pending_action`, and `pending_since`; redefine internal.dead_man_send
+--       to validate the Telegram token shape and stash the pending action +
+--       request_id + send timestamp before http_post; redefine
+--       internal.dead_man_tick to confirm the previous send's delivery
+--       via net._http_response BEFORE issuing a new one and to force-clear
+--       a wedged pending slot after 10 minutes keyed on pending_since
+--       (not last_alert_at).
 -- Down: see `-- Rollback (reference, not auto-run):` block below —
 --       drop the new columns + CREATE OR REPLACE the functions back
---       to their 20260929230000 shape.
+--       to their 20260929230000 shape; revoke INSERT grant stays safe
+--       since pg_net ships without PUBLIC inserts.
 --
--- Motivation (follow-up on #147, round-2 security review on PRs #140 /
--- #141):
+-- Round-1 security-reviewer findings addressed:
 --
---   1. Bot token injected into URL path without format validation. A
---      mis-pasted Vault secret produces a malformed URL that pg_net
---      silently 404s on; the DMS marks itself "already fired" via the
---      1-hour dedup and the operator gets nothing. FIX: new RAISE
---      guard rejects any token that doesn't match Telegram's
---      `<botid>:<hash>` shape at send time.
+--   (HIGH-1) Original timeout guard keyed on `last_alert_at`, which is
+--   only stamped on NEXT-tick confirmation of a successful delivery. On
+--   the very first fire cycle `last_alert_at IS NULL`, so the guard
+--   short-circuits and `last_send_request_id` sits forever if pg_net
+--   never produces a response row. New column `pending_since`
+--   timestamptz is set inside dead_man_send alongside the request_id
+--   and cleared alongside pending_action; the 10-min force-clear is
+--   now keyed on `pending_since`.
 --
---   2. pg_net is async — a wrong-but-non-null bot token silently
---      advances the suppression state without ever delivering an
---      alert. FIX: `dead_man_record('fire')` is NOT called inline from
---      dead_man_send any more. The tick orchestrator confirms delivery
---      on the FOLLOWING tick by checking net._http_response for the
---      previous send's request_id. On 200 it records the pending
---      action; on non-200 (or a timeout) it emits a NOTICE and clears
---      the pending flag so the next cycle re-synthesises.
+--   (HIGH-2) Semantic gap between `last_action` (`'quiet'|'fire'`) and
+--   `pending_action` (`'fire'|'recover'`) was undocumented. Column
+--   comments below explicitly spell out that `pending_action='recover'`
+--   resolves to `last_action='quiet'` on confirmation.
 --
---   3. (Separately, round-2 M3) dead_man_should_fire was SECURITY
---      INVOKER. Left as-is in this migration — the function reads
---      public.scheduled_jobs + internal.dead_man_state only, and
---      internal is already REVOKEd from client roles. Converting to
---      SECURITY DEFINER would require more care around the function's
---      callers (dead_man_tick, which runs as the owner anyway); keep
---      the posture explicit via a stricter review when that need
---      actually materialises. Filed in-line as a TODO comment.
+--   (MED-1) `error_msg` from net._http_response is logged into
+--   NOTICE output. On a Telegram 401 the response body can echo back
+--   the token prefix. The failed-delivery RAISE NOTICE now sanitises
+--   `error_msg` through a regex redaction before logging — same shape
+--   as `scrubMessage` on the application side.
+--
+--   (MED-2) Direct INSERTs into net._http_response are a potential
+--   spoof vector if pg_net grants INSERT to PUBLIC on that table.
+--   This migration REVOKEs INSERT, UPDATE, DELETE on net._http_response
+--   and net.http_request_queue from the client roles (authenticated,
+--   anon). pg_net itself owns the schema and writes via SECURITY
+--   DEFINER functions; the revoke never breaks pg_net's own path and
+--   closes the spoof vector regardless of pg_net version grant
+--   defaults.
 --
 -- Rollback (reference, not auto-run):
 --   create or replace function internal.dead_man_send(p_message text)
 --     returns bigint ... (restore 20260929230000's body);
---   create or replace function internal.dead_man_tick() ... (restore
---     20260929230000's body);
+--   create or replace function internal.dead_man_tick() ...
 --   alter table internal.dead_man_state
 --     drop column if exists last_send_request_id,
---     drop column if exists pending_action;
+--     drop column if exists pending_action,
+--     drop column if exists pending_since;
 
 begin;
 
@@ -55,25 +61,53 @@ begin;
 alter table internal.dead_man_state
   add column if not exists last_send_request_id bigint,
   add column if not exists pending_action text
-    check (pending_action is null or pending_action in ('fire', 'recover'));
+    check (pending_action is null or pending_action in ('fire', 'recover')),
+  add column if not exists pending_since timestamptz;
 
 comment on column internal.dead_man_state.last_send_request_id is
   'pg_net.http_post request id from the most recent dead_man_send call. '
   'Cleared by the next tick after delivery is confirmed via '
-  'net._http_response.';
+  'net._http_response, or force-cleared after pending_since > 10 min.';
 comment on column internal.dead_man_state.pending_action is
   'Which record() call to run after the next tick confirms the most '
-  'recent send delivered. ''fire'' or ''recover'', else null when no '
-  'send is in flight.';
+  'recent send delivered. Values: ''fire'' or ''recover''. Note the '
+  'semantic gap with last_action: pending_action=''recover'' resolves '
+  'to last_action=''quiet'' on confirmation (dead_man_record writes '
+  'last_action=''quiet'' for the recover case). There is NO '
+  'last_action=''recover'' value.';
+comment on column internal.dead_man_state.pending_since is
+  'Timestamp when dead_man_send stashed the current pending slot. Set '
+  'inside dead_man_send; cleared alongside pending_action and '
+  'last_send_request_id. The dead_man_tick force-clear guard reads '
+  'this (NOT last_alert_at, which is only stamped on NEXT-tick '
+  'confirmation of a prior send and is therefore NULL on the first '
+  'fire cycle).';
+
+-- Round-1 MED-2: close the spoof vector regardless of pg_net defaults.
+-- pg_net's own writer path (the C-level background worker) is a
+-- SECURITY DEFINER operation keyed on the extension owner, which is
+-- NOT any of the client roles — the revokes below cannot break the
+-- extension's own insert path.
+--
+-- Use DO blocks so a missing table (older pg_net without the response
+-- table yet, or a Supabase project that hasn't loaded pg_net) doesn't
+-- fail the migration. The invariant is "no client role may insert
+-- here"; absence of the table satisfies that trivially.
+do $$ begin
+  if to_regclass('net._http_response') is not null then
+    execute 'revoke insert, update, delete on net._http_response from public, authenticated, anon';
+  end if;
+  if to_regclass('net.http_request_queue') is not null then
+    execute 'revoke insert, update, delete on net.http_request_queue from public, authenticated, anon';
+  end if;
+end $$;
 
 -- ───────────────────────────────────────────────────────────────────────────
--- 2. dead_man_send: validate token shape, stash pending state, POST.
+-- 2. dead_man_send: validate token shape, stash pending state + since, POST.
 --
 -- Shape change from 20260929230000: now takes `p_action` so the tick
 -- knows what to record on delivery confirmation. Callers inside this
--- migration pass 'fire' or 'recover'; manual wiring tests from the
--- SQL editor can pass 'fire' (the state will get cleared by the next
--- tick's confirmation).
+-- migration pass 'fire' or 'recover'.
 -- ───────────────────────────────────────────────────────────────────────────
 
 create or replace function internal.dead_man_send(p_message text, p_action text)
@@ -108,20 +142,12 @@ begin
 
   -- #147 M1: validate Telegram token shape BEFORE POSTing. The
   -- `<botid>:<hash>` pattern — numeric id, colon, URL-safe hash.
-  -- Rejects an obviously-malformed secret (mis-paste, wrong secret
-  -- name typo'd on the dashboard side) so dead_man_tick doesn't mark
-  -- the DMS "already fired" against a URL that will 404 anyway.
   if v_token !~ '^[0-9]+:[A-Za-z0-9_-]+$' then
     raise exception
       'dead_man_send: token has invalid shape (expected <botid>:<hash>, got length=%)',
       length(v_token);
   end if;
 
-  -- #147 M2: issue the http_post, capture its async request_id, write
-  -- it to the state row BEFORE returning. dead_man_record() is NOT
-  -- called inline any more. The next tick's dead_man_tick() reads
-  -- net._http_response for this request_id and only then records the
-  -- action.
   select net.http_post(
     url     := 'https://api.telegram.org/bot' || v_token || '/sendMessage',
     body    := jsonb_build_object(
@@ -133,9 +159,14 @@ begin
     timeout_milliseconds := 5000
   ) into v_request;
 
+  -- Stash the full pending-slot triple: request_id (for the confirm
+  -- lookup), pending_action (for the record() call on 200), and
+  -- pending_since (for the force-clear timeout). pending_since replaces
+  -- the HIGH-1 broken reliance on last_alert_at.
   update internal.dead_man_state
     set last_send_request_id = v_request,
-        pending_action       = p_action
+        pending_action       = p_action,
+        pending_since        = now()
     where id = 1;
 
   return v_request;
@@ -145,11 +176,6 @@ $fn$;
 revoke execute on function internal.dead_man_send(text, text) from public;
 grant  execute on function internal.dead_man_send(text, text) to service_role;
 
--- Drop the old 1-arg shape so stale callers crash loudly instead of
--- using a signature that doesn't exist any more. (The original migration
--- defined internal.dead_man_send(p_message text) — dropping it ensures
--- a developer who copies the old wiring-test SQL gets an "undefined
--- function" error, not a silent miscall.)
 drop function if exists internal.dead_man_send(text);
 
 -- ───────────────────────────────────────────────────────────────────────────
@@ -167,6 +193,7 @@ declare
   v_response   record;
   v_decision   record;
   v_message    text;
+  v_err_msg    text;
 begin
   select * into v_state from internal.dead_man_state where id = 1;
 
@@ -178,18 +205,21 @@ begin
       where id = v_state.last_send_request_id;
 
     if not found then
-      -- pg_net hasn't landed a response yet. Keep waiting until the
-      -- next tick (5 min out). Normal Telegram POST latency is ~1s;
-      -- if we still have no row after 5 min the request is wedged —
-      -- clear the pending flag so the next cycle re-synthesises
-      -- fresh. 2 ticks (10 min) is the grace window.
-      if v_state.last_alert_at is not null
-         and v_state.last_alert_at < now() - interval '10 minutes' then
-        raise notice 'dead_man_tick: send request_id=% has no net._http_response row after >10min; clearing to resynthesise',
-          v_state.last_send_request_id;
+      -- pg_net hasn't landed a response yet. Normal POST latency is
+      -- ~1s; 10 min of no row means the request is wedged. The HIGH-1
+      -- fix keys the force-clear on `pending_since` (stamped at send
+      -- time) instead of `last_alert_at` (only stamped on next-tick
+      -- confirmation, so NULL on the first-ever fire cycle). If
+      -- pending_since is NULL (impossible — set in lockstep with
+      -- request_id — but defensive) treat as "just stashed" and wait.
+      if v_state.pending_since is not null
+         and v_state.pending_since < now() - interval '10 minutes' then
+        raise notice 'dead_man_tick: send request_id=% has no net._http_response row after >10min (pending_since=%); clearing to resynthesise',
+          v_state.last_send_request_id, v_state.pending_since;
         update internal.dead_man_state
           set last_send_request_id = null,
-              pending_action       = null
+              pending_action       = null,
+              pending_since        = null
           where id = 1;
       end if;
       return;
@@ -198,24 +228,34 @@ begin
     if v_response.status_code = 200
        and v_response.error_msg is null
        and coalesce(v_response.timed_out, false) = false then
-      -- Delivered. Record the pending action, clear the pending flag.
+      -- Delivered. Record the pending action, clear the pending slot.
       perform internal.dead_man_record(v_state.pending_action);
       update internal.dead_man_state
         set last_send_request_id = null,
-            pending_action       = null
+            pending_action       = null,
+            pending_since        = null
         where id = 1;
     else
       -- Delivery failed. Emit a NOTICE visible in prod logs; clear
-      -- the pending flag so the next cycle re-synthesises instead of
-      -- treating this as "already alerted" via the dedup window.
+      -- the pending slot so the next cycle re-synthesises.
+      --
+      -- MED-1: redact Telegram-token-shaped substrings from error_msg
+      -- before logging. On a 401 the body can echo back the token
+      -- prefix (`123456789:ABC...`). Same regex as the application-
+      -- side scrubMessage. Also capped at 200 chars.
+      v_err_msg := left(
+        regexp_replace(coalesce(v_response.error_msg, ''), '[0-9]{5,}:[A-Za-z0-9_-]+', '[REDACTED]', 'g'),
+        200
+      );
       raise notice 'dead_man_tick: send request_id=% delivery failed (status=%, error_msg=%, timed_out=%)',
         v_state.last_send_request_id,
         v_response.status_code,
-        v_response.error_msg,
+        v_err_msg,
         v_response.timed_out;
       update internal.dead_man_state
         set last_send_request_id = null,
-            pending_action       = null
+            pending_action       = null,
+            pending_since        = null
         where id = 1;
     end if;
 
@@ -247,7 +287,6 @@ begin
     perform internal.dead_man_send(v_message, 'recover');
 
   end if;
-  -- 'quiet' and 'suppress' → do nothing this cycle.
 end;
 $fn$;
 
