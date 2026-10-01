@@ -3,6 +3,7 @@ import cors from '@fastify/cors';
 import { fastifyTRPCPlugin, type FastifyTRPCPluginOptions } from '@trpc/server/adapters/fastify';
 import Fastify from 'fastify';
 
+import { checkJwtIssuer } from './activation-safety.js';
 import { buildContext, getOrBuildRedis, normalizeIpToCidr, type RedisClient } from './context.js';
 import { loadEnv } from './env.js';
 import { buildOuterHookBlockedBody, OUTER_HOOK_WINDOW_SEC } from './outer-hook.js';
@@ -66,6 +67,24 @@ if (
         'rate-limit counter collapses to the proxy IP and the public-tier budgets are ' +
         'bypassed. Set TRUSTED_PROXY_HOPS to the reverse-proxy chain depth (Railway edge ' +
         '= 1, +1 per CDN). See the M5 trustProxy gate in docs/TYRION_BUILD_QUEUE.md.',
+    }),
+  );
+  process.exit(1);
+}
+
+// Second activation-safety gate (#169): SUPABASE_JWT_ISSUER required in
+// non-dev/test. Factored into ./activation-safety.ts so the predicate
+// is unit-testable without booting Fastify. Same exclusion-list posture
+// as the TRUSTED_PROXY_HOPS gate above — fails CLOSED on unknown
+// NODE_ENV values.
+const jwtIssuerFailure = checkJwtIssuer(env);
+if (jwtIssuerFailure) {
+  console.error(
+    JSON.stringify({
+      event: 'boot.activation_safety_failed',
+      reason: jwtIssuerFailure.reason,
+      nodeEnv: env.NODE_ENV,
+      message: jwtIssuerFailure.message,
     }),
   );
   process.exit(1);
