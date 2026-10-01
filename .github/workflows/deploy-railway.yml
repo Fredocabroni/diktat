@@ -93,6 +93,12 @@ jobs:
       - name: Install Railway CLI
         run: npm i -g @railway/cli@5.20.0
 
+      # (The earlier `Stamp .deploy-sha` step was removed on 2026-10-01
+      # with the GHA deploy path's retirement. Railway's own git
+      # auto-deploy populates `RAILWAY_GIT_COMMIT_SHA` on the running
+      # container, which `resolveDeploySha` reads directly — no file
+      # stamp needed. See `packages/shared/src/deploy-sha.ts`.)
+
       - name: Deploy
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
