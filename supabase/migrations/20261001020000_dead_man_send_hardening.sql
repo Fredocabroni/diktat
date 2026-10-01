@@ -34,14 +34,18 @@
 --   `error_msg` through a regex redaction before logging — same shape
 --   as `scrubMessage` on the application side.
 --
---   (MED-2) Direct INSERTs into net._http_response are a potential
---   spoof vector if pg_net grants INSERT to PUBLIC on that table.
---   This migration REVOKEs INSERT, UPDATE, DELETE on net._http_response
---   and net.http_request_queue from the client roles (authenticated,
---   anon). pg_net itself owns the schema and writes via SECURITY
---   DEFINER functions; the revoke never breaks pg_net's own path and
---   closes the spoof vector regardless of pg_net version grant
---   defaults.
+--   (MED-2) Original revision of this migration added REVOKEs on
+--   net._http_response + net.http_request_queue. Pulled from this PR
+--   on operator ask (2026-10-01) — grants on Supabase-managed extension
+--   tables are reset by extension upgrades, and the mitigation strength
+--   doesn't justify the ongoing maintenance risk of silently
+--   disappearing on a `supabase extensions update`. Spoof vector is
+--   theoretical (requires an attacker who already knows a live
+--   last_send_request_id bigint AND holds INSERT on net._http_response,
+--   which pg_net does not grant to authenticated/anon by default on
+--   current versions). Filed as #163 so the grants are audited against
+--   the live prod posture before any REVOKE lands via its own
+--   dedicated migration.
 --
 -- Rollback (reference, not auto-run):
 --   create or replace function internal.dead_man_send(p_message text)
@@ -83,24 +87,9 @@ comment on column internal.dead_man_state.pending_since is
   'confirmation of a prior send and is therefore NULL on the first '
   'fire cycle).';
 
--- Round-1 MED-2: close the spoof vector regardless of pg_net defaults.
--- pg_net's own writer path (the C-level background worker) is a
--- SECURITY DEFINER operation keyed on the extension owner, which is
--- NOT any of the client roles — the revokes below cannot break the
--- extension's own insert path.
---
--- Use DO blocks so a missing table (older pg_net without the response
--- table yet, or a Supabase project that hasn't loaded pg_net) doesn't
--- fail the migration. The invariant is "no client role may insert
--- here"; absence of the table satisfies that trivially.
-do $$ begin
-  if to_regclass('net._http_response') is not null then
-    execute 'revoke insert, update, delete on net._http_response from public, authenticated, anon';
-  end if;
-  if to_regclass('net.http_request_queue') is not null then
-    execute 'revoke insert, update, delete on net.http_request_queue from public, authenticated, anon';
-  end if;
-end $$;
+-- (Round-1 MED-2 REVOKE on net._http_response / net.http_request_queue
+-- removed on 2026-10-01 operator ask. See header for rationale and the
+-- follow-up issue in the PR body.)
 
 -- ───────────────────────────────────────────────────────────────────────────
 -- 2. dead_man_send: validate token shape, stash pending state + since, POST.
