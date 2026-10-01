@@ -65,4 +65,14 @@ comment on column public.news_adapter_health.last_fresh_insert_at is
 -- adds a scoped read policy when it's built.
 alter table public.news_adapter_health enable row level security;
 
+-- Belt-and-suspenders explicit REVOKE from client roles. RLS alone
+-- blocks reads/writes to new tables for authenticated/anon, but
+-- `alter default privileges` statements added later for a different
+-- feature could silently open this table to a client role. Explicit
+-- REVOKE on this table makes the intent part of the schema and
+-- survives a later default-privileges change. Mirrors the pattern in
+-- 20260616120000_drop_pipeline.sql on public.news_topics_candidates.
+-- Round-1 security-reviewer finding 1 on PR #154.
+revoke all on public.news_adapter_health from anon, authenticated;
+
 commit;
