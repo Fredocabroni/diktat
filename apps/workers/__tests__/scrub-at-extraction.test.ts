@@ -73,6 +73,69 @@ describe('workers scrub-at-extraction', () => {
     }
   });
 
+  // Round-1 security-reviewer HIGH-2: the canonical-ternary scan above
+  // misses Supabase-SDK error.message extractions, which can carry
+  // DSN / connection-info in the message string when a Postgres
+  // connection fails. Catch every `<ident>.message` where <ident> ends
+  // in `error` / `Error` / `Err` and the match is NOT already enclosed
+  // in `scrubMessage(...)`.
+  //
+  // Narrow allow-list of identifiers that MUST stay unscrubbed:
+  //   - `err.message` extractions already in `scrubMessage(...)` form
+  //     (the first test above gates those).
+  //   - Zod schema definitions (`.message` as a Zod option key) —
+  //     filtered via the leading `{` check in the match context.
+  //
+  // Any new `error.message`-style site added without scrubMessage trips
+  // this. Same reference pattern applies: wrap at the extraction site.
+  it('every Supabase-SDK error.message extraction is wrapped in scrubMessage', () => {
+    const files = listTsFiles(WORKERS_SRC);
+    const unscrubbed: Array<{ file: string; line: number; text: string }> = [];
+
+    // Identifier ending in error / Error / Err, followed by .message.
+    const PATTERN = /\b([A-Za-z_][A-Za-z0-9_]*(?:Err|Error|error))\.message\b/g;
+
+    for (const file of files) {
+      const content = readFileSync(file, 'utf8');
+      const lines = content.split('\n');
+      for (let i = 0; i < lines.length; i += 1) {
+        const line = lines[i]!;
+        let m: RegExpExecArray | null;
+        PATTERN.lastIndex = 0;
+        while ((m = PATTERN.exec(line))) {
+          const start = m.index;
+          // Already inside scrubMessage(...)? Walk back from start, strip
+          // whitespace, and check for `scrubMessage(` immediately before.
+          const prefix = line.slice(0, start);
+          if (/scrubMessage\(\s*(?:[A-Za-z_][\w.]*\s*)?$/.test(prefix)) continue;
+          // Zod-shape false positives: a `{ message: "..." }` object key
+          // is NOT an extraction. Match only when `.message` is read
+          // (not when `message:` is written as a prop key). The regex
+          // already requires `.message` with a dot; a Zod `message: X`
+          // key uses `message:` without the leading dot, so it never
+          // matches here. Belt-and-suspenders: skip when preceded by
+          // `{` to be safe.
+          const left = line.slice(0, start);
+          if (/\{\s*$/.test(left)) continue;
+          unscrubbed.push({
+            file: file.replace(WORKERS_SRC, 'apps/workers/src'),
+            line: i + 1,
+            text: line.trim(),
+          });
+        }
+      }
+    }
+
+    if (unscrubbed.length > 0) {
+      const formatted = unscrubbed.map((u) => `  ${u.file}:${u.line}  ${u.text}`).join('\n');
+      throw new Error(
+        `Found ${unscrubbed.length} unscrubbed <error>.message extraction(s) in apps/workers/src/:\n${formatted}\n` +
+          'Wrap each via `scrubMessage(<path>.error.message)` at the extraction site. ' +
+          'See the reference pattern already in scheduler.ts / battle-runner.ts / etc.',
+      );
+    }
+  });
+
   it('scrubMessage redacts a fake postgres URL end-to-end (integration smoke)', () => {
     const raw =
       'ECONNREFUSED postgres://alice:s3cret@db.internal:5432/prod host=db.internal token=t_abc';

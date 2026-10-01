@@ -166,7 +166,7 @@ export async function runTriviaGen(
       logger.error({
         event: 'trivia.gen.insert_failed',
         category: input.category,
-        message: insertErr.message,
+        message: scrubMessage(insertErr.message),
       });
       failed += 1;
       continue;
@@ -239,12 +239,17 @@ function classifyVerifierFailure(err: unknown): 'schema_mismatch' | 'provider_er
   return 'provider_error';
 }
 
-/** Deepest message in the cause chain — the real failure, not the wrapper. */
+/** Deepest message in the cause chain — the real failure, not the wrapper.
+ *  Round-1 security-reviewer HIGH-1 on #146: scrub inside the loop body.
+ *  The previous shape scrubbed only the initial err.message and then
+ *  overwrote `message` with the raw cursor.message on every iteration,
+ *  so any chained error (e.g. a Postgres connection error carrying a
+ *  DSN) landed in the returned string unredacted. */
 function rootCauseMessage(err: unknown): string {
   let cursor: unknown = err;
   let message = scrubMessage(err instanceof Error ? err.message : String(err));
   for (let depth = 0; depth < 8 && cursor instanceof Error; depth++) {
-    message = cursor.message;
+    message = scrubMessage(cursor.message);
     cursor = (cursor as { cause?: unknown }).cause;
   }
   return message;

@@ -261,7 +261,7 @@ async function maxEmittedRoundNo(supabase: ServiceClient, battleId: string): Pro
     data: { round_no: number }[] | null;
     error: { message: string } | null;
   };
-  if (error) throw new Error(`maxEmittedRoundNo: ${error.message}`);
+  if (error) throw new Error(`maxEmittedRoundNo: ${scrubMessage(error.message)}`);
   // -1 when no rounds are emitted yet, so `resumeFrom = max + 1` starts at 0.
   return (data ?? []).reduce((m, r) => (r.round_no > m ? r.round_no : m), -1);
 }
@@ -333,7 +333,7 @@ async function fetchQuestions(supabase: ServiceClient, count: number): Promise<Q
     error: { message: string } | null;
   };
 
-  if (error) throw new Error(`fetchQuestions: ${error.message}`);
+  if (error) throw new Error(`fetchQuestions: ${scrubMessage(error.message)}`);
   const pool = data ?? [];
   // Shuffle then slice — simplest randomization for V1.
   for (let i = pool.length - 1; i > 0; i -= 1) {
@@ -371,7 +371,7 @@ async function emitRound(opts: {
     .maybeSingle()) as { data: { id: string } | null; error: { message: string } | null };
 
   if (error) {
-    throw new Error(`emitRound: ${error.message}`);
+    throw new Error(`emitRound: ${scrubMessage(error.message)}`);
   }
   if (data) return data.id;
 
@@ -430,7 +430,7 @@ async function emitBotAnswer(opts: {
   )) as { error: { message: string } | null };
 
   if (error) {
-    throw new Error(`emitBotAnswer: ${error.message}`);
+    throw new Error(`emitBotAnswer: ${scrubMessage(error.message)}`);
   }
 }
 
@@ -453,7 +453,7 @@ async function loadRoundForBackfill(
     data: { id: string; payload: { questionId?: string } | null } | null;
     error: { message: string } | null;
   };
-  if (roundErr) throw new Error(`loadRoundForBackfill: ${roundErr.message}`);
+  if (roundErr) throw new Error(`loadRoundForBackfill: ${scrubMessage(roundErr.message)}`);
   const questionId = round?.payload?.questionId;
   if (!round || !questionId) return null;
 
@@ -463,7 +463,7 @@ async function loadRoundForBackfill(
     .select('id, category, prompt, choices, correct_index, difficulty')
     .eq('id', questionId)
     .maybeSingle()) as { data: QuestionRow | null; error: { message: string } | null };
-  if (qErr) throw new Error(`loadRoundForBackfill: ${qErr.message}`);
+  if (qErr) throw new Error(`loadRoundForBackfill: ${scrubMessage(qErr.message)}`);
   if (!question) return null;
 
   return { roundId: round.id, question };
@@ -494,7 +494,7 @@ async function settle(opts: {
     .maybeSingle()) as { data: { status: string } | null; error: { message: string } | null };
 
   if (statusErr) {
-    throw new Error(`settle.fetchStatus: ${statusErr.message}`);
+    throw new Error(`settle.fetchStatus: ${scrubMessage(statusErr.message)}`);
   }
   if (!statusRow || statusRow.status !== 'live') {
     opts.logger.info({
@@ -593,7 +593,7 @@ async function settle(opts: {
     .select('id')) as { data: { id: string }[] | null; error: { message: string } | null };
 
   if (updateErr) {
-    throw new Error(`settle.battleUpdate: ${updateErr.message}`);
+    throw new Error(`settle.battleUpdate: ${scrubMessage(updateErr.message)}`);
   }
   if (!claimed || claimed.length === 0) {
     opts.logger.info({ event: 'battle.runner.settle_claim_lost', battleId: opts.battleId });

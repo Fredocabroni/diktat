@@ -100,7 +100,7 @@ export async function handlePrivyProvision(
     .maybeSingle()) as { data: WalletShellRow | null; error: { message: string } | null };
 
   if (error) {
-    logger.error({ event: 'privy.read_failed', userId, message: error.message });
+    logger.error({ event: 'privy.read_failed', userId, message: scrubMessage(error.message) });
     return { status: 'failed', reason: 'wallet_missing' };
   }
 
@@ -136,7 +136,7 @@ export async function handlePrivyProvision(
         logger.error({
           event: 'privy.update_failed',
           userId,
-          message: update.error.message,
+          message: scrubMessage(update.error.message),
         });
         return { status: 'failed', reason: 'retries_exhausted' };
       }
@@ -166,7 +166,9 @@ export async function handlePrivyProvision(
   logger.error({
     event: 'privy.failed',
     userId,
-    message: scrubMessage(lastError instanceof Error ? lastError.message : String(lastError)),
+    message: scrubMessage(
+      lastError instanceof Error ? scrubMessage(lastError.message) : String(lastError),
+    ),
   });
   return { status: 'failed', reason: 'retries_exhausted' };
 }

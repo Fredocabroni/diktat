@@ -370,7 +370,7 @@ export const dropPublishHandler: JobHandler = async (row, deps) => {
   if (markErr) {
     deps.logger.warn({
       event: 'drop_publish.mark_selected_failed',
-      message: markErr.message,
+      message: scrubMessage(markErr.message),
     });
     // Non-fatal: the news_topics row was inserted; candidates table
     // staleness self-heals on the next retention sweep.
@@ -539,7 +539,7 @@ async function enqueueDropFactCheck(
   if (upsertErr) {
     deps.logger.warn({
       event: 'drop_publish.fact_check_upsert_failed',
-      message: upsertErr.message,
+      message: scrubMessage(upsertErr.message),
     });
     return false;
   }
@@ -574,7 +574,10 @@ async function enqueueDropFactCheck(
     // 23505 = unique violation on (job_type, idempotency_key) — a same-
     // UTC-day re-enqueue is acceptable (orchestrator cache-hits anyway).
     if (jobErr.code === '23505') return false;
-    deps.logger.warn({ event: 'drop_publish.fact_check_enqueue_failed', message: jobErr.message });
+    deps.logger.warn({
+      event: 'drop_publish.fact_check_enqueue_failed',
+      message: scrubMessage(jobErr.message),
+    });
     return false;
   }
   return true;

@@ -471,7 +471,7 @@ async function insertCandidate(
       event: 'news_ingest.insert_failed',
       provider: c.source_provider,
       url: c.source_url,
-      message: error.message,
+      message: scrubMessage(error.message),
     });
     return false;
   }
@@ -489,7 +489,7 @@ async function stampPayload(
     .update({ payload })
     .eq('id', rowId)) as { error: { message: string } | null };
   if (error) {
-    throw new Error(`news_ingest: stamp payload: ${error.message}`);
+    throw new Error(`news_ingest: stamp payload: ${scrubMessage(error.message)}`);
   }
 }
 

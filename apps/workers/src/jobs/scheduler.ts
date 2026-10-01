@@ -248,7 +248,7 @@ async function reapStaleLocks(deps: SchedulerDeps): Promise<number> {
     data: { id: string }[] | null;
     error: { message: string } | null;
   };
-  if (error) throw new Error(`reapStaleLocks: ${error.message}`);
+  if (error) throw new Error(`reapStaleLocks: ${scrubMessage(error.message)}`);
   return data?.length ?? 0;
 }
 
@@ -261,7 +261,7 @@ async function claimBatch(deps: SchedulerDeps): Promise<ScheduledJobRow[]> {
     p_limit: CLAIM_BATCH,
     p_worker_id: deps.workerId,
   })) as { data: ScheduledJobRow[] | null; error: { message: string } | null };
-  if (error) throw new Error(`claim_scheduled_jobs: ${error.message}`);
+  if (error) throw new Error(`claim_scheduled_jobs: ${scrubMessage(error.message)}`);
   return data ?? [];
 }
 
@@ -281,7 +281,7 @@ async function markRowDone(deps: SchedulerDeps, row: ScheduledJobRow): Promise<v
     deps.logger.error({
       event: 'scheduler.mark_done_failed',
       jobId: row.id,
-      message: error.message,
+      message: scrubMessage(error.message),
     });
   }
 }
@@ -308,7 +308,7 @@ async function markRowRetry(
     deps.logger.error({
       event: 'scheduler.mark_retry_failed',
       jobId: row.id,
-      message: error.message,
+      message: scrubMessage(error.message),
     });
   }
 }
@@ -333,7 +333,7 @@ async function markRowDead(
     deps.logger.error({
       event: 'scheduler.mark_dead_failed',
       jobId: row.id,
-      message: error.message,
+      message: scrubMessage(error.message),
     });
   }
 }
@@ -357,7 +357,7 @@ async function markRowFailed(
     deps.logger.error({
       event: 'scheduler.mark_failed_failed',
       jobId: row.id,
-      message: error.message,
+      message: scrubMessage(error.message),
     });
   }
 }
