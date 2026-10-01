@@ -14,17 +14,44 @@ name: deploy-railway
 # `.github/scripts/check-activation-safety.sh`, invoked from `ci.yml`'s
 # `verify` job — that script fails the build red when
 # vars.ENABLE_RAILWAY_DEPLOY == 'true' and this file regresses on either.
+#
+# ─── Single source of truth for Railway deploys ───────────────────────────
+# This workflow is the ONLY authorised Railway deploy trigger. Railway's own
+# GitHub integration auto-deploys on every push to main unless the service
+# manifest's `watchPatterns` is set to a provably-unmatchable glob. Set BOTH
+# services' watchPatterns via the Railway dashboard to:
+#   watchPatterns: ['_disabled_deploy_handled_by_gha/**']
+# This leaves the GitHub repo link + commit metadata display intact while
+# telling Railway "nothing on push matched; do not auto-deploy." The GHA
+# `railway up --detach` path below uploads a snapshot and bypasses
+# watchPatterns, so our deploys still work. (See the companion PR body for
+# the exact dashboard steps.)
 
 on:
   push:
     branches: [main]
+    # Top-level paths filter is the UNION of every service's dependency
+    # set. Individual services then gate their matrix leg on their own
+    # per-service dorny/paths-filter output (see `scope` job below) so a
+    # change to only `packages/ap-engine/**` deploys workers but skips
+    # api and bots. Root config files invalidate every Nixpacks build
+    # layer, so they trigger all three.
     paths:
       - "apps/api/**"
       - "apps/workers/**"
       - "apps/bots/**"
       - "packages/db/**"
+      - "packages/auth/**"
       - "packages/shared/**"
       - "packages/ai-fabric/**"
+      - "packages/ap-engine/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "turbo.json"
+      - "tsconfig*.json"
+      - ".npmrc"
+      - ".nvmrc"
 
 permissions:
   contents: read
@@ -40,16 +67,103 @@ jobs:
           echo "Railway deploy stub. Set repo variable ENABLE_RAILWAY_DEPLOY=true and"
           echo "secret RAILWAY_TOKEN once you sign up for Railway. Stub is a no-op."
 
+  # Per-service dependency scope. Each service deploys only when ITS own
+  # paths change. Dependency graph derived from each app's package.json
+  # workspace `@diktat/*` imports (direct + transitive):
+  #   api     → auth → db + shared, db, shared
+  #   workers → ai-fabric → shared, ap-engine → shared, shared
+  #   bots    → (no workspace deps today)
+  # All three fire on root config changes.
+  scope:
+    name: classify-service-scope
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    if: ${{ vars.ENABLE_RAILWAY_DEPLOY == 'true' }}
+    outputs:
+      api: ${{ steps.filter.outputs.api }}
+      workers: ${{ steps.filter.outputs.workers }}
+      bots: ${{ steps.filter.outputs.bots }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - id: filter
+        # dorny/paths-filter@v4.0.1 (SHA pin — trust-boundary action, see
+        # claude-review.yml header for the moved-tag threat model). The
+        # same action is used by the reviewer workflows.
+        uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
+        with:
+          filters: |
+            api:
+              - 'apps/api/**'
+              - 'packages/auth/**'
+              - 'packages/db/**'
+              - 'packages/shared/**'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - 'turbo.json'
+              - 'tsconfig*.json'
+              - '.npmrc'
+              - '.nvmrc'
+            workers:
+              - 'apps/workers/**'
+              - 'packages/ai-fabric/**'
+              - 'packages/ap-engine/**'
+              - 'packages/shared/**'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - 'turbo.json'
+              - 'tsconfig*.json'
+              - '.npmrc'
+              - '.nvmrc'
+            bots:
+              - 'apps/bots/**'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - 'turbo.json'
+              - 'tsconfig*.json'
+              - '.npmrc'
+              - '.nvmrc'
+
   deploy:
     name: deploy ${{ matrix.service }} → Railway
-    needs: guard
+    needs: [guard, scope]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     if: ${{ vars.ENABLE_RAILWAY_DEPLOY == 'true' }}
+    # Per-service concurrency: a new push for the SAME service cancels the
+    # in-flight deploy for that service only. Group includes the matrix
+    # service name so api, workers, and bots deploy independently without
+    # cross-service serialisation. Fixes the four-rapid-merges race on
+    # 2026-09-30 where workers' aa70e57 deploy got dropped by Railway while
+    # a sibling api deploy was mid-flight.
+    concurrency:
+      group: deploy-railway-${{ matrix.service }}
+      cancel-in-progress: true
     strategy:
       fail-fast: false
       matrix:
         service: [api, workers, bots]
+    env:
+      # Per-service gate: fetched once at job-level so Install / Deploy
+      # steps share one `env.SHOULD_DEPLOY == 'true'` check instead of
+      # repeating a 3-arm OR. Pattern mirrors claude-review.yml's
+      # SHOULD_RUN env.
+      #
+      # NOTE: SHOULD_DEPLOY is a STRING ('true' / 'false'), not a boolean.
+      # Every consumer MUST test explicitly against the string. NEVER
+      # write `if: ${{ env.SHOULD_DEPLOY }}` — the string 'false' is
+      # truthy in a bare boolean context and would run the deploy
+      # unconditionally, including on PRs where the service's paths
+      # didn't change.
+      SHOULD_DEPLOY: >-
+        ${{ (matrix.service == 'api' && needs.scope.outputs.api == 'true')
+            || (matrix.service == 'workers' && needs.scope.outputs.workers == 'true')
+            || (matrix.service == 'bots' && needs.scope.outputs.bots == 'true') }}
     steps:
       # actions/checkout@v4.2.2 — SHA-pinned. Same threat model as ci.yml +
       # claude-review.yml: this job receives RAILWAY_TOKEN in the Deploy
@@ -69,6 +183,7 @@ jobs:
       # signal that an operator armed the flag — this is the belt-and-
       # suspenders that catches every other execution path.
       - name: Activation-safety re-check (in-job)
+        if: ${{ env.SHOULD_DEPLOY == 'true' }}
         env:
           ENABLE_RAILWAY_DEPLOY: 'true'
         run: bash .github/scripts/check-activation-safety.sh
@@ -79,6 +194,7 @@ jobs:
       # pinned for the same trust-boundary reason (it configures the npm
       # registry that the subsequent install trusts).
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        if: ${{ env.SHOULD_DEPLOY == 'true' }}
         with:
           node-version-file: .nvmrc
 
@@ -91,11 +207,19 @@ jobs:
       # the activation-bundle / Renovate cadence. Setup-node's global bin
       # is on PATH so no PATH munging needed.
       - name: Install Railway CLI
+        if: ${{ env.SHOULD_DEPLOY == 'true' }}
         run: npm i -g @railway/cli@5.20.0
 
       - name: Deploy
+        if: ${{ env.SHOULD_DEPLOY == 'true' }}
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
           cd "apps/${{ matrix.service }}"
           railway up --service "diktat-${{ matrix.service }}" --detach
+
+      - name: Skipped — service unaffected by this diff
+        if: ${{ env.SHOULD_DEPLOY != 'true' }}
+        run: |
+          echo "deploy-railway/${{ matrix.service }} — diff does not touch this service's dependency scope, skipped" >> "$GITHUB_STEP_SUMMARY"
+          echo "deploy-railway/${{ matrix.service }} — diff does not touch this service's dependency scope, skipped"
