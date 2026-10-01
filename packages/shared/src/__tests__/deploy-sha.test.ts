@@ -45,9 +45,9 @@ describe('resolveDeploySha', () => {
   });
 
   it('env var wins when RAILWAY_GIT_COMMIT_SHA is set alongside GIT_SHA', () => {
-    process.env.RAILWAY_GIT_COMMIT_SHA = 'abcdefghijklmnop1234567890abcdef12345678';
+    process.env.RAILWAY_GIT_COMMIT_SHA = 'abcdef1234567890abcdef1234567890abcdef12';
     process.env.GIT_SHA = '0000000000000000000000000000000000000000';
-    expect(resolveDeploySha()).toBe('abcdefg');
+    expect(resolveDeploySha()).toBe('abcdef1');
   });
 
   it('returns "unknown" when neither env var resolves (local dev / tests)', () => {
@@ -70,9 +70,48 @@ describe('resolveDeploySha', () => {
 
   it('never throws', () => {
     expect(() => resolveDeploySha()).not.toThrow();
-    process.env.RAILWAY_GIT_COMMIT_SHA = 'ab';
+    process.env.RAILWAY_GIT_COMMIT_SHA = 'deadbeef';
     expect(() => resolveDeploySha()).not.toThrow();
-    // Short SHAs are preserved as-is (slice is bounds-safe).
-    expect(resolveDeploySha()).toBe('ab');
+    // A valid short SHA is sliced bounds-safely.
+    expect(resolveDeploySha()).toBe('deadbee');
+  });
+
+  it('maps a sub-4-char value to "invalid" (fails the hex-shape minimum)', () => {
+    process.env.RAILWAY_GIT_COMMIT_SHA = 'ab';
+    expect(resolveDeploySha()).toBe('invalid');
+  });
+
+  it('maps a non-hex value to "invalid" instead of propagating env text', () => {
+    // A hostile or malformed env value must not reach the boot-alert body.
+    process.env.RAILWAY_GIT_COMMIT_SHA = 'hahaha<script>alert(1)</script>';
+    expect(resolveDeploySha()).toBe('invalid');
+  });
+
+  it('maps a hex-length-but-wrong-chars value to "invalid"', () => {
+    // Right length window, but contains non-hex chars → still invalid.
+    process.env.RAILWAY_GIT_COMMIT_SHA = 'zzzzzzz';
+    expect(resolveDeploySha()).toBe('invalid');
+  });
+
+  it('maps a too-long value to "invalid" (above the 64-char hex ceiling)', () => {
+    // 65 hex chars — one past the ceiling.
+    process.env.RAILWAY_GIT_COMMIT_SHA = 'a'.repeat(65);
+    expect(resolveDeploySha()).toBe('invalid');
+  });
+
+  it('accepts uppercase hex (git SHAs are canonical lowercase, but tolerate case)', () => {
+    process.env.RAILWAY_GIT_COMMIT_SHA = 'AA70E579E22A32536F0DA1E34D50334DFD8D12B5';
+    // Case is preserved as supplied; the resolver only validates shape.
+    expect(resolveDeploySha()).toBe('AA70E57');
+  });
+
+  it('invalid RAILWAY_GIT_COMMIT_SHA does NOT fall through to a valid GIT_SHA (precedence stays strict)', () => {
+    // Precedence is positional: the winning env var's value governs the
+    // outcome. If RAILWAY_GIT_COMMIT_SHA is set but malformed, that is
+    // the resolver's answer — we flag the misconfiguration, we don't
+    // mask it by silently using the fallback.
+    process.env.RAILWAY_GIT_COMMIT_SHA = 'not-a-sha';
+    process.env.GIT_SHA = 'aa70e579e22a32536f0da1e34d50334dfd8d12b5';
+    expect(resolveDeploySha()).toBe('invalid');
   });
 });
