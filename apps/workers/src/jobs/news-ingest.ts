@@ -306,6 +306,16 @@ interface IngestSummary {
   readonly error_message?: string;
 }
 
+/** 24-hour threshold for the "feed looks dead" warn. The adapter's
+ *  `last_fresh_insert_at` moves forward every time it produces at least
+ *  one candidate that passes the (source_provider, source_url) dedup
+ *  check — a dead feed stops advancing it even though adapter.fetch
+ *  itself still succeeds. 24h is deliberately generous: BLS off-weeks,
+ *  congressional recesses, SEC filing lulls all produce multi-hour
+ *  gaps on healthy feeds. A full day of silence on an inherently high-
+ *  volume primary source is signal, not noise. */
+const STALE_FRESH_WARN_MS = 24 * 60 * 60 * 1000;
+
 /** Build the news_ingest handler. Factory pattern so tests can inject
  *  an alternate adapter list (e.g. a single fake adapter). */
 export function buildNewsIngestHandler(
@@ -337,6 +347,15 @@ export function buildNewsIngestHandler(
       ingest_total_rejected: totalRejected,
     });
 
+    // Fire 24h-dedup warn for any adapter whose last FRESH insert is
+    // >= STALE_FRESH_WARN_MS ago. news_adapter_health.last_fresh_insert_at
+    // is written by ingestOne above whenever an adapter produced ≥1 fresh
+    // row; stale-feed conditions (e.g. the BLS off-week bug that drove
+    // this instrumentation) hold it still. Rendered as warn, not error,
+    // because a single 24h stretch of silence is signal to a human but
+    // not grounds to page an on-call.
+    await warnStaleAdapters(deps);
+
     deps.logger.info({
       event: 'news_ingest.complete',
       jobId: row.id,
@@ -349,6 +368,55 @@ export function buildNewsIngestHandler(
       })),
     });
   };
+}
+
+/** Read every row of public.news_adapter_health; emit a warn log for
+ *  any adapter whose last_fresh_insert_at is >24h ago (or has never
+ *  produced a fresh insert at all AND the row was created ≥24h ago).
+ *  A read failure is swallowed with a debug log — observability must
+ *  never crash the ingest tick. */
+async function warnStaleAdapters(deps: Parameters<JobHandler>[1]): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data, error } = (await (deps.supabase as any)
+    .from('news_adapter_health')
+    .select('adapter, last_success_at, last_fresh_insert_at, updated_at')) as {
+    data:
+      | {
+          adapter: string;
+          last_success_at: string | null;
+          last_fresh_insert_at: string | null;
+          updated_at: string;
+        }[]
+      | null;
+    error: { message: string } | null;
+  };
+  if (error) {
+    deps.logger.debug({
+      event: 'news_ingest.health_read_failed',
+      message: error.message,
+    });
+    return;
+  }
+  const now = Date.now();
+  for (const row of data ?? []) {
+    const freshMs = row.last_fresh_insert_at ? Date.parse(row.last_fresh_insert_at) : null;
+    const createdMs = Date.parse(row.updated_at);
+    // Warn when:
+    //   (a) there IS a last-fresh timestamp and it's older than 24h, OR
+    //   (b) there is NO last-fresh timestamp AND the row has existed ≥24h
+    //       (a brand-new adapter row avoids a spurious cold-start warn).
+    const stale =
+      (freshMs !== null && now - freshMs >= STALE_FRESH_WARN_MS) ||
+      (freshMs === null && now - createdMs >= STALE_FRESH_WARN_MS);
+    if (!stale) continue;
+    deps.logger.warn({
+      event: 'news_ingest.adapter_stale',
+      adapter: row.adapter,
+      last_success_at: row.last_success_at,
+      last_fresh_insert_at: row.last_fresh_insert_at,
+      stale_threshold_ms: STALE_FRESH_WARN_MS,
+    });
+  }
 }
 
 /** Run one adapter, classify each candidate, insert into the staging
@@ -368,6 +436,16 @@ async function ingestOne(
       event: 'news_ingest.adapter_failed',
       adapter: adapter.name,
       message,
+    });
+    // Stamp the failure into news_adapter_health. last_success_at /
+    // last_fresh_insert_at are deliberately NOT touched — the health
+    // view relies on their held-still state to drive the staleness
+    // warn above.
+    await upsertAdapterHealth(deps, adapter.name, {
+      lastErrorAt: new Date().toISOString(),
+      lastErrorMessage: message,
+      lastFetchedCount: 0,
+      lastFreshCount: 0,
     });
     return {
       adapter: adapter.name,
@@ -430,6 +508,19 @@ async function ingestOne(
     }
   }
 
+  // Stamp success + any fresh-insert advancement into the health
+  // table. `last_fresh_insert_at` only advances when inserted > 0 so
+  // a dead feed (fetch succeeds, dedup absorbs everything) does NOT
+  // keep refreshing the staleness clock — which is exactly the
+  // condition the 24h warn is designed to catch.
+  const nowIso = new Date().toISOString();
+  await upsertAdapterHealth(deps, adapter.name, {
+    lastSuccessAt: nowIso,
+    lastFreshInsertAt: inserted > 0 ? nowIso : undefined,
+    lastFetchedCount: candidates.length,
+    lastFreshCount: inserted,
+  });
+
   return {
     adapter: adapter.name,
     fetched: candidates.length,
@@ -439,6 +530,86 @@ async function ingestOne(
     rejected_invalid: rejectedInvalid,
     errors: 0,
   };
+}
+
+/** Fields the health UPSERT accepts. All optional: a success path
+ *  passes lastSuccessAt + optional lastFreshInsertAt; a failure path
+ *  passes lastErrorAt + lastErrorMessage; nothing on either path
+ *  touches a column it doesn't own. */
+interface HealthUpsert {
+  readonly lastSuccessAt?: string;
+  readonly lastFreshInsertAt?: string;
+  readonly lastErrorAt?: string;
+  readonly lastErrorMessage?: string;
+  readonly lastFetchedCount: number;
+  readonly lastFreshCount: number;
+}
+
+/** UPSERT the per-adapter health row.
+ *
+ * The handler owns updated_at (not a trigger) so a test can assert
+ * against it without a DB round-trip and we don't need a separate
+ * trigger migration. onConflict is the primary key (adapter).
+ *
+ * We build the UPSERT payload by starting from the existing row's
+ * success/fresh timestamps and only overwriting them when the current
+ * call carries fresh values — a failure row MUST NOT clear
+ * last_success_at, and a success-but-no-fresh row MUST NOT clear
+ * last_fresh_insert_at. Using supabase.from(...).upsert() alone
+ * can't express the merge; we SELECT first then INSERT ... ON
+ * CONFLICT DO UPDATE via the client's upsert().
+ */
+async function upsertAdapterHealth(
+  deps: Parameters<JobHandler>[1],
+  adapterName: string,
+  patch: HealthUpsert,
+): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const sb = deps.supabase as any;
+
+  // Read the prior row so we can preserve the columns the current
+  // branch doesn't touch. A missing row (brand-new adapter) is fine —
+  // defaults handle it.
+  const { data: prior } = (await sb
+    .from('news_adapter_health')
+    .select('last_success_at, last_fresh_insert_at, last_error_at, last_error_message')
+    .eq('adapter', adapterName)
+    .maybeSingle()) as {
+    data: {
+      last_success_at: string | null;
+      last_fresh_insert_at: string | null;
+      last_error_at: string | null;
+      last_error_message: string | null;
+    } | null;
+  };
+
+  const row = {
+    adapter: adapterName,
+    last_success_at: patch.lastSuccessAt ?? prior?.last_success_at ?? null,
+    last_fresh_insert_at: patch.lastFreshInsertAt ?? prior?.last_fresh_insert_at ?? null,
+    last_error_at: patch.lastErrorAt ?? prior?.last_error_at ?? null,
+    last_error_message: patch.lastErrorMessage ?? prior?.last_error_message ?? null,
+    last_fetched_count: patch.lastFetchedCount,
+    last_fresh_count: patch.lastFreshCount,
+    updated_at: new Date().toISOString(),
+  };
+
+  const { error } = (await sb
+    .from('news_adapter_health')
+    .upsert(row, { onConflict: 'adapter' })) as { error: { message: string } | null };
+
+  if (error) {
+    // Observability — never fail the ingest tick on a health-table
+    // write. debug (not warn) because an operator wouldn't normally
+    // want to see this; a persistent failure here would be caught
+    // by the stale-warn above (which depends on reads working, so a
+    // completely broken table surfaces anyway).
+    deps.logger.debug({
+      event: 'news_ingest.health_upsert_failed',
+      adapter: adapterName,
+      message: error.message,
+    });
+  }
 }
 
 /** Idempotent insert via ON CONFLICT(source_provider, source_url) DO
