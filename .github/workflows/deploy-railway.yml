@@ -1,19 +1,37 @@
 name: deploy-railway
 
-# TODO(railway): activates only when RAILWAY_TOKEN secret is present AND repo
-# variable ENABLE_RAILWAY_DEPLOY=true. Until then this workflow is a no-op stub
-# and does NOT fail CI.
+# INTENTIONALLY DISABLED (2026-10-01). Railway's own git auto-deploy
+# is the single source of truth for diktat Railway deploys. GHA has
+# NEVER actually deployed anything here — every run from workflow
+# birth through 2026-10-01 skipped the `deploy` matrix job via
+# `if: ${{ vars.ENABLE_RAILWAY_DEPLOY == 'true' }}`, and the repo
+# variable has never been flipped on. The service-name mismatch
+# (`diktat-api` / `diktat-workers` in the matrix vs. the real
+# `@diktat/api` / `diktat workers`) therefore never surfaced.
 #
-# Activation safety (do NOT flip ENABLE_RAILWAY_DEPLOY=true without checking):
-#   - All `uses:` action refs MUST stay SHA-pinned. Floating @vN tags would
-#     re-introduce a tag-move exfil vector on RAILWAY_TOKEN.
-#   - The Railway CLI install MUST stay version-pinned (npm @railway/cli@<X>).
-#     Replacing it with `curl | sh` or `@latest` reopens the unpinned-script
-#     hazard the bundle PR closed.
-# Both constraints are mechanically enforced by
+# Per-service deploy scoping now lives in each service's
+# `apps/<svc>/railway.toml` under `[build] watchPatterns = [...]`,
+# which Railway honors on git auto-deploy. See apps/api/railway.toml
+# for the api scope; apps/workers/railway.toml intentionally omits
+# watchPatterns (workers' dep set spans the full packages tree).
+#
+# This workflow is kept checked-in — not deleted — so the activation
+# path is preserved if we ever need to switch back to GHA-driven
+# deploys. Reactivation safety (do NOT flip ENABLE_RAILWAY_DEPLOY=true
+# without checking):
+#   - All `uses:` action refs MUST stay SHA-pinned. Floating @vN tags
+#     would re-introduce a tag-move exfil vector on RAILWAY_TOKEN.
+#   - The Railway CLI install MUST stay version-pinned
+#     (npm @railway/cli@<X>). Replacing it with `curl | sh` or
+#     `@latest` reopens the unpinned-script hazard.
+#   - The matrix must target the EXACT Railway service names
+#     (`@diktat/api`, `diktat workers`) — a plain `diktat-<slug>`
+#     shape returns "service not found" on `railway up`.
+# Both pin constraints are mechanically enforced by
 # `.github/scripts/check-activation-safety.sh`, invoked from `ci.yml`'s
 # `verify` job — that script fails the build red when
-# vars.ENABLE_RAILWAY_DEPLOY == 'true' and this file regresses on either.
+# vars.ENABLE_RAILWAY_DEPLOY == 'true' and this file regresses on
+# either pin.
 
 on:
   push:

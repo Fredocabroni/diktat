@@ -12,6 +12,36 @@ builder = "NIXPACKS"
 # only the build step itself; no second install required.
 buildCommand = "pnpm turbo build --filter=@diktat/api"
 
+# Railway's git auto-deploy is the single source of truth for this
+# service's deploys (GHA deploy-railway.yml is intentionally disabled
+# — see its header). An unscoped auto-deploy would re-deploy api on
+# every workers-only merge, which is noisy and (on 2026-09-30) caused
+# a four-rapid-merge burst that superseded workers' aa70e57 deploy
+# while a sibling api deploy was mid-flight. Scoping api here keeps
+# api still only when its dependency set changes.
+#
+# Scope: apps/api/** + packages/** (ALL packages) + root config.
+# Deliberately broader than the api's direct @diktat/* import graph
+# (today: auth, db, shared). Over-deploying is cheap — a Nixpacks
+# rebuild on an api-adjacent package change is tens of seconds, and
+# the service is healthchecked. Under-deploying is the real bug: a
+# future api dependency on packages/ai-fabric or any new workspace
+# would silently skip api redeploys until this toml is updated to
+# match. Operator ask (2026-10-01): "Over-deploying is cheap;
+# missing a change is the bug." `apps/workers/**` and `apps/bots/**`
+# are deliberately absent — api does not import either.
+watchPatterns = [
+  "apps/api/**",
+  "packages/**",
+  "package.json",
+  "pnpm-lock.yaml",
+  "pnpm-workspace.yaml",
+  "turbo.json",
+  "tsconfig*.json",
+  ".nvmrc",
+  ".npmrc",
+]
+
 [deploy]
 # NODE_ENV=production is prefixed inline on startCommand — applies ONLY at
 # runtime (the moment Railway exec's this string), never to the build
