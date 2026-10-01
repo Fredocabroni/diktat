@@ -1,49 +1,112 @@
--- Migration: block changes to public.users.is_bot after row creation.
--- Up:   add a BEFORE UPDATE trigger `users_is_bot_immutable_check` on
---       public.users that raises when new.is_bot IS DISTINCT FROM
---       old.is_bot. Signup path writes via INSERT (handle_new_user
---       trigger), so creation is unaffected; flip-after-creation is
---       blocked absolutely.
--- Down: see `-- Rollback (reference, not auto-run):` block below —
---       drop trigger users_is_bot_immutable_check; drop function
---       public.users_is_bot_immutable().
+-- Migration: block changes to public.users.is_bot after row creation
+-- AND fix handle_new_user to stamp is_bot at creation time.
+-- Up:
+--   1. CREATE OR REPLACE public.handle_new_user so the initial INSERT
+--      into public.users sets is_bot = v_is_bot. Previously the column
+--      was omitted and defaulted to false; the seed-bots.ts path then
+--      flipped it to true in a follow-up UPDATE. The follow-up UPDATE
+--      is incompatible with the immutability trigger below.
+--   2. Add a BEFORE UPDATE trigger users_is_bot_immutable_check on
+--      public.users that raises when new.is_bot IS DISTINCT FROM
+--      old.is_bot. Creation (INSERT) is unaffected — the trigger is
+--      UPDATE-only. Flip-after-creation is blocked absolutely from
+--      service_role; SUPERUSER (postgres / supabase_admin) can still
+--      bypass via `SET session_replication_role = replica` or
+--      `ALTER TABLE ... DISABLE TRIGGER`, which is the correct scope
+--      (no application-layer trigger can block direct DB access).
+-- Down: see `-- Rollback (reference, not auto-run):` block below.
 --
--- Motivation (#149 — users.is_bot has no DB-layer immutability guard):
--- Issue #139's H1 bot-win exclusion relies on `winner.isBot` /
--- `loser.isBot` values read from `public.users.is_bot`. Enforcement
--- today is TypeScript-only in packages/ap-engine/src/settle.ts. A bug
--- or a compromised service-role bearer that runs
+-- Motivation (#149): H1 bot-win exclusion relies on public.users.is_bot
+-- being a trustworthy, write-once truth. Enforcement today is
+-- TypeScript-only in packages/ap-engine/src/settle.ts. A bug or a
+-- compromised service-role bearer that runs
 --   UPDATE public.users SET is_bot = false WHERE id = <bot uuid>
--- reopens the H1 gap for that user — subsequent battles the user wins
--- credit AP + potentially ghost dollars without any trigger, CHECK, or
--- grant blocking it.
+-- reopens the H1 gap for that user. The DB-level guard closes the
+-- bypass for the exact credential this threat model names
+-- (service_role via a leaked SUPABASE_SERVICE_ROLE_KEY).
 --
--- This trigger closes the DB-layer gap:
---   * BEFORE UPDATE row trigger with a WHEN clause scoped to the
---     specific column change, so the trigger body is skipped entirely
---     on updates that leave is_bot alone (99.999% of writes).
---   * SECURITY DEFINER + explicit `search_path = ''` so a hostile
---     search_path from the caller cannot resolve `is_bot` to a shadow
---     column.
---   * RAISE EXCEPTION with a specific message naming the old and new
---     values + the user id — operators can diff the error against
---     ap_transactions on the user to see what the attacker tried.
+-- IMPORTANT — companion changes:
+--   * The sibling validator PR (packages/ap-engine/src/validators.ts)
+--     drops .default(false) on winner.isBot / loser.isBot so a caller
+--     that forgets the field gets a Zod ValidationError instead of
+--     silent misclassification.
+--   * apps/api/scripts/seed-bots.ts stops writing is_bot in its
+--     follow-up UPDATE — handle_new_user is now the sole writer, at
+--     creation time, from the auth.users.raw_app_meta_data->>'is_bot'
+--     signal that createUser({app_metadata: {is_bot: true}}) carries
+--     to the trigger. The sidecar UPDATE now only overrides handle +
+--     current_ap, both mutable columns.
 --
--- Companion to the TypeScript tightening in the sibling PR for #149
--- (packages/ap-engine/src/validators.ts: drop .default(false) on
--- winner.isBot and loser.isBot). The two together make bot-exclusion
--- unforgeable from both ends.
+-- Trigger function posture:
+--   * language plpgsql, SECURITY INVOKER (explicitly — INVOKER is the
+--     default for trigger functions but we spell it out so a future
+--     edit that adds SECURITY DEFINER has to think about it). The
+--     body only reads NEW.is_bot / OLD.is_bot — values the trigger
+--     machinery hands over regardless of the invoking role; nothing
+--     requires elevation. Keeping it INVOKER avoids widening blast
+--     radius if the body ever grows a SELECT.
+--   * search_path = '' is kept as hygiene for any future edit that
+--     references a schema-qualified object. Note: the trigger
+--     machinery resolves NEW.is_bot / OLD.is_bot from the physical
+--     column, not via search_path, so this guard is forward-looking
+--     only. (Round-1 security-reviewer LOW-1b: previous header
+--     comment overstated the search_path protection.)
 --
 -- Rollback (reference, not auto-run):
 --   drop trigger if exists users_is_bot_immutable_check on public.users;
 --   drop function if exists public.users_is_bot_immutable();
+--   create or replace function public.handle_new_user() ... (restore
+--     20260420090009's body without the is_bot column on the INSERT);
 
 begin;
 
-create or replace function public.users_is_bot_immutable()
+-- (1) Stamp is_bot at creation time. The function body mirrors
+-- 20260420090009 verbatim except for the single `is_bot` column
+-- addition on the public.users INSERT. v_is_bot was already computed
+-- from raw_app_meta_data; this now plumbs it through to the row.
+create or replace function public.handle_new_user()
 returns trigger
 language plpgsql
 security definer
+set search_path = ''
+as $$
+declare
+  v_is_bot boolean := coalesce(new.raw_app_meta_data->>'is_bot', 'false') = 'true';
+begin
+  insert into public.users (id, handle, is_bot)
+  values (
+    new.id,
+    'citizen_' || substr(replace(new.id::text,'-',''), 1, 10),
+    v_is_bot
+  )
+  on conflict (id) do nothing;
+
+  insert into public.streaks (user_id) values (new.id)
+  on conflict (user_id) do nothing;
+
+  insert into public.wallets (user_id, provider, status)
+  values (new.id, 'privy', 'active')
+  on conflict (user_id) do nothing;
+
+  insert into public.ap_transactions
+    (user_id, delta, balance_after, reason, idempotency_key)
+  values
+    (new.id, 100, 100, 'admin_adjust', 'signup_grant:' || new.id::text)
+  on conflict (idempotency_key) do nothing;
+
+  if not v_is_bot then
+    perform pg_notify('privy_provision', new.id::text);
+  end if;
+
+  return new;
+end;
+$$;
+
+-- (2) Immutability guard. SECURITY INVOKER (explicit) — see header.
+create or replace function public.users_is_bot_immutable()
+returns trigger
+language plpgsql
+security invoker
 set search_path = ''
 as $$
 begin
@@ -60,9 +123,6 @@ begin
 end;
 $$;
 
--- Trigger: fires only when is_bot would actually change. The WHEN clause
--- means UPDATEs that touch any OTHER column (current_ap, tier_id, etc.)
--- pass through free with zero trigger overhead.
 drop trigger if exists users_is_bot_immutable_check on public.users;
 create trigger users_is_bot_immutable_check
 before update on public.users
@@ -70,14 +130,6 @@ for each row
 when (new.is_bot is distinct from old.is_bot)
 execute function public.users_is_bot_immutable();
 
--- Function grant posture: SECURITY DEFINER functions default to
--- `GRANT EXECUTE TO public`. We don't want that — only the trigger
--- itself (which Postgres always resolves) should execute this function.
 revoke all on function public.users_is_bot_immutable() from public;
--- Postgres still invokes the function via the trigger regardless of
--- grants, because trigger invocation runs as the table owner (which is
--- supabase_admin here); we revoke from public purely to keep the
--- surface clean and prevent an ad-hoc `select users_is_bot_immutable()`
--- call shape.
 
 commit;
