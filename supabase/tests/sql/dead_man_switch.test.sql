@@ -442,23 +442,42 @@ begin
   insert into net._http_response (id, status_code, timed_out, error_msg)
   values (v_req, 400, false, 'Bad Request');
 
-  -- Confirming tick: must NOT record and must clear pending.
+  -- Confirming tick: must NOT record, must clear pending, AND will
+  -- re-synthesise a new send on the SAME tick because the decision
+  -- phase runs after confirm and should_fire still returns 'fire'
+  -- (same stale heartbeat, same old last_alert_at — the failed
+  -- delivery was NOT a successful alert).
   perform internal.dead_man_tick();
 
   select * into s_after from internal.dead_man_state where id=1;
-  if s_after.pending_action is not null then
-    raise exception 'step 12 FAIL: failed-delivery tick did not clear pending_action (got %)',
-      s_after.pending_action;
-  end if;
-  if s_after.last_send_request_id is not null then
-    raise exception 'step 12 FAIL: failed-delivery tick did not clear last_send_request_id (got %)',
-      s_after.last_send_request_id;
-  end if;
-  -- Did NOT re-record: last_alert_at must not have advanced beyond the
-  -- send stamp (s_mid.last_alert_at).
+
+  -- (1) Did NOT re-record. last_alert_at must be unchanged from
+  --     s_mid.last_alert_at. If it advanced, record() ran — which is
+  --     the exact failure mode M2 is designed to prevent (silently
+  --     advancing the 1-hour dedup clock on a POST that never
+  --     delivered).
   if s_after.last_alert_at is distinct from s_mid.last_alert_at then
     raise exception 'step 12 FAIL: failed-delivery tick advanced last_alert_at (mid %, after %) — record() was called in error',
       s_mid.last_alert_at, s_after.last_alert_at;
+  end if;
+
+  -- (2) The confirm phase cleared v_req before the decision phase
+  --     re-stamped a new one. Prove it by asserting last_send_request_id
+  --     is set but DIFFERENT from v_req. If the confirm phase hadn't
+  --     cleared the slot, the decision phase's "already in flight"
+  --     early return would have kicked in and v_req would still be
+  --     there — so a non-v_req request_id is proof of both clear and
+  --     re-synthesise.
+  if s_after.last_send_request_id is null then
+    raise exception 'step 12 FAIL: failed-delivery tick did not re-synthesise a new send';
+  end if;
+  if s_after.last_send_request_id = v_req then
+    raise exception 'step 12 FAIL: failed-delivery tick did not clear v_req before re-synthesising (got same request_id %)',
+      v_req;
+  end if;
+  if s_after.pending_action is distinct from 'fire' then
+    raise exception 'step 12 FAIL: expected pending_action=fire after re-synthesis, got %',
+      s_after.pending_action;
   end if;
 end $$;
 
