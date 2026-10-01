@@ -261,7 +261,7 @@ end $$;
 -- ---------------------------------------------------------------------------
 
 -- Provision a bot user through the canonical trigger path, then flip is_bot.
--- The users_is_bot_immutability_trigger (migration 20261001010000) now
+-- The users_is_bot_immutability_trigger (migration 20261001050000) now
 -- blocks post-insert flips, so this test disables the trigger locally
 -- (test-only operational path, matches the pattern in
 -- users_is_bot_immutable.test.sql's seed section).

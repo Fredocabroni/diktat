@@ -2,7 +2,7 @@
 -- Run: psql "$DB_URL" -v ON_ERROR_STOP=1 -f this-file
 --
 -- Verifies that the trigger from migration
--- 20261001010000_users_is_bot_immutability.sql:
+-- 20261001050000_users_is_bot_immutability.sql:
 --   1. Allows row creation with is_bot=true or is_bot=false (INSERT
 --      path, which is what the signup `handle_new_user` trigger uses).
 --   2. Allows UPDATEs that leave is_bot alone (current_ap, tier_id,
