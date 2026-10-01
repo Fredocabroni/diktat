@@ -518,6 +518,42 @@ export type Database = {
           },
         ];
       };
+      news_adapter_health: {
+        Row: {
+          adapter: string;
+          created_at: string;
+          last_error_at: string | null;
+          last_error_message: string | null;
+          last_fetched_count: number;
+          last_fresh_count: number;
+          last_fresh_insert_at: string | null;
+          last_success_at: string | null;
+          updated_at: string;
+        };
+        Insert: {
+          adapter: string;
+          created_at?: string;
+          last_error_at?: string | null;
+          last_error_message?: string | null;
+          last_fetched_count?: number;
+          last_fresh_count?: number;
+          last_fresh_insert_at?: string | null;
+          last_success_at?: string | null;
+          updated_at?: string;
+        };
+        Update: {
+          adapter?: string;
+          created_at?: string;
+          last_error_at?: string | null;
+          last_error_message?: string | null;
+          last_fetched_count?: number;
+          last_fresh_count?: number;
+          last_fresh_insert_at?: string | null;
+          last_success_at?: string | null;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
       news_topics: {
         Row: {
           additional_sources: Json;

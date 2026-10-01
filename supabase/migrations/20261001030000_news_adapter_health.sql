@@ -34,6 +34,9 @@
 --     below "row explodes." Handler-side truncation (in the sibling
 --     code PR #155) belt-and-suspenders this by capping with the same
 --     limit before writing.
+--   - `created_at` is schema-reviewer convention — every new public
+--     table carries the "when did this row first appear" signal.
+--     Defaulted at INSERT and never updated.
 --   - `updated_at` is maintained by the handler (not a trigger) so the
 --     code path owns the invariant and tests can assert against it
 --     without needing a DB round-trip for the trigger.
@@ -49,6 +52,7 @@ create table public.news_adapter_health (
   last_error_at timestamptz,
   last_error_message text
     check (last_error_message is null or octet_length(last_error_message) <= 4096),
+  created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
 
