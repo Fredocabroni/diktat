@@ -19,6 +19,7 @@ import {
   type ProviderEnv,
 } from '@diktat/ai-fabric';
 import { makeAlerter, scrubMessage } from '@diktat/shared/alerts';
+import { resolveDeploySha } from '@diktat/shared/deploy-sha';
 import { Client as PgClient } from 'pg';
 
 import { loadEnv, privyReady, webPushReady, type Env } from './env.js';
@@ -62,16 +63,26 @@ async function main(): Promise<void> {
   const env = loadEnv();
   const logger = buildLogger(env);
 
-  logger.info({ event: 'workers.boot', nodeEnv: env.NODE_ENV });
+  // Deployed commit SHA for the boot log + the Telegram alert. Order:
+  // RAILWAY_GIT_COMMIT_SHA → GIT_SHA → ./.deploy-sha file → 'unknown'.
+  // On `railway up` snapshot deploys, RAILWAY_GIT_COMMIT_SHA is empty
+  // (verified 2026-10-01); the deploy-railway.yml workflow writes
+  // apps/workers/.deploy-sha before uploading, so the file path covers
+  // CI-triggered deploys. Local `pnpm dev` lands on 'unknown'.
+  const deploySha = resolveDeploySha();
+
+  logger.info({ event: 'workers.boot', nodeEnv: env.NODE_ENV, commit: deploySha });
 
   // 🟢 Positive boot confirmation, fired once right after env load. On a
   // never-before-deployed service a silent no-op and a healthy start look
   // identical; this proves the process came up AND the Telegram path works
-  // end-to-end. Fire-and-forget (the process keeps running).
+  // end-to-end. Fire-and-forget (the process keeps running). The
+  // commit= field distinguishes a legitimate advance (new SHA) from a
+  // "redeploy of same commit" like 2026-09-30 round 2.
   void alerter.alert(
     'info',
     'workers booted',
-    `pid ${process.pid} · ${env.NODE_ENV} · alerts=${alerter.enabled}`,
+    `pid ${process.pid} · ${env.NODE_ENV} · alerts=${alerter.enabled} · commit=${deploySha}`,
     { dedupKey: 'workers:boot' },
   );
 
