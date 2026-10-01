@@ -14,6 +14,8 @@
 // downstream signal on outcome='broken'. That is the ADDICTION §11.5
 // contract (no "you missed it" notifications).
 
+import { scrubMessage } from '@diktat/shared/alerts';
+
 import type { JobHandler } from './scheduler.js';
 
 interface SweepPayload {
@@ -47,7 +49,7 @@ export const localBoundarySweepHandler: JobHandler = async (row, deps) => {
   })) as { data: SweepRpcResult | null; error: { message: string } | null };
 
   if (error) {
-    throw new Error(`apply_local_boundary_sweep RPC failed: ${error.message}`);
+    throw new Error(`apply_local_boundary_sweep RPC failed: ${scrubMessage(error.message)}`);
   }
   const result = data ?? { outcome: 'streak_not_found' as const };
 

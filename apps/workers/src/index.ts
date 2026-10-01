@@ -18,7 +18,7 @@ import {
   setCostSink,
   type ProviderEnv,
 } from '@diktat/ai-fabric';
-import { makeAlerter } from '@diktat/shared/alerts';
+import { makeAlerter, scrubMessage } from '@diktat/shared/alerts';
 import { Client as PgClient } from 'pg';
 
 import { loadEnv, privyReady, webPushReady, type Env } from './env.js';
@@ -87,7 +87,7 @@ async function main(): Promise<void> {
   } catch (err) {
     logger.warn({
       event: 'cost.ledger_hydrate_failed',
-      message: err instanceof Error ? err.message : String(err),
+      message: scrubMessage(err instanceof Error ? err.message : String(err)),
     });
   }
 
@@ -124,7 +124,7 @@ async function main(): Promise<void> {
       results = await Promise.all(
         MATCH_MODES.map((mode) =>
           runMatchmakingTick({ redis, supabase, logger }, { mode }).catch((err): null => {
-            const message = err instanceof Error ? err.message : String(err);
+            const message = scrubMessage(err instanceof Error ? err.message : String(err));
             logger.error({ event: 'matchmake.tick_failed', mode, message });
             void alerter.alert('error', 'matchmake tick failed', `${mode} · ${message}`, {
               dedupKey: `workers:tick:matchmake:${mode}`,
@@ -180,7 +180,7 @@ async function main(): Promise<void> {
     battlePoller
       .scanOnce()
       .catch((err) => {
-        const message = err instanceof Error ? err.message : String(err);
+        const message = scrubMessage(err instanceof Error ? err.message : String(err));
         logger.error({ event: 'battle.poller.scan_failed', message });
         void alerter.alert('error', 'battle poller scan failed', message, {
           dedupKey: 'workers:tick:poller',
@@ -235,7 +235,7 @@ async function main(): Promise<void> {
       alerter,
     })
       .catch((err) => {
-        const message = err instanceof Error ? err.message : String(err);
+        const message = scrubMessage(err instanceof Error ? err.message : String(err));
         logger.error({ event: 'scheduler.tick_failed', message });
         void alerter.alert('error', 'scheduler tick failed', message, {
           dedupKey: 'workers:tick:scheduler',
@@ -374,8 +374,13 @@ let fatalHandled = false;
 async function handleFatal(event: string, err: unknown): Promise<void> {
   if (fatalHandled) process.exit(1);
   fatalHandled = true;
-  const message = err instanceof Error ? err.message : String(err);
-  console.error(`[diktat-workers] fatal (${event}):`, err);
+  const message = scrubMessage(err instanceof Error ? err.message : String(err));
+  // Issue #146: console.error used to print the raw `err` object, which
+  // on a pg connection failure carries DATABASE_URL in its message/stack.
+  // Print the scrubbed string instead; the alerter already scrubs its
+  // own detail, but the logger-side console.error path reaches the
+  // Railway log drain + eventually Axiom.
+  console.error(`[diktat-workers] fatal (${event}): ${message}`);
   await alerter.alert(
     'error',
     'workers fatal',

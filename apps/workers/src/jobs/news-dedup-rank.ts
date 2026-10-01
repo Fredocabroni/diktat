@@ -27,6 +27,8 @@
 
 import { randomUUID } from 'crypto';
 
+import { scrubMessage } from '@diktat/shared/alerts';
+
 import type { JobHandler } from './scheduler.js';
 
 // ---------------------------------------------------------------------------
@@ -349,7 +351,7 @@ export const newsDedupRankHandler: JobHandler = async (row, deps) => {
       deps.logger.warn({
         event: 'news_dedup_rank.update_failed',
         candidateId: c.id,
-        message: updErr.message,
+        message: scrubMessage(updErr.message),
       });
       continue;
     }

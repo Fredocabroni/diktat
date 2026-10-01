@@ -100,6 +100,63 @@ export function scrubMessage(text: string): string {
 }
 
 /**
+ * Recursively scrub every string value inside a log payload. Replaces
+ * the per-call-site `scrubMessage(error.message)` discipline with a
+ * single sink-level pass: a wrapped logger pipes every `logger.{info,
+ * warn, error, debug}` argument through this helper before the
+ * underlying transport (pino) sees it. Any new call site anywhere in
+ * the codebase that writes to the wrapped logger is covered for free.
+ *
+ * Handles:
+ *   - Strings (direct scrub).
+ *   - Error instances (serialised to `{ name, message, stack }` with
+ *     message + stack scrubbed; the native pino err-serializer would
+ *     leak the raw .message / .stack strings).
+ *   - Arrays (recursive).
+ *   - Plain objects (recursive). Classes other than Error are walked
+ *     as plain objects — a bespoke class carrying a credential as a
+ *     string field still has that field scrubbed.
+ *   - Primitives (numbers, booleans, null, undefined, bigint, symbol):
+ *     returned as-is.
+ *
+ * Cycle-safe via a visited WeakSet so a self-referential log payload
+ * (e.g. an Error with a .cause chain back-pointing to itself) doesn't
+ * stack-overflow.
+ *
+ * Non-goals:
+ *   - Not a redaction policy engine. Field-name-based rules (e.g. drop
+ *     `authorization` headers wholesale) belong at the transport
+ *     layer (pino.redact / fastify.logger.redact), not here.
+ *   - Doesn't try to canonicalise Error chains — if `.cause` is set,
+ *     it's walked recursively as any other field.
+ */
+export function scrubLogPayload<T>(x: T, _seen: WeakSet<object> = new WeakSet()): T {
+  if (typeof x === 'string') return scrubMessage(x) as unknown as T;
+  if (x === null || x === undefined) return x;
+  if (typeof x !== 'object') return x;
+  if (_seen.has(x as object)) return x;
+  _seen.add(x as object);
+  if (x instanceof Error) {
+    const out: { name: string; message: string; stack?: string; cause?: unknown } = {
+      name: x.name,
+      message: scrubMessage(x.message),
+    };
+    if (typeof x.stack === 'string') out.stack = scrubMessage(x.stack);
+    const cause = (x as { cause?: unknown }).cause;
+    if (cause !== undefined) out.cause = scrubLogPayload(cause, _seen);
+    return out as unknown as T;
+  }
+  if (Array.isArray(x)) {
+    return x.map((item) => scrubLogPayload(item, _seen)) as unknown as T;
+  }
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(x as Record<string, unknown>)) {
+    out[k] = scrubLogPayload(v, _seen);
+  }
+  return out as T;
+}
+
+/**
  * Clamp to Telegram's 4096-char limit WITHOUT cutting mid-entity/tag (a dangling
  * `&am` or `<b` would 400, and the catch would swallow it silently). Strips any
  * trailing partial HTML entity/tag from the cut point, then appends an ellipsis.

@@ -20,6 +20,8 @@
 // match. Single-instance assumption keeps this safe; Phase 3.5 BullMQ
 // migration adds proper distributed locks.
 
+import { scrubMessage } from '@diktat/shared/alerts';
+
 import type { ServiceClient } from '../supabase.js';
 import type { Logger } from '../logger.js';
 
@@ -216,7 +218,7 @@ export async function runMatchmakingTick(
       } catch (err) {
         deps.logger.error({
           event: 'matchmake.create_failed',
-          message: err instanceof Error ? err.message : String(err),
+          message: scrubMessage(err instanceof Error ? err.message : String(err)),
           mode,
           seeker: seeker.userId,
           partner: partner.userId,
@@ -238,7 +240,7 @@ export async function runMatchmakingTick(
       } catch (err) {
         deps.logger.error({
           event: 'matchmake.bot_fallback_failed',
-          message: err instanceof Error ? err.message : String(err),
+          message: scrubMessage(err instanceof Error ? err.message : String(err)),
           mode,
           seeker: seeker.userId,
         });
@@ -381,7 +383,7 @@ async function createBattle(
     .maybeSingle()) as { data: { id: string } | null; error: { message: string } | null };
 
   if (battleErr || !battle) {
-    throw new Error(`battles insert failed: ${battleErr?.message ?? 'no row'}`);
+    throw new Error(`battles insert failed: ${scrubMessage(battleErr?.message ?? 'no row')}`);
   }
   const battleId = battle.id;
 
@@ -393,7 +395,7 @@ async function createBattle(
   ])) as { error: { message: string } | null };
 
   if (partsErr) {
-    throw new Error(`battle_participants insert failed: ${partsErr.message}`);
+    throw new Error(`battle_participants insert failed: ${scrubMessage(partsErr.message)}`);
   }
 
   // Clear queue meta + mark both users as matched.

@@ -52,6 +52,8 @@
 
 import { createHash } from 'crypto';
 
+import { scrubMessage } from '@diktat/shared/alerts';
+
 import {
   DROP_HEADLINE_REWRITE_SYSTEM_PROMPT,
   buildDropHeadlineUserPrompt,
@@ -272,7 +274,7 @@ export const dropPublishHandler: JobHandler = async (row, deps) => {
     data: ActiveCandidate[] | null;
     error: { message: string } | null;
   };
-  if (candErr) throw new Error(`drop_publish: fetch candidates: ${candErr.message}`);
+  if (candErr) throw new Error(`drop_publish: fetch candidates: ${scrubMessage(candErr.message)}`);
   const candidates = candData ?? [];
   if (candidates.length === 0) {
     await stampPayload(deps, row.id, { ...row.payload, no_candidates: true });
@@ -292,7 +294,8 @@ export const dropPublishHandler: JobHandler = async (row, deps) => {
     data: { dedup_cluster_id: string }[] | null;
     error: { message: string } | null;
   };
-  if (blockedErr) throw new Error(`drop_publish: fetch blocked clusters: ${blockedErr.message}`);
+  if (blockedErr)
+    throw new Error(`drop_publish: fetch blocked clusters: ${scrubMessage(blockedErr.message)}`);
   const blockedClusters = new Set((blockedData ?? []).map((r) => r.dedup_cluster_id));
 
   // (3-6) Select.
@@ -341,7 +344,9 @@ export const dropPublishHandler: JobHandler = async (row, deps) => {
     .select('id')
     .single()) as { data: { id: string } | null; error: { message: string } | null };
   if (topicErr || !topicData) {
-    throw new Error(`drop_publish: insert news_topics: ${topicErr?.message ?? 'no row'}`);
+    throw new Error(
+      `drop_publish: insert news_topics: ${scrubMessage(topicErr?.message ?? 'no row')}`,
+    );
   }
 
   // (9) Auto-fact-check enqueue. Only when the rewrite produced a
@@ -368,7 +373,7 @@ export const dropPublishHandler: JobHandler = async (row, deps) => {
   if (markErr) {
     deps.logger.warn({
       event: 'drop_publish.mark_selected_failed',
-      message: markErr.message,
+      message: scrubMessage(markErr.message),
     });
     // Non-fatal: the news_topics row was inserted; candidates table
     // staleness self-heals on the next retention sweep.
@@ -501,7 +506,7 @@ async function rewriteHeadlineSafely(
     deps.logger.warn({
       event: 'drop_publish.rewrite_failed',
       candidateId: candidate.id,
-      message: err instanceof Error ? err.message : String(err),
+      message: scrubMessage(err instanceof Error ? err.message : String(err)),
     });
     return empty;
   }
@@ -537,7 +542,7 @@ async function enqueueDropFactCheck(
   if (upsertErr) {
     deps.logger.warn({
       event: 'drop_publish.fact_check_upsert_failed',
-      message: upsertErr.message,
+      message: scrubMessage(upsertErr.message),
     });
     return false;
   }
@@ -551,7 +556,7 @@ async function enqueueDropFactCheck(
   if (selectErr || !claimRow) {
     deps.logger.warn({
       event: 'drop_publish.fact_check_select_failed',
-      message: selectErr?.message ?? 'no row',
+      message: scrubMessage(selectErr?.message ?? 'no row'),
     });
     return false;
   }
@@ -572,7 +577,10 @@ async function enqueueDropFactCheck(
     // 23505 = unique violation on (job_type, idempotency_key) — a same-
     // UTC-day re-enqueue is acceptable (orchestrator cache-hits anyway).
     if (jobErr.code === '23505') return false;
-    deps.logger.warn({ event: 'drop_publish.fact_check_enqueue_failed', message: jobErr.message });
+    deps.logger.warn({
+      event: 'drop_publish.fact_check_enqueue_failed',
+      message: scrubMessage(jobErr.message),
+    });
     return false;
   }
   return true;

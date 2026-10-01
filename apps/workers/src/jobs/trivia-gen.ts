@@ -22,6 +22,8 @@
 // enum-typed `verified_by` column when human-mod tooling lands; the
 // existing column stays the source of truth for human approvals.
 
+import { scrubMessage } from '@diktat/shared/alerts';
+
 import type { ServiceClient } from '../supabase.js';
 import type { Logger } from '../logger.js';
 import type { invoke as fabricInvoke, ProviderEnv } from '@diktat/ai-fabric';
@@ -126,7 +128,7 @@ export async function runTriviaGen(
     logger.error({
       event: 'trivia.gen.generator_failed',
       category: input.category,
-      message: err instanceof Error ? err.message : String(err),
+      message: scrubMessage(err instanceof Error ? err.message : String(err)),
     });
     return { generated: 0, verified: 0, rejected: 0, failed: input.count };
   }
@@ -164,7 +166,7 @@ export async function runTriviaGen(
       logger.error({
         event: 'trivia.gen.insert_failed',
         category: input.category,
-        message: insertErr.message,
+        message: scrubMessage(insertErr.message),
       });
       failed += 1;
       continue;
@@ -237,12 +239,17 @@ function classifyVerifierFailure(err: unknown): 'schema_mismatch' | 'provider_er
   return 'provider_error';
 }
 
-/** Deepest message in the cause chain — the real failure, not the wrapper. */
+/** Deepest message in the cause chain — the real failure, not the wrapper.
+ *  Round-1 security-reviewer HIGH-1 on #146: scrub inside the loop body.
+ *  The previous shape scrubbed only the initial err.message and then
+ *  overwrote `message` with the raw cursor.message on every iteration,
+ *  so any chained error (e.g. a Postgres connection error carrying a
+ *  DSN) landed in the returned string unredacted. */
 function rootCauseMessage(err: unknown): string {
   let cursor: unknown = err;
-  let message = err instanceof Error ? err.message : String(err);
+  let message = scrubMessage(err instanceof Error ? err.message : String(err));
   for (let depth = 0; depth < 8 && cursor instanceof Error; depth++) {
-    message = cursor.message;
+    message = scrubMessage(cursor.message);
     cursor = (cursor as { cause?: unknown }).cause;
   }
   return message;
@@ -331,7 +338,7 @@ async function verifyOne(draft: QuestionDraft, deps: VerifyOneDeps): Promise<Ver
       event: 'trivia.gen.verifier_failed',
       url: draft.source_url,
       failureKind,
-      message: err instanceof Error ? err.message : String(err),
+      message: scrubMessage(err instanceof Error ? err.message : String(err)),
       detail: rootCauseMessage(err),
     });
     return { outcome: 'rejected', reason: 'verifier_error' };
