@@ -244,12 +244,23 @@ export const congressAdapter: NewsIngestAdapter = {
   },
 };
 
-/** BLS adapter — Bureau of Labor Statistics news releases RSS. */
+/** BLS adapter — Bureau of Labor Statistics news releases RSS.
+ *
+ * Feed URL: `bls_latest.rss` is the aggregated "latest content" feed,
+ * which is kept fresh across the full release calendar and is the
+ * canonical RSS entry point advertised at bls.gov/schedule/. The
+ * previous shape — `news_release.rss` — is the labor-market-release
+ * sub-feed; it stops advancing between release cycles and silently
+ * looked "dead" to the adapter during off-week stretches.
+ * `bls_latest.rss` picks up every release the ingest cares about plus
+ * routine content, which is what the drop pipeline wants (fresh
+ * primary-source URLs, not just the headline NFP release).
+ */
 export const blsAdapter: NewsIngestAdapter = {
   name: 'bls',
   defaultCategory: 'bls_labor',
   async fetch(fetchImpl) {
-    const feeds = ['https://www.bls.gov/feed/news_release.rss'];
+    const feeds = ['https://www.bls.gov/feed/bls_latest.rss'];
     const all: CandidateInput[] = [];
     for (const url of feeds) {
       const items = await fetchAndParseRss(fetchImpl, url);
