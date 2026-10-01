@@ -39,7 +39,6 @@ on:
     paths:
       - "apps/api/**"
       - "apps/workers/**"
-      - "apps/bots/**"
       - "packages/db/**"
       - "packages/auth/**"
       - "packages/shared/**"
@@ -72,8 +71,15 @@ jobs:
   # workspace `@diktat/*` imports (direct + transitive):
   #   api     → auth → db + shared, db, shared
   #   workers → ai-fabric → shared, ap-engine → shared, shared
-  #   bots    → (no workspace deps today)
-  # All three fire on root config changes.
+  #
+  # `apps/bots` exists in the monorepo but is NOT deployed as a Railway
+  # service — `railway status --json` confirms only two services:
+  # `@diktat/api` and `diktat workers`. The bots app ships via a
+  # separate path (or is unused in V1); if that ever changes, add a
+  # third matrix entry here mirroring the api/workers shape and set the
+  # correct `railway_name` to the real Railway service name.
+  #
+  # Both services fire on root config changes.
   scope:
     name: classify-service-scope
     needs: guard
@@ -83,7 +89,6 @@ jobs:
     outputs:
       api: ${{ steps.filter.outputs.api }}
       workers: ${{ steps.filter.outputs.workers }}
-      bots: ${{ steps.filter.outputs.bots }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -119,15 +124,6 @@ jobs:
               - 'tsconfig*.json'
               - '.npmrc'
               - '.nvmrc'
-            bots:
-              - 'apps/bots/**'
-              - 'package.json'
-              - 'pnpm-lock.yaml'
-              - 'pnpm-workspace.yaml'
-              - 'turbo.json'
-              - 'tsconfig*.json'
-              - '.npmrc'
-              - '.nvmrc'
 
   deploy:
     name: deploy ${{ matrix.service }} → Railway
@@ -137,7 +133,7 @@ jobs:
     if: ${{ vars.ENABLE_RAILWAY_DEPLOY == 'true' }}
     # Per-service concurrency: a new push for the SAME service cancels the
     # in-flight deploy for that service only. Group includes the matrix
-    # service name so api, workers, and bots deploy independently without
+    # service slug so api and workers deploy independently without
     # cross-service serialisation. Fixes the four-rapid-merges race on
     # 2026-09-30 where workers' aa70e57 deploy got dropped by Railway while
     # a sibling api deploy was mid-flight.
@@ -146,12 +142,28 @@ jobs:
       cancel-in-progress: true
     strategy:
       fail-fast: false
+      # The matrix uses `include:` so each entry pairs its monorepo slug
+      # with the EXACT Railway service name (which contains whitespace
+      # and `@` characters that don't fit a plain slug matrix).
+      # Confirmed live via `railway status --json` on 2026-10-01:
+      #   service id e13e02c3… → '@diktat/api'
+      #   service id acbf5c6a… → 'diktat workers'
+      # The old shape (`service: [api, workers, bots]` + `--service
+      # "diktat-${{ matrix.service }}"`) targeted names that don't exist
+      # — every GHA deploy run from workflow birth through 2026-10-01
+      # had its matrix leg SKIPPED because ENABLE_RAILWAY_DEPLOY was off;
+      # when flipped on, every `railway up` would have failed with
+      # "service not found." Fixed here before activation.
       matrix:
-        service: [api, workers, bots]
+        include:
+          - service: api
+            railway_name: "@diktat/api"
+          - service: workers
+            railway_name: "diktat workers"
     env:
       # Per-service gate: fetched once at job-level so Install / Deploy
       # steps share one `env.SHOULD_DEPLOY == 'true'` check instead of
-      # repeating a 3-arm OR. Pattern mirrors claude-review.yml's
+      # repeating a 2-arm OR. Pattern mirrors claude-review.yml's
       # SHOULD_RUN env.
       #
       # NOTE: SHOULD_DEPLOY is a STRING ('true' / 'false'), not a boolean.
@@ -162,8 +174,7 @@ jobs:
       # didn't change.
       SHOULD_DEPLOY: >-
         ${{ (matrix.service == 'api' && needs.scope.outputs.api == 'true')
-            || (matrix.service == 'workers' && needs.scope.outputs.workers == 'true')
-            || (matrix.service == 'bots' && needs.scope.outputs.bots == 'true') }}
+            || (matrix.service == 'workers' && needs.scope.outputs.workers == 'true') }}
     steps:
       # actions/checkout@v4.2.2 — SHA-pinned. Same threat model as ci.yml +
       # claude-review.yml: this job receives RAILWAY_TOKEN in the Deploy
@@ -214,9 +225,14 @@ jobs:
         if: ${{ env.SHOULD_DEPLOY == 'true' }}
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          # matrix.railway_name is checked-in workflow YAML, not a
+          # PR-controllable value, so piping through env is just
+          # consistency with the rest of the workflow — not a trust
+          # boundary ask.
+          RAILWAY_SERVICE: ${{ matrix.railway_name }}
         run: |
           cd "apps/${{ matrix.service }}"
-          railway up --service "diktat-${{ matrix.service }}" --detach
+          railway up --service "$RAILWAY_SERVICE" --detach
 
       - name: Skipped — service unaffected by this diff
         if: ${{ env.SHOULD_DEPLOY != 'true' }}
