@@ -151,6 +151,27 @@ run_failure_case "non-zero exit + whitespace-only body → 'empty output' reason
   "$WHITESPACE_FIX" 1 "empty output" ""
 
 echo
+echo "=== Group E: BLOCK verdicts turn the check red (exit 0, stdout 'ok_block') ==="
+# Trailing standalone BLOCK (security-reviewer + copy-linter convention
+# per .claude/agents/*.md: "End with PASS or BLOCK").
+run_case "trailing standalone **BLOCK** line → ok_block" \
+  "${FIX}/real-review-trailing-block.md" 0 0 ok_block
+# Explicit "Overall verdict: BLOCK" (addiction-auditor convention).
+run_case "explicit 'Overall verdict: BLOCK' line → ok_block" \
+  "${FIX}/real-review-explicit-verdict-block.md" 0 0 ok_block
+# Negative case: body mentions "blockchain" / "unblock" / ".block"
+# (prose), ends with PASS. Must NOT classify as ok_block.
+run_case "false-positive guard: 'blockchain' / 'unblock' / 'do not block merge' prose → ok (not ok_block)" \
+  "${FIX}/real-review-false-positive-block-prose.md" 0 0 ok
+# Negative case: existing APPROVE WITH NOTES fixture — the trailing
+# "**APPROVE WITH NOTES**" prose line already classifies as ok via
+# Group A, but assert again here specifically against the ok_block
+# gate so a future regression that broadens the pattern (e.g. an
+# over-eager "verdict" word match) is caught.
+run_case "APPROVE WITH NOTES fixture — still ok, not ok_block" \
+  "${FIX}/real-review-h2.md" 0 0 ok
+
+echo
 echo "========================================"
 echo "${pass_count} passed, ${fail_count} failed"
 echo "========================================"
