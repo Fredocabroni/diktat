@@ -101,7 +101,9 @@ export function DropFeedClient(): React.JSX.Element {
       try {
         await recordShift.mutateAsync({
           topicId,
-          beforePosition: 0,
+          // beforePosition is derived server-side from the user's latest
+          // shift on this topic (#136 / H13). Any client-sent value is
+          // ignored anyway; dropping it keeps the type contract honest.
           afterPosition: action === 'agree' ? 1 : -1,
           clientKey,
         });
