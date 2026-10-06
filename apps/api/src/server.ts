@@ -9,6 +9,7 @@ import { loadEnv } from './env.js';
 import { buildOuterHookBlockedBody, OUTER_HOOK_WINDOW_SEC } from './outer-hook.js';
 import { checkGlobalOuterHook, extractRetryAfterSec } from './rate-limit.js';
 import { appRouter, type AppRouter } from './routers/index.js';
+import { checkWebOrigins } from './web-origins-gate.js';
 
 const env = loadEnv();
 
@@ -67,6 +68,24 @@ if (
         'rate-limit counter collapses to the proxy IP and the public-tier budgets are ' +
         'bypassed. Set TRUSTED_PROXY_HOPS to the reverse-proxy chain depth (Railway edge ' +
         '= 1, +1 per CDN). See the M5 trustProxy gate in docs/TYRION_BUILD_QUEUE.md.',
+    }),
+  );
+  process.exit(1);
+}
+
+// Second activation-safety gate (#170): WEB_ORIGINS must declare at
+// least one non-localhost origin in non-dev/test. Factored into
+// ./web-origins-gate.ts so the predicate is unit-testable without
+// booting Fastify. Same exclusion-list posture as TRUSTED_PROXY_HOPS
+// above — fails CLOSED on unknown NODE_ENV values.
+const webOriginsFailure = checkWebOrigins(env);
+if (webOriginsFailure) {
+  console.error(
+    JSON.stringify({
+      event: 'boot.activation_safety_failed',
+      reason: webOriginsFailure.reason,
+      nodeEnv: env.NODE_ENV,
+      message: webOriginsFailure.message,
     }),
   );
   process.exit(1);
