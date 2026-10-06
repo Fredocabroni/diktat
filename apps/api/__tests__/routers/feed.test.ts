@@ -55,44 +55,131 @@ function sequencedFakeDb(table: string, results: Result[]) {
 }
 
 describe('feedRouter.recordShift', () => {
-  it('inserts the shift and returns the row in camelCase', async () => {
-    const row = {
-      id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
-      topic_id: TOPIC_ID,
-      before_position: 0,
-      after_position: 1,
-      created_at: '2026-04-25T00:00:00.000Z',
-    };
-    const { db } = fakeDb('opinion_shifts', { data: row, error: null });
+  // Every call now runs TWO or THREE sequenced DB terminals:
+  //   step 1 — SELECT prior.after_position (H13 server-derived
+  //            before_position lookup).
+  //   step 2 — INSERT the row (RETURNING .select(...).maybeSingle()).
+  //   step 3 — on 23505: fallback SELECT by (user_id, client_key).
+  // We standardise on sequencedFakeDb for everything so the step
+  // ordering is explicit and the derived-before assertions can read the
+  // insert step's payload directly.
+
+  const NEW_ROW = {
+    id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    topic_id: TOPIC_ID,
+    before_position: 0,
+    after_position: 1,
+    created_at: '2026-04-25T00:00:00.000Z',
+  };
+
+  it('H13: first shift on a topic derives before_position=0 (no prior shift)', async () => {
+    const { db, calls } = sequencedFakeDb('opinion_shifts', [
+      { data: null, error: null }, // prior SELECT: no row (first vote)
+      { data: NEW_ROW, error: null }, // INSERT RETURNING
+    ]);
     const caller = appRouter.createCaller(makeCtx({ db }));
 
     const result = await caller.feed.recordShift({
       topicId: TOPIC_ID,
-      beforePosition: 0,
       afterPosition: 1,
       clientKey: CLIENT_KEY_A,
     });
 
+    expect(calls.steps).toHaveLength(2);
+    // Step 1 is the prior-shift SELECT (NOT an insert).
+    const priorStep = calls.steps[0]!;
+    expect(priorStep.ops.map((o) => o.op)).toContain('select');
+    expect(priorStep.ops.map((o) => o.op)).not.toContain('insert');
+    const priorOrder = priorStep.ops.find((o) => o.op === 'order');
+    expect(priorOrder?.args[0]).toBe('created_at');
+
+    // Step 2 is the INSERT with server-derived before_position=0.
+    const insertStep = calls.steps[1]!;
+    const insertOp = insertStep.ops.find((o) => o.op === 'insert');
+    expect(insertOp).toBeDefined();
+    const payload = insertOp!.args[0] as Record<string, unknown>;
+    expect(payload.before_position).toBe(0);
+    expect(payload.after_position).toBe(1);
+
     expect(result).toEqual({
-      id: row.id,
-      topicId: row.topic_id,
+      id: NEW_ROW.id,
+      topicId: NEW_ROW.topic_id,
       beforePosition: 0,
       afterPosition: 1,
-      createdAt: row.created_at,
+      createdAt: NEW_ROW.created_at,
     });
   });
 
-  it('maps a 23503 fk_violation to NOT_FOUND', async () => {
-    const { db } = fakeDb('opinion_shifts', {
-      data: null,
-      error: { code: '23503', message: 'fk violation' },
+  it("H13: second shift derives before_position from the user's latest after_position", async () => {
+    const prior = { after_position: 1 }; // previous shift ended at +1
+    const newRow = {
+      id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+      topic_id: TOPIC_ID,
+      before_position: 1, // SERVER-DERIVED from prior
+      after_position: -1,
+      created_at: '2026-04-25T00:00:05.000Z',
+    };
+    const { db, calls } = sequencedFakeDb('opinion_shifts', [
+      { data: prior, error: null }, // prior SELECT returns prior.after=1
+      { data: newRow, error: null }, // INSERT RETURNING
+    ]);
+    const caller = appRouter.createCaller(makeCtx({ db }));
+
+    const result = await caller.feed.recordShift({
+      topicId: TOPIC_ID,
+      afterPosition: -1,
+      clientKey: CLIENT_KEY_B,
     });
+
+    // The server-derived before_position must be the prior.after_position.
+    const insertStep = calls.steps[1]!;
+    const payload = insertStep.ops.find((o) => o.op === 'insert')!.args[0] as Record<
+      string,
+      unknown
+    >;
+    expect(payload.before_position).toBe(1);
+    expect(payload.after_position).toBe(-1);
+
+    expect(result).toEqual({
+      id: newRow.id,
+      topicId: newRow.topic_id,
+      beforePosition: 1,
+      afterPosition: -1,
+      createdAt: newRow.created_at,
+    });
+  });
+
+  it('H13: input schema no longer accepts beforePosition', async () => {
+    // The caller may try to spoof a "strong flip" by sending
+    // beforePosition. Zod drops unknown keys (passthrough is off),
+    // so the field is silently ignored — but TypeScript rejects it at
+    // the type level in the caller. Smoke-test the server flow still
+    // works when the field is absent.
+    const { db } = sequencedFakeDb('opinion_shifts', [
+      { data: null, error: null },
+      { data: NEW_ROW, error: null },
+    ]);
     const caller = appRouter.createCaller(makeCtx({ db }));
 
     await expect(
       caller.feed.recordShift({
         topicId: TOPIC_ID,
-        beforePosition: 0,
+        afterPosition: 1,
+        clientKey: CLIENT_KEY_A,
+      }),
+    ).resolves.toMatchObject({ beforePosition: 0 });
+  });
+
+  it('maps a 23503 fk_violation to NOT_FOUND', async () => {
+    const { db } = sequencedFakeDb('opinion_shifts', [
+      { data: null, error: null }, // prior SELECT: no row
+      { data: null, error: { code: '23503', message: 'fk violation' } },
+    ]);
+    const caller = appRouter.createCaller(makeCtx({ db }));
+
+    await expect(
+      caller.feed.recordShift({
+        topicId: TOPIC_ID,
         afterPosition: -1,
         clientKey: CLIENT_KEY_A,
       }),
@@ -106,7 +193,6 @@ describe('feedRouter.recordShift', () => {
     await expect(
       caller.feed.recordShift({
         topicId: TOPIC_ID,
-        beforePosition: 0,
         afterPosition: 3 as 0 | 1 | 2,
         clientKey: CLIENT_KEY_A,
       }),
@@ -121,7 +207,6 @@ describe('feedRouter.recordShift', () => {
     await expect(
       caller.feed.recordShift({
         topicId: 'not-a-uuid',
-        beforePosition: 0,
         afterPosition: 0,
         clientKey: CLIENT_KEY_A,
       }),
@@ -130,121 +215,111 @@ describe('feedRouter.recordShift', () => {
   });
 
   it('accepts a request with NO clientKey — legacy path for stale PWA clients (H11 B2 fix-up)', async () => {
-    // A cached PWA bundle from before B2 shipped has no clientKey field
-    // in its outgoing tRPC input. That must continue to work: the row
-    // is inserted with client_key = NULL, the partial unique index
-    // (which excludes NULL rows) does not apply, and the response looks
-    // exactly like any other successful record. Regression until the
-    // rollout finishes and the field is tightened to required.
-    const row = {
-      id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
-      topic_id: TOPIC_ID,
-      before_position: 0,
-      after_position: 1,
-      created_at: '2026-04-25T00:00:00.000Z',
-    };
-    const { db, calls } = fakeDb('opinion_shifts', { data: row, error: null });
+    const { db, calls } = sequencedFakeDb('opinion_shifts', [
+      { data: null, error: null },
+      { data: NEW_ROW, error: null },
+    ]);
     const caller = appRouter.createCaller(makeCtx({ db }));
 
     const result = await caller.feed.recordShift({
       topicId: TOPIC_ID,
-      beforePosition: 0,
       afterPosition: 1,
       // clientKey omitted — legacy path
     });
 
     expect(result).toEqual({
-      id: row.id,
-      topicId: row.topic_id,
+      id: NEW_ROW.id,
+      topicId: NEW_ROW.topic_id,
       beforePosition: 0,
       afterPosition: 1,
-      createdAt: row.created_at,
+      createdAt: NEW_ROW.created_at,
     });
     // Confirm the insert did NOT carry a client_key field — the payload
     // matches the pre-B2 shape byte-for-byte.
-    const insertOp = calls.ops.find((o) => o.op === 'insert');
-    expect(insertOp).toBeDefined();
-    const payload = insertOp!.args[0] as Record<string, unknown>;
+    const insertStep = calls.steps[1]!;
+    const payload = insertStep.ops.find((o) => o.op === 'insert')!.args[0] as Record<
+      string,
+      unknown
+    >;
     expect('client_key' in payload).toBe(false);
   });
 
   it('rejects a present-but-non-uuid clientKey at the input schema (H11 B2)', async () => {
-    // If the client bothered to send the field, it must be a uuid. This
-    // catches contributor-side breakage without silently dropping the
-    // idempotency guarantee.
     const { db, calls } = fakeDb('opinion_shifts', { data: null, error: null });
     const caller = appRouter.createCaller(makeCtx({ db }));
 
     await expect(
       caller.feed.recordShift({
         topicId: TOPIC_ID,
-        beforePosition: 0,
         afterPosition: 1,
         clientKey: 'not-a-uuid',
       }),
     ).rejects.toBeInstanceOf(TRPCError);
-
-    // Rejected at the schema layer — never hit the DB.
     expect(calls.ops).toEqual([]);
   });
 
-  it('on 23505 unique_violation, looks up the existing row (self-scoped) and returns it — no duplicate write, no second streak credit (H11 B2)', async () => {
+  it('H13 + H11 B2: retry with same clientKey returns the ORIGINAL row unchanged (no reclassification of before_position)', async () => {
+    // Scenario: user tapped Agree earlier (clientKey=K, write succeeded,
+    // row persisted with before=0, after=1). Then the user changed their
+    // mind to Disagree (that write succeeded with a NEW clientKey, after=-1).
+    // Now the ORIGINAL tap's response was lost on the network and the
+    // client retries with the ORIGINAL clientKey K.
+    //
+    // Freshly derived before_position would now = -1 (the user's latest
+    // after). But the retry MUST return the row as it was originally
+    // written, unchanged — otherwise the response would silently
+    // reclassify the row's before_position depending on when the retry
+    // arrived.
     const existingRow = {
       id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
       topic_id: TOPIC_ID,
-      before_position: 0,
+      before_position: 0, // ← what was written originally
       after_position: 1,
       created_at: '2026-04-25T00:00:00.000Z',
     };
-    // Sequenced results: first terminal (the .insert(...).select(...).maybeSingle())
-    // fires 23505; second terminal (the SELECT-by-user_id+client_key fallback)
-    // returns the existing row.
     const { db, calls } = sequencedFakeDb('opinion_shifts', [
+      // step 1 — prior SELECT returns the LATEST row (the mind-change),
+      // which would derive before=-1 if we trusted it. The idempotency
+      // path must ignore this derivation and return the EXISTING row's
+      // before=0 instead.
+      { data: { after_position: -1 }, error: null },
+      // step 2 — INSERT returns 23505 (clientKey already used).
       { data: null, error: { code: '23505', message: 'duplicate key' } },
+      // step 3 — fallback SELECT by (user_id, client_key) returns the
+      // original row (before=0, after=1).
       { data: existingRow, error: null },
     ]);
     const caller = appRouter.createCaller(makeCtx({ db }));
 
     const result = await caller.feed.recordShift({
       topicId: TOPIC_ID,
-      beforePosition: 0,
       afterPosition: 1,
       clientKey: CLIENT_KEY_A,
     });
 
-    // Exactly two DB round-trips: the INSERT and the fallback SELECT.
-    // NOT three (would mean a second INSERT, i.e. a second streak-trigger
-    // fire — the whole thing this fix exists to prevent).
-    expect(calls.steps).toHaveLength(2);
-    const insertStep = calls.steps[0]!;
-    const lookupStep = calls.steps[1]!;
+    // THREE steps: prior SELECT → INSERT (23505) → fallback SELECT.
+    expect(calls.steps).toHaveLength(3);
 
-    // Step 1: was an INSERT.
-    expect(insertStep.ops.map((o) => o.op)).toContain('insert');
-
-    // Step 2: was a SELECT filtered by BOTH user_id AND client_key
-    // (per-user scoping — belt AND suspenders vs RLS).
-    const lookupOps = lookupStep.ops.map((o) => o.op);
-    expect(lookupOps).toContain('select');
-    const eqCalls = lookupStep.ops.filter((o) => o.op === 'eq');
-    const eqCols = eqCalls.map((c) => c.args[0]);
+    // Step 3 (fallback) filtered on BOTH user_id AND client_key.
+    const lookupStep = calls.steps[2]!;
+    const eqCols = lookupStep.ops.filter((o) => o.op === 'eq').map((o) => o.args[0]);
     expect(eqCols).toContain('user_id');
     expect(eqCols).toContain('client_key');
-    // No second insert.
-    expect(lookupOps).not.toContain('insert');
 
-    // Response shape is identical to a fresh-write success.
+    // Response is the ORIGINAL row verbatim. before_position stays 0,
+    // not the -1 the prior-SELECT would have suggested.
     expect(result).toEqual({
       id: existingRow.id,
       topicId: existingRow.topic_id,
-      beforePosition: existingRow.before_position,
-      afterPosition: existingRow.after_position,
+      beforePosition: 0,
+      afterPosition: 1,
       createdAt: existingRow.created_at,
     });
   });
 
   it('on 23505 but self-scoped lookup returns nothing, throws INTERNAL_SERVER_ERROR — never fabricates a row (H11 B2)', async () => {
     const { db } = sequencedFakeDb('opinion_shifts', [
+      { data: null, error: null }, // prior SELECT
       { data: null, error: { code: '23505', message: 'duplicate key' } },
       { data: null, error: null }, // impossible-in-practice: 23505 but no row we can read.
     ]);
@@ -253,7 +328,6 @@ describe('feedRouter.recordShift', () => {
     await expect(
       caller.feed.recordShift({
         topicId: TOPIC_ID,
-        beforePosition: 0,
         afterPosition: 1,
         clientKey: CLIENT_KEY_A,
       }),
@@ -261,9 +335,6 @@ describe('feedRouter.recordShift', () => {
   });
 
   it('same user + same topic + two different clientKeys → two rows (change-of-mind preserved) (H11 B2)', async () => {
-    // Each mutation call is independent (different clientKey → different
-    // INSERT), so the fresh-row path fires twice. Use the shared fakeDb
-    // per call.
     const rowA = {
       id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
       topic_id: TOPIC_ID,
@@ -274,33 +345,35 @@ describe('feedRouter.recordShift', () => {
     const rowB = {
       id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
       topic_id: TOPIC_ID,
-      before_position: 0,
+      before_position: 1, // derived from rowA.after_position
       after_position: -1,
       created_at: '2026-04-25T00:00:05.000Z',
     };
 
-    const dbA = fakeDb('opinion_shifts', { data: rowA, error: null }).db;
-    const dbB = fakeDb('opinion_shifts', { data: rowB, error: null }).db;
+    const dbA = sequencedFakeDb('opinion_shifts', [
+      { data: null, error: null }, // first vote, no prior
+      { data: rowA, error: null },
+    ]).db;
+    const dbB = sequencedFakeDb('opinion_shifts', [
+      { data: { after_position: 1 }, error: null }, // mind-change, prior=rowA
+      { data: rowB, error: null },
+    ]).db;
 
     const first = await appRouter.createCaller(makeCtx({ db: dbA })).feed.recordShift({
       topicId: TOPIC_ID,
-      beforePosition: 0,
       afterPosition: 1,
       clientKey: CLIENT_KEY_A,
     });
     const second = await appRouter.createCaller(makeCtx({ db: dbB })).feed.recordShift({
       topicId: TOPIC_ID,
-      beforePosition: 0,
       afterPosition: -1,
       clientKey: CLIENT_KEY_B,
     });
 
     expect(first.id).toBe(rowA.id);
     expect(second.id).toBe(rowB.id);
-    expect(first.afterPosition).toBe(1);
-    expect(second.afterPosition).toBe(-1);
-    // Distinct rows — proves the design doesn't collapse legitimate
-    // mind-changes into the idempotency path.
+    expect(first.beforePosition).toBe(0);
+    expect(second.beforePosition).toBe(1); // ← proves H13 derivation ran
     expect(first.id).not.toBe(second.id);
   });
 });
