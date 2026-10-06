@@ -9,21 +9,29 @@
 #   check-review-output.sh <output-file> <claude-exit-code>
 #
 # Outcome contract:
-#   exit 0 + stdout "ok"    — real review (caller posts the body).
-#   exit 0 + stdout "empty" — legitimate no-scope (caller skips post).
-#   exit 1 + stdout REASON  — upstream failure. REASON is a CONTROLLED
-#                              one-line string the caller posts as the
-#                              failure comment. REASON NEVER contains
-#                              raw agent stdout — exfil hardening from
-#                              PR #51 round-2 security-reviewer M1.
-#                              The raw `$file` belongs in the workflow
-#                              log only; the caller is responsible for
-#                              echoing it there (not posting it as a
-#                              comment).
-#                              The sanitized first-line preview is
-#                              ALSO emitted to stderr via an
-#                              `::error::` annotation — log-only,
-#                              never the comment (M2).
+#   exit 0 + stdout "ok"       — real review, verdict is NOT BLOCK
+#                                 (caller posts the body, check green).
+#   exit 0 + stdout "ok_block" — real review ending in a BLOCK verdict
+#                                 (caller posts the body AND exits 1 so
+#                                 the check turns red; the hard rule
+#                                 "a BLOCK verdict counts as blocking
+#                                 even if the check is green" is now
+#                                 enforced by the gate instead of
+#                                 relying on a human to read the body).
+#   exit 0 + stdout "empty"    — legitimate no-scope (caller skips post).
+#   exit 1 + stdout REASON     — upstream failure. REASON is a CONTROLLED
+#                                 one-line string the caller posts as the
+#                                 failure comment. REASON NEVER contains
+#                                 raw agent stdout — exfil hardening from
+#                                 PR #51 round-2 security-reviewer M1.
+#                                 The raw `$file` belongs in the workflow
+#                                 log only; the caller is responsible for
+#                                 echoing it there (not posting it as a
+#                                 comment).
+#                                 The sanitized first-line preview is
+#                                 ALSO emitted to stderr via an
+#                                 `::error::` annotation — log-only,
+#                                 never the comment (M2).
 #
 # Detection — two independent gates, both must pass:
 #
@@ -154,6 +162,60 @@ header_line=$(awk -v limit="$HEADER_SCAN_LINES" '
 ' "$file")
 
 if [ -n "$header_line" ]; then
+  # Real review. Classify verdict: BLOCK → "ok_block" (caller must
+  # exit 1 after posting so the check turns red); otherwise → "ok".
+  #
+  # The reviewer subagents (see .claude/agents/*.md) emit a verdict in
+  # one of two shapes:
+  #   (1) A standalone trailing line of just `BLOCK` (per "End with
+  #       PASS or BLOCK" in security-reviewer.md and copy-linter.md),
+  #       possibly bold-decorated.
+  #   (2) An explicit "Verdict: BLOCK" or "Overall verdict: BLOCK"
+  #       line (addiction-auditor.md uses "verdict (APPROVE | BLOCK |
+  #       NEEDS-USER-DECISION)" per-mechanic plus an overall verdict).
+  #
+  # Patterns:
+  #   - Explicit-verdict pattern: a line beginning with optional
+  #     markdown decoration, optional "overall ", the word "verdict",
+  #     optional ":", optional decoration, then the word "BLOCK".
+  #     Prose like "The verdict for this PR is: do not block merge"
+  #     does NOT match — the `^` anchor + leading-only decoration
+  #     prevents "The " from satisfying the lead.
+  #   - Trailing-line pattern: the LAST non-blank line of the body
+  #     is EXACTLY `BLOCK` (optionally bold-decorated, optionally
+  #     with a trailing period). Anything with words after `BLOCK`
+  #     (e.g. "BLOCK merge until X") doesn't match the trailing
+  #     pattern — the explicit pattern catches those if they're on
+  #     a verdict line.
+  #
+  # Scope: the explicit-verdict pattern scans ONLY the last 15 non-
+  # blank lines of the review. The reviewer agent prompts explicitly
+  # instruct to "end with" the overall verdict, so a per-mechanic
+  # finding like "mechanic X — verdict (BLOCK)" earlier in the body
+  # does NOT count. If a reviewer wants the gate to turn red, they
+  # must end the review with the verdict.
+  #
+  # Both scans use word-boundary matches (`\bBLOCK\b`), so
+  # "blockchain" / "unblock" / "blocker" / "code block" never trip
+  # the gate. "PASS" / "APPROVE" / "NEEDS-USER-DECISION" / anything
+  # else at the trailing position all classify as "ok".
+  TAIL_SCAN_LINES=15
+  tail_body=$(awk 'NF' "$file" | tail -n "$TAIL_SCAN_LINES")
+  explicit_block=$(printf '%s\n' "$tail_body" | grep -iE '^[[:space:]]*(\*\*|##? ?|_)*(overall[[:space:]]+)?verdict[[:space:]]*:?[[:space:]]*(\*\*|_)*[[:space:]]*BLOCK\b' || true)
+
+  trailing_line=$(awk 'NF {last=$0} END {print last}' "$file" | tr -d '[:space:]')
+  trailing_block=""
+  case "$trailing_line" in
+    "BLOCK"|"BLOCK."|"**BLOCK**"|"**BLOCK**."|"__BLOCK__"|"__BLOCK__.")
+      trailing_block="yes"
+      ;;
+  esac
+
+  if [ -n "$explicit_block" ] || [ -n "$trailing_block" ]; then
+    echo "ok_block"
+    exit 0
+  fi
+
   echo "ok"
   exit 0
 fi
