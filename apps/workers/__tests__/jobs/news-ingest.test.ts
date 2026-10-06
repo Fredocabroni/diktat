@@ -169,29 +169,74 @@ interface FakeState {
   insertedRejected: Record<string, unknown>[];
   payloadUpdates: { id: string; patch: Record<string, unknown> }[];
   insertError: { code?: string; message: string } | null;
+  /** news_adapter_health upserts (adapter → latest payload). The handler
+   *  calls upsert on every tick; the Map models the PK on `adapter`. */
+  healthUpserts: Map<string, Record<string, unknown>>;
+  /** Prior-row snapshot the handler reads via
+   *  `select(...).eq('adapter', name).maybeSingle()` before each upsert.
+   *  Tests can prime this to simulate a pre-existing adapter row (e.g.
+   *  to verify the fresh-at timestamp carries forward across a dead
+   *  tick without being cleared). */
+  healthPriors: Map<string, Record<string, unknown>>;
+  /** Rows the handler's bulk-read `select(...)` returns for the
+   *  warnStaleAdapters pass. Separate from `healthPriors` because the
+   *  terminal select and the eq()-filtered select serve different
+   *  code paths. */
+  healthBulkRows: Record<string, unknown>[];
 }
 
 function buildSupabase(state: FakeState): ServiceClient {
   return {
-    from: (table: string) => ({
-      insert: (row: Record<string, unknown>) => {
-        // Mirror Postgres: an error response means the row did NOT land.
-        // Only record successful inserts in state.inserted / state.insertedRejected.
-        if (table === 'news_topics_candidates' && state.insertError === null) {
-          if (row.rejected_reason) state.insertedRejected.push(row);
-          else state.inserted.push(row);
-        }
-        return Promise.resolve({ error: state.insertError });
-      },
-      update: (patch: Record<string, unknown>) => ({
-        eq: (_col: string, id: unknown) => {
-          if (table === 'scheduled_jobs') {
-            state.payloadUpdates.push({ id: String(id), patch });
+    from: (table: string) => {
+      // news_adapter_health has a different write shape (upsert instead
+      // of insert) and two read shapes (eq-filtered single + terminal
+      // bulk). Model each explicitly rather than through the generic
+      // from() shape so the test doesn't accidentally conflate paths.
+      if (table === 'news_adapter_health') {
+        return {
+          select: (_cols: string) => {
+            // Terminal thenable (await supabase.from(...).select(...))
+            // returns the bulk rows for warnStaleAdapters, AND
+            // .eq('adapter', name).maybeSingle() returns the prior-row
+            // snapshot for upsertAdapterHealth.
+            return {
+              eq: (col: string, val: unknown) => ({
+                maybeSingle: () => {
+                  const data =
+                    col === 'adapter' ? (state.healthPriors.get(String(val)) ?? null) : null;
+                  return Promise.resolve({ data, error: null });
+                },
+              }),
+              then: (resolve: (v: { data: unknown; error: null }) => unknown) =>
+                resolve({ data: state.healthBulkRows, error: null }),
+            };
+          },
+          upsert: (row: Record<string, unknown>, _opts?: unknown) => {
+            state.healthUpserts.set(String(row.adapter), row);
+            return Promise.resolve({ error: null });
+          },
+        };
+      }
+      return {
+        insert: (row: Record<string, unknown>) => {
+          // Mirror Postgres: an error response means the row did NOT land.
+          // Only record successful inserts in state.inserted / state.insertedRejected.
+          if (table === 'news_topics_candidates' && state.insertError === null) {
+            if (row.rejected_reason) state.insertedRejected.push(row);
+            else state.inserted.push(row);
           }
-          return Promise.resolve({ error: null });
+          return Promise.resolve({ error: state.insertError });
         },
-      }),
-    }),
+        update: (patch: Record<string, unknown>) => ({
+          eq: (_col: string, id: unknown) => {
+            if (table === 'scheduled_jobs') {
+              state.payloadUpdates.push({ id: String(id), patch });
+            }
+            return Promise.resolve({ error: null });
+          },
+        }),
+      };
+    },
   } as unknown as ServiceClient;
 }
 
@@ -250,7 +295,15 @@ function candidate(overrides: Partial<CandidateInput> = {}): CandidateInput {
 }
 
 function freshState(): FakeState {
-  return { inserted: [], insertedRejected: [], payloadUpdates: [], insertError: null };
+  return {
+    inserted: [],
+    insertedRejected: [],
+    payloadUpdates: [],
+    insertError: null,
+    healthUpserts: new Map(),
+    healthPriors: new Map(),
+    healthBulkRows: [],
+  };
 }
 
 describe('newsIngestHandler — happy path', () => {
@@ -396,5 +449,165 @@ describe('newsIngestHandler — happy path', () => {
 
     expect(state.inserted).toHaveLength(0);
     expect(state.insertedRejected).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// news_adapter_health UPSERT + 24h staleness warn (PR follow-up to #154)
+// ---------------------------------------------------------------------------
+
+describe('news_adapter_health — per-adapter liveness tracking', () => {
+  it('upserts last_success_at and last_fresh_insert_at when a candidate lands', async () => {
+    const state = freshState();
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+    const adapters = [fakeAdapter('congress', [candidate()])];
+    const handler = buildNewsIngestHandler(adapters);
+
+    await handler(row(), { supabase, logger, fetch: vi.fn() as never });
+
+    const health = state.healthUpserts.get('congress');
+    expect(health).toBeDefined();
+    expect(health!.last_success_at).toBeTypeOf('string');
+    expect(health!.last_fresh_insert_at).toBeTypeOf('string');
+    expect(health!.last_fetched_count).toBe(1);
+    expect(health!.last_fresh_count).toBe(1);
+    expect(health!.last_error_at).toBeNull();
+  });
+
+  it('does NOT advance last_fresh_insert_at when every row 23505-collides', async () => {
+    const state = freshState();
+    state.insertError = { code: '23505', message: 'duplicate key value' };
+    // Prior row: adapter succeeded and produced fresh rows 2 hours ago.
+    // The current tick re-ingests the same items (dedup absorbs them)
+    // so last_fresh_insert_at MUST hold still — exactly the condition
+    // the 24h-dedup warn is designed to catch.
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    state.healthPriors.set('congress', {
+      last_success_at: twoHoursAgo,
+      last_fresh_insert_at: twoHoursAgo,
+      last_error_at: null,
+      last_error_message: null,
+    });
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+    const adapters = [fakeAdapter('congress', [candidate()])];
+    const handler = buildNewsIngestHandler(adapters);
+
+    await handler(row(), { supabase, logger, fetch: vi.fn() as never });
+
+    const health = state.healthUpserts.get('congress');
+    expect(health).toBeDefined();
+    // last_success_at advances (fetch itself succeeded) but
+    // last_fresh_insert_at stays frozen at the two-hour-ago prior.
+    expect(health!.last_success_at).not.toBe(twoHoursAgo);
+    expect(health!.last_fresh_insert_at).toBe(twoHoursAgo);
+    expect(health!.last_fresh_count).toBe(0);
+  });
+
+  it('stamps last_error_at + last_error_message on adapter.fetch failure; preserves last_success_at', async () => {
+    const state = freshState();
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    state.healthPriors.set('broken', {
+      last_success_at: twoHoursAgo,
+      last_fresh_insert_at: twoHoursAgo,
+      last_error_at: null,
+      last_error_message: null,
+    });
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+    const broken: NewsIngestAdapter = {
+      name: 'broken',
+      defaultCategory: 'congress',
+      fetch: vi.fn().mockRejectedValue(new Error('feed 503')),
+    };
+    const handler = buildNewsIngestHandler([broken]);
+
+    await handler(row(), { supabase, logger, fetch: vi.fn() as never });
+
+    const health = state.healthUpserts.get('broken');
+    expect(health).toBeDefined();
+    expect(health!.last_error_at).toBeTypeOf('string');
+    expect(health!.last_error_message).toBe('feed 503');
+    // A failing fetch MUST NOT clear last_success_at — it holds the
+    // last-known-good signal while the current tick is in a bad state.
+    expect(health!.last_success_at).toBe(twoHoursAgo);
+    expect(health!.last_fresh_insert_at).toBe(twoHoursAgo);
+    expect(health!.last_fetched_count).toBe(0);
+  });
+
+  it('emits adapter_stale warn when last_fresh_insert_at >= 24h old', async () => {
+    const state = freshState();
+    const twentyFiveHoursAgo = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
+    const halfHourAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    // Bulk-read result for warnStaleAdapters: one adapter stale, one fresh.
+    state.healthBulkRows = [
+      {
+        adapter: 'bls',
+        last_success_at: new Date().toISOString(),
+        last_fresh_insert_at: twentyFiveHoursAgo,
+        updated_at: twentyFiveHoursAgo,
+      },
+      {
+        adapter: 'congress',
+        last_success_at: new Date().toISOString(),
+        last_fresh_insert_at: halfHourAgo,
+        updated_at: halfHourAgo,
+      },
+    ];
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+    const handler = buildNewsIngestHandler([fakeAdapter('congress', [candidate()])]);
+
+    await handler(row(), { supabase, logger, fetch: vi.fn() as never });
+
+    const warns = logger.calls.filter((c) => c.obj.event === 'news_ingest.adapter_stale');
+    expect(warns).toHaveLength(1);
+    expect(warns[0]!.obj.adapter).toBe('bls');
+    expect(warns[0]!.level).toBe('warn');
+  });
+
+  it('does NOT warn when last_fresh_insert_at is null AND the row is <24h old (cold-start grace)', async () => {
+    const state = freshState();
+    state.healthBulkRows = [
+      {
+        adapter: 'brand_new',
+        last_success_at: null,
+        last_fresh_insert_at: null,
+        // Row created 5 minutes ago — brand new adapter, hasn't had a
+        // chance to produce anything yet. A warn here would false-fire
+        // on every new adapter rollout.
+        updated_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+      },
+    ];
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+    const handler = buildNewsIngestHandler([fakeAdapter('brand_new', [candidate()])]);
+
+    await handler(row(), { supabase, logger, fetch: vi.fn() as never });
+
+    expect(logger.calls.find((c) => c.obj.event === 'news_ingest.adapter_stale')).toBeUndefined();
+  });
+
+  it('DOES warn when last_fresh_insert_at is null AND the row is >=24h old', async () => {
+    const state = freshState();
+    const twentyFiveHoursAgo = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
+    state.healthBulkRows = [
+      {
+        adapter: 'never_fresh',
+        last_success_at: twentyFiveHoursAgo,
+        last_fresh_insert_at: null,
+        updated_at: twentyFiveHoursAgo,
+      },
+    ];
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+    const handler = buildNewsIngestHandler([fakeAdapter('never_fresh', [candidate()])]);
+
+    await handler(row(), { supabase, logger, fetch: vi.fn() as never });
+
+    const warns = logger.calls.filter((c) => c.obj.event === 'news_ingest.adapter_stale');
+    expect(warns).toHaveLength(1);
+    expect(warns[0]!.obj.adapter).toBe('never_fresh');
   });
 });
