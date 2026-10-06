@@ -13,6 +13,10 @@
     "./alerts": {
       "types": "./dist/alerts.d.ts",
       "import": "./dist/alerts.js"
+    },
+    "./deploy-sha": {
+      "types": "./dist/deploy-sha.d.ts",
+      "import": "./dist/deploy-sha.js"
     }
   },
   "scripts": {

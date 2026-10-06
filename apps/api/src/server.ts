@@ -1,4 +1,5 @@
 import { makeAlerter } from '@diktat/shared/alerts';
+import { resolveDeploySha } from '@diktat/shared/deploy-sha';
 import cors from '@fastify/cors';
 import { fastifyTRPCPlugin, type FastifyTRPCPluginOptions } from '@trpc/server/adapters/fastify';
 import Fastify from 'fastify';
@@ -163,6 +164,11 @@ const app = Fastify({
 // Echo the resolved listen target + trustProxy posture at boot. The
 // `request.ip` recovery check the queue describes (curl /health, read
 // the boot log, verify the public client IP shows up) reads this line.
+//
+// `commit` resolves the deployed git SHA (short form) from
+// RAILWAY_GIT_COMMIT_SHA, else 'unknown'. Railway's git auto-deploy
+// populates that env var on the running container; local dev lands on
+// 'unknown'. See packages/shared/src/deploy-sha.ts for the hex guard.
 app.log.info(
   {
     event: 'boot.started',
@@ -170,6 +176,7 @@ app.log.info(
     port: env.PORT,
     nodeEnv: env.NODE_ENV,
     trustProxyHops: env.TRUSTED_PROXY_HOPS ?? null,
+    commit: resolveDeploySha(),
   },
   'diktat-api booting',
 );
