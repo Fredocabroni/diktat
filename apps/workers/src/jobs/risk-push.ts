@@ -23,6 +23,8 @@
 //   - re-verified at handler time (state may have changed in the 15-min
 //     window between cron tick and handler claim)
 
+import { scrubMessage } from '@diktat/shared/alerts';
+
 import type { JobHandler } from './scheduler.js';
 
 interface RiskPushPayload {
@@ -59,7 +61,7 @@ export const riskPushHandler: JobHandler = async (row, deps) => {
   })) as { data: RiskPushRpcResult | null; error: { message: string } | null };
 
   if (error) {
-    throw new Error(`evaluate_risk_push RPC failed: ${error.message}`);
+    throw new Error(`evaluate_risk_push RPC failed: ${scrubMessage(error.message)}`);
   }
   const result = data ?? { decision: 'skip_no_streak' as const };
 
@@ -82,7 +84,9 @@ export const riskPushHandler: JobHandler = async (row, deps) => {
     .update({ payload: newPayload })
     .eq('id', row.id)) as { error: { message: string } | null };
   if (updateErr) {
-    throw new Error(`risk_push: failed to stamp decision into payload: ${updateErr.message}`);
+    throw new Error(
+      `risk_push: failed to stamp decision into payload: ${scrubMessage(updateErr.message)}`,
+    );
   }
 
   deps.logger.info({

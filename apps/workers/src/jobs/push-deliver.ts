@@ -35,6 +35,8 @@
 //   6. Stamp delivery_status into this row's own payload — never back
 //      into the source risk_push row's payload (immutable decision trail).
 
+import { scrubMessage } from '@diktat/shared/alerts';
+
 import type { JobHandler, ScheduledJobRow } from './scheduler.js';
 
 const STALENESS_WINDOW_MS = 15 * 60 * 1000;
@@ -231,7 +233,7 @@ export function buildPushDeliverHandler(sender: WebPushSender | null): JobHandle
         outcome = {
           kind: 'transient',
           statusCode: 0,
-          message: truncateMessage(err instanceof Error ? err.message : String(err)),
+          message: truncateMessage(scrubMessage(err instanceof Error ? err.message : String(err))),
         };
       }
 
@@ -271,7 +273,7 @@ export function buildPushDeliverHandler(sender: WebPushSender | null): JobHandle
           // it originates from an attacker-influenceable upstream response
           // body — bounded length defends DB / log bloat (security-reviewer
           // ask, 2026-06-15).
-          const truncated = truncateMessage(outcome.message);
+          const truncated = truncateMessage(scrubMessage(outcome.message));
           if (transientErr === null) {
             transientErr = { statusCode: outcome.statusCode, message: truncated };
           }
@@ -289,7 +291,7 @@ export function buildPushDeliverHandler(sender: WebPushSender | null): JobHandle
     if (transientErr !== null) {
       // Status NOT stamped here — scheduler will retry the whole row.
       throw new Error(
-        `push_deliver: transient send failure (${transientErr.statusCode}): ${transientErr.message}`,
+        `push_deliver: transient send failure (${transientErr.statusCode}): ${scrubMessage(transientErr.message)}`,
       );
     }
 
@@ -325,7 +327,7 @@ async function isStreakRiskPushEnabled(
     data: { notification_preferences: Record<string, unknown> | null } | null;
     error: { message: string } | null;
   };
-  if (error) throw new Error(`push_deliver: read prefs: ${error.message}`);
+  if (error) throw new Error(`push_deliver: read prefs: ${scrubMessage(error.message)}`);
   if (!data) {
     // User row vanished between decision and delivery (deleted account).
     // Treat as opt-out — no notification can reach a deleted user anyway.
@@ -350,7 +352,7 @@ async function fetchActiveSubscriptions(
     data: SubscriptionRow[] | null;
     error: { message: string } | null;
   };
-  if (error) throw new Error(`push_deliver: fetch subs: ${error.message}`);
+  if (error) throw new Error(`push_deliver: fetch subs: ${scrubMessage(error.message)}`);
   return data ?? [];
 }
 
@@ -367,7 +369,7 @@ async function touchLastDelivered(
     deps.logger.warn({
       event: 'push.deliver.touch_failed',
       subscriptionId,
-      message: error.message,
+      message: scrubMessage(error.message),
     });
   }
 }
@@ -387,7 +389,7 @@ async function softDeleteSubscription(
       event: 'push.deliver.soft_delete_failed',
       subscriptionId,
       reason,
-      message: error.message,
+      message: scrubMessage(error.message),
     });
   }
 }
@@ -410,7 +412,7 @@ async function stampDeliveryStatus(
     .update({ payload: newPayload })
     .eq('id', row.id)) as { error: { message: string } | null };
   if (error) {
-    throw new Error(`push_deliver: stamp status (${status}): ${error.message}`);
+    throw new Error(`push_deliver: stamp status (${status}): ${scrubMessage(error.message)}`);
   }
 }
 

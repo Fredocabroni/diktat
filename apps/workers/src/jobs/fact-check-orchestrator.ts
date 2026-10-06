@@ -30,6 +30,8 @@ import {
   type ProviderEnv,
 } from '@diktat/ai-fabric';
 
+import { scrubMessage } from '@diktat/shared/alerts';
+
 import type { JobHandler } from './scheduler.js';
 
 /** Projection used for the per-task cap pre-check. Tuned to the Sonnet
@@ -77,7 +79,7 @@ export const factCheckOrchestratorHandler: JobHandler = async (row, deps) => {
     p_claim_id: claimId,
   })) as { data: { hit: boolean; verdict?: unknown } | null; error: { message: string } | null };
   if (dedup.error) {
-    throw new Error(`fact_check_dedup_lookup RPC failed: ${dedup.error.message}`);
+    throw new Error(`fact_check_dedup_lookup RPC failed: ${scrubMessage(dedup.error.message)}`);
   }
   if (dedup.data?.hit === true) {
     await stampPayload(deps, row.id, { ...row.payload, outcome: 'cache_hit' });
@@ -97,7 +99,7 @@ export const factCheckOrchestratorHandler: JobHandler = async (row, deps) => {
     .eq('id', claimId)
     .maybeSingle()) as { data: ClaimRow | null; error: { message: string } | null };
   if (claimRes.error) {
-    throw new Error(`fact_check: claim load failed: ${claimRes.error.message}`);
+    throw new Error(`fact_check: claim load failed: ${scrubMessage(claimRes.error.message)}`);
   }
   if (!claimRes.data) {
     // The claim row was deleted between enqueue and dispatch. Don't retry
@@ -161,7 +163,9 @@ export const factCheckOrchestratorHandler: JobHandler = async (row, deps) => {
     p_sources: sources,
   })) as { data: string | null; error: { message: string } | null };
   if (persist.error) {
-    throw new Error(`fact_check_persist_verdict RPC failed: ${persist.error.message}`);
+    throw new Error(
+      `fact_check_persist_verdict RPC failed: ${scrubMessage(persist.error.message)}`,
+    );
   }
   const verdictId = persist.data;
 
@@ -226,6 +230,8 @@ async function stampPayload(
     // Throw — the dispatcher will retry, and the next attempt will be a
     // cache_hit (the verdict is already persisted). Surfaces via
     // scheduler.handler_failed.
-    throw new Error(`fact_check: failed to stamp scheduled_jobs payload: ${error.message}`);
+    throw new Error(
+      `fact_check: failed to stamp scheduled_jobs payload: ${scrubMessage(error.message)}`,
+    );
   }
 }

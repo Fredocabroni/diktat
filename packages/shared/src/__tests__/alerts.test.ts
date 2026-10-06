@@ -4,6 +4,7 @@ import {
   clampToTelegram,
   escapeHtml,
   makeAlerter,
+  scrubLogPayload,
   scrubMessage,
   type AlertFailure,
 } from '../alerts.js';
@@ -271,5 +272,81 @@ describe('scrubMessage', () => {
     expect(text).toContain('550e8400-e29b-41d4-a716-446655440000');
     expect(text).toContain('drop_publish');
     expect(text.startsWith('🔴 <b>')).toBe(true);
+  });
+});
+
+describe('scrubLogPayload', () => {
+  it('scrubs a top-level string field', () => {
+    const out = scrubLogPayload({ event: 'x', msg: 'postgres://u:p@h/d' });
+    expect(out).toEqual({ event: 'x', msg: '<url-redacted>' });
+  });
+
+  it('scrubs nested object + array string fields', () => {
+    const out = scrubLogPayload({
+      event: 'x',
+      urls: ['postgres://u:p@h/d', 'safe'],
+      ctx: { token: 'raw t_abc', inner: { host: 'h.local port=5432 token=t_xyz' } },
+    });
+    expect(out).toEqual({
+      event: 'x',
+      urls: ['<url-redacted>', 'safe'],
+      ctx: {
+        token: 'raw t_abc',
+        inner: { host: 'h.local port=<redacted> token=<redacted>' },
+      },
+    });
+  });
+
+  it('serialises Error with scrubbed message and stack', () => {
+    const err = new Error('fail postgres://x:y@h/d password=abc');
+    err.stack = 'Error: fail postgres://x:y@h/d password=abc\n    at <frame>';
+    const out = scrubLogPayload(err) as {
+      name: string;
+      message: string;
+      stack: string;
+      cause?: unknown;
+    };
+    expect(out.name).toBe('Error');
+    expect(out.message).toContain('<url-redacted>');
+    expect(out.message).toContain('password=<redacted>');
+    expect(out.stack).toContain('<url-redacted>');
+    expect(out.stack).toContain('password=<redacted>');
+    expect(out.stack).toContain('<frame>');
+    expect(out.cause).toBeUndefined();
+  });
+
+  it('walks .cause chain recursively', () => {
+    const root = new Error('deep token=t_abc');
+    const mid = new Error('mid');
+    (mid as { cause?: unknown }).cause = root;
+    const top = new Error('top');
+    (top as { cause?: unknown }).cause = mid;
+    const out = scrubLogPayload(top) as {
+      message: string;
+      cause: { message: string; cause: { message: string } };
+    };
+    expect(out.message).toBe('top');
+    expect(out.cause.message).toBe('mid');
+    expect(out.cause.cause.message).toContain('token=<redacted>');
+  });
+
+  it('is cycle-safe (self-reference in .cause)', () => {
+    const loop = new Error('loop host=secret');
+    (loop as { cause?: unknown }).cause = loop;
+    expect(() => scrubLogPayload(loop)).not.toThrow();
+    const out = scrubLogPayload(loop) as { message: string };
+    expect(out.message).toContain('host=<redacted>');
+  });
+
+  it('passes primitives through unchanged', () => {
+    expect(scrubLogPayload(42)).toBe(42);
+    expect(scrubLogPayload(true)).toBe(true);
+    expect(scrubLogPayload(null)).toBeNull();
+    expect(scrubLogPayload(undefined)).toBeUndefined();
+    expect(scrubLogPayload(3.14)).toBe(3.14);
+  });
+
+  it('scrubs top-level strings directly', () => {
+    expect(scrubLogPayload('token=t_abc raw')).toBe('token=<redacted> raw');
   });
 });

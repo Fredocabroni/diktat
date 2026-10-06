@@ -23,6 +23,7 @@
 // Tick logic is exposed as runOpenDebateTick() for unit testing.
 
 import { applyDrafts, settleBattle, type Tier } from '@diktat/ap-engine';
+import { scrubMessage } from '@diktat/shared/alerts';
 import { battleId as toBattleId, userId as toUserId, type BattleMode } from '@diktat/shared';
 import type { invoke as fabricInvoke, ProviderEnv } from '@diktat/ai-fabric';
 import { z } from 'zod';
@@ -161,7 +162,7 @@ export function runOpenDebate(battleId: string, deps: OpenDebateRunnerDeps): Run
         stop();
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = scrubMessage(err instanceof Error ? err.message : String(err));
       deps.logger.error({ event: 'open_debate.tick_failed', battleId, message });
       void deps.alerter?.alert('error', 'open debate tick failed', `${battleId} · ${message}`, {
         dedupKey: `workers:battle:open_debate:${battleId}`,
@@ -494,7 +495,7 @@ async function callAi(
   } catch (err) {
     deps.logger.warn({
       event: 'open_debate.scorer_failed',
-      message: err instanceof Error ? err.message : String(err),
+      message: scrubMessage(err instanceof Error ? err.message : String(err)),
     });
     return null;
   }
@@ -669,7 +670,7 @@ async function fetchBattle(supabase: ServiceClient, battleId: string): Promise<B
     .select('id, mode, status, topic_id, started_at, ap_pot')
     .eq('id', battleId)
     .maybeSingle()) as { data: BattleRow | null; error: { message: string } | null };
-  if (error) throw new Error(`fetchBattle: ${error.message}`);
+  if (error) throw new Error(`fetchBattle: ${scrubMessage(error.message)}`);
   return data;
 }
 
@@ -680,7 +681,7 @@ async function fetchRounds(supabase: ServiceClient, battleId: string): Promise<R
     .select('id, round_no, payload, deadline_at, winner_user_id')
     .eq('battle_id', battleId)
     .order('round_no')) as { data: RoundRow[] | null; error: { message: string } | null };
-  if (error) throw new Error(`fetchRounds: ${error.message}`);
+  if (error) throw new Error(`fetchRounds: ${scrubMessage(error.message)}`);
   return data ?? [];
 }
 
@@ -690,7 +691,7 @@ async function fetchArguments(supabase: ServiceClient, roundId: string): Promise
     .from('debate_arguments')
     .select('round_id, user_id, text')
     .eq('round_id', roundId)) as { data: ArgumentRow[] | null; error: { message: string } | null };
-  if (error) throw new Error(`fetchArguments: ${error.message}`);
+  if (error) throw new Error(`fetchArguments: ${scrubMessage(error.message)}`);
   return data ?? [];
 }
 
@@ -712,7 +713,7 @@ async function fetchParticipants(
       | null;
     error: { message: string } | null;
   };
-  if (error) throw new Error(`fetchParticipants: ${error.message}`);
+  if (error) throw new Error(`fetchParticipants: ${scrubMessage(error.message)}`);
   return (data ?? []).map((row) => ({
     user_id: row.user_id,
     seat: row.seat,
@@ -732,7 +733,7 @@ async function fetchVotes(supabase: ServiceClient, battleId: string): Promise<Vo
     data: VoteRow[] | null;
     error: { message: string } | null;
   };
-  if (error) throw new Error(`fetchVotes: ${error.message}`);
+  if (error) throw new Error(`fetchVotes: ${scrubMessage(error.message)}`);
   return data ?? [];
 }
 
@@ -747,7 +748,7 @@ async function fetchTopic(
     .select('id, headline, summary')
     .eq('id', topicId)
     .maybeSingle()) as { data: TopicRow | null; error: { message: string } | null };
-  if (error) throw new Error(`fetchTopic: ${error.message}`);
+  if (error) throw new Error(`fetchTopic: ${scrubMessage(error.message)}`);
   return data;
 }
 
@@ -789,7 +790,7 @@ async function createArgumentRound(
     deadline_at: deadlineIso,
     payload: { state: 'awaiting_arguments' },
   })) as { error: { message: string } | null };
-  if (error) throw new Error(`createArgumentRound: ${error.message}`);
+  if (error) throw new Error(`createArgumentRound: ${scrubMessage(error.message)}`);
 }
 
 async function createVerdictRound(
@@ -804,7 +805,7 @@ async function createVerdictRound(
     deadline_at: deadlineIso,
     payload: { state: 'awaiting_final_vote' },
   })) as { error: { message: string } | null };
-  if (error) throw new Error(`createVerdictRound: ${error.message}`);
+  if (error) throw new Error(`createVerdictRound: ${scrubMessage(error.message)}`);
 }
 
 async function revealRound(
@@ -822,7 +823,7 @@ async function revealRound(
     .from('battle_rounds')
     .update({ payload: newPayload })
     .eq('id', round.id)) as { error: { message: string } | null };
-  if (error) throw new Error(`revealRound: ${error.message}`);
+  if (error) throw new Error(`revealRound: ${scrubMessage(error.message)}`);
 }
 
 async function updateRoundPayload(
@@ -836,7 +837,7 @@ async function updateRoundPayload(
     .from('battle_rounds')
     .update({ payload, winner_user_id: winnerUserId })
     .eq('id', roundId)) as { error: { message: string } | null };
-  if (error) throw new Error(`updateRoundPayload: ${error.message}`);
+  if (error) throw new Error(`updateRoundPayload: ${scrubMessage(error.message)}`);
 }
 
 async function markBattleSettled(
@@ -850,7 +851,7 @@ async function markBattleSettled(
     .from('battles')
     .update({ status: 'settled', winner_user_id: winnerUserId, ended_at: settledAtIso })
     .eq('id', battleId)) as { error: { message: string } | null };
-  if (error) throw new Error(`markBattleSettled: ${error.message}`);
+  if (error) throw new Error(`markBattleSettled: ${scrubMessage(error.message)}`);
 }
 
 // #127 H8 — void an open_debate that ended without a winner. Requires
@@ -868,7 +869,7 @@ async function markBattleVoid(
     .from('battles')
     .update({ status: 'void', winner_user_id: null, ended_at: endedAtIso })
     .eq('id', battleId)) as { error: { message: string } | null };
-  if (error) throw new Error(`markBattleVoid: ${error.message}`);
+  if (error) throw new Error(`markBattleVoid: ${scrubMessage(error.message)}`);
 }
 
 // ---------------------------------------------------------------------------
