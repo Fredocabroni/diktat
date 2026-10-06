@@ -4,6 +4,7 @@ import { fastifyTRPCPlugin, type FastifyTRPCPluginOptions } from '@trpc/server/a
 import Fastify from 'fastify';
 
 import { buildContext, getOrBuildRedis, normalizeIpToCidr, type RedisClient } from './context.js';
+import { decideCorsOrigin } from './cors-origin.js';
 import { loadEnv } from './env.js';
 import { buildOuterHookBlockedBody, OUTER_HOOK_WINDOW_SEC } from './outer-hook.js';
 import { checkGlobalOuterHook, extractRetryAfterSec } from './rate-limit.js';
@@ -154,9 +155,14 @@ app.log.info(
 );
 
 await app.register(cors, {
+  // Three-way decision — absent header pass (server-to-server), literal
+  // `Origin: null` deny (browser opaque-origin contexts), allow-list
+  // check for everything else. See `./cors-origin.ts` for the full
+  // reasoning; the callback stays this thin so the branches are only
+  // described once. PR #82 round-1 security-reviewer MED #168.
   origin: (origin, cb) => {
-    if (!origin) return cb(null, true);
-    cb(null, env.WEB_ORIGINS.includes(origin));
+    const decision = decideCorsOrigin(origin, env.WEB_ORIGINS);
+    cb(null, decision.allowed);
   },
   // Bearer-auth only; no cookies on this API surface. Leaving credentials off
   // narrows the blast radius if a future origin is allow-listed by mistake.
