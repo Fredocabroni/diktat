@@ -18,7 +18,13 @@
 // No I/O; env lookup only.
 
 const SHORT_LEN = 7;
-const SHA_RE = /^[0-9a-f]{4,64}$/i;
+// Match the lower bound to SHORT_LEN. The earlier `{4,64}` would have
+// let a non-SHA hex value as short as 4 characters (e.g. a stray color
+// code or hex port number from a misset env var) pass validation and
+// land in the structured log / Telegram alert body under `commit=`.
+// A legitimate git short SHA is 7+ chars; anything shorter is either
+// ambiguous or wrong. PR #162 round-3 security-reviewer LOW.
+const SHA_RE = /^[0-9a-f]{7,64}$/i;
 
 export function resolveDeploySha(): string {
   const raw = process.env.RAILWAY_GIT_COMMIT_SHA;
