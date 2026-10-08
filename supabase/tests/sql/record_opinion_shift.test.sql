@@ -15,14 +15,31 @@
 begin;
 
 -- -----------------------------------------------------------------------------
--- Fixture: two human users + one bot user + one topic.
+-- Fixture: two human users + one topic. `slug` is NOT NULL on news_topics;
+-- `headline` is NOT NULL. Everything else carries a default.
 -- -----------------------------------------------------------------------------
 insert into auth.users (instance_id, id, aud, role, email, created_at, updated_at) values
   ('00000000-0000-0000-0000-000000000000', 'f1111111-1111-1111-1111-111111111111', 'authenticated', 'authenticated', 'f1@test.local', now(), now()),
   ('00000000-0000-0000-0000-000000000000', 'f2222222-2222-2222-2222-222222222222', 'authenticated', 'authenticated', 'f2@test.local', now(), now());
 
-insert into public.news_topics (id, headline, source_title, is_drop, drop_at) values
-  ('11111111-aaaa-aaaa-aaaa-111111111111', 'Test headline — #145 RPC', 'test', true, now());
+insert into public.news_topics (id, slug, headline, source_title, is_drop, drop_at) values
+  ('11111111-aaaa-aaaa-aaaa-111111111111', 'rpc145-test-topic', 'Test headline — #145 RPC', 'test', true, now());
+
+-- T8 pre-seeds 50 historical opinion_shifts for user f2 to exercise the
+-- rolling-24h cap. Done up here at fixture-setup time (same privilege
+-- context as the auth.users / news_topics inserts) so the trigger disable
+-- does not require elevated privilege inside a JWT-scoped block. The 50
+-- rows live for the full transaction; T8's savepoint rollback below is
+-- unnecessary now but kept for clarity. #179 security-reviewer F5.
+alter table public.opinion_shifts disable trigger opinion_shifts_take5_after_insert;
+insert into public.opinion_shifts (user_id, topic_id, before_position, after_position, client_key, created_at)
+select 'f2222222-2222-2222-2222-222222222222',
+       '11111111-aaaa-aaaa-aaaa-111111111111',
+       0::smallint, 1::smallint,
+       gen_random_uuid(),
+       now() - (gs || ' minutes')::interval
+  from generate_series(1, 50) gs;
+alter table public.opinion_shifts enable trigger opinion_shifts_take5_after_insert;
 
 -- -----------------------------------------------------------------------------
 -- T1 — happy path. First shift on this topic. before_position defaults to 0.
@@ -213,28 +230,11 @@ end $$;
 rollback to savepoint before_unauth;
 
 -- -----------------------------------------------------------------------------
--- T8 — rolling-24h cap. Fabricate 50 historical rows for a fresh user, then
--- attempt one more call. Expect 54000 (program_limit_exceeded).
---
--- Fabricate via a direct INSERT so we don't blow the Take 5 budget on fixture
--- noise (the trigger would otherwise fire 50 times here). Scope to a
--- savepoint so the fabricated rows don't leak into later tests inside this
--- transaction.
+-- T8 — rolling-24h cap. User f2 has 50 historical opinion_shifts pre-seeded
+-- in the fixture section (above the JWT blocks). The 51st call must raise
+-- 54000 (program_limit_exceeded).
 -- -----------------------------------------------------------------------------
-savepoint before_cap;
 set local request.jwt.claims = '{"sub":"f2222222-2222-2222-2222-222222222222","role":"authenticated"}';
-
--- Disable the Take 5 trigger temporarily — this is a cap test, not a
--- streak-progress test, and 50 fake fixture rows would warp the counter.
-alter table public.opinion_shifts disable trigger opinion_shifts_take5_after_insert;
-insert into public.opinion_shifts (user_id, topic_id, before_position, after_position, client_key, created_at)
-select 'f2222222-2222-2222-2222-222222222222',
-       '11111111-aaaa-aaaa-aaaa-111111111111',
-       0::smallint, 1::smallint,
-       gen_random_uuid(),
-       now() - (gs || ' minutes')::interval
-  from generate_series(1, 50) gs;
-alter table public.opinion_shifts enable trigger opinion_shifts_take5_after_insert;
 
 do $$
 begin
@@ -247,6 +247,5 @@ begin
 exception when sqlstate '54000' then
   raise notice 'T8 PASS: 50 shifts/24h cap → 54000';
 end $$;
-rollback to savepoint before_cap;
 
 rollback;

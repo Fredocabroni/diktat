@@ -55,7 +55,6 @@ declare
   v_user_id          uuid := auth.uid();
   v_before_position  smallint;
   v_shifts_24h       integer;
-  v_topic_exists     boolean;
   v_row              public.opinion_shifts;
 begin
   -- (1) Caller must be a real authenticated user. SECURITY DEFINER elevates
@@ -73,21 +72,35 @@ begin
       using errcode = '22023';
   end if;
 
-  -- (3) Explicit topic-existence check. The FK on opinion_shifts.topic_id
-  -- would raise 23503 at INSERT time, but surfacing it here lets the resolver
-  -- distinguish NOT_FOUND from a legitimate FK-shaped integrity issue.
-  select exists(select 1 from public.news_topics where id = p_topic_id)
-    into v_topic_exists;
-  if not v_topic_exists then
+  -- (3) Topic existence — PERFORM ... FOR SHARE pins the topic row through
+  -- the INSERT below, so a concurrent delete between the check and the
+  -- insert cannot leak a raw 23503 (FK violation) with the constraint name.
+  -- The FOR SHARE lock is released at commit; it does not block other
+  -- readers, only concurrent exclusive locks (e.g. DELETE / UPDATE on this
+  -- row). Matches place_prediction's posture. #179 security-reviewer F3.
+  perform 1 from public.news_topics where id = p_topic_id for share;
+  if not found then
     raise exception 'topic not found'
       using errcode = 'P0002';
   end if;
 
-  -- (4) Rolling-24h cap. 50 shifts/user/24h is far above any honest
+  -- (4) Serialize concurrent writers for THIS user. Without the advisory
+  -- lock, N parallel sessions can all read a count < 50 before any lands
+  -- the first INSERT, collectively passing the gate at 50+N. The lock
+  -- key is derived from the user_id uuid so it is unique per user; it is
+  -- transaction-scoped and auto-released on commit/rollback; it serializes
+  -- writes on the same user without touching unrelated users. #179
+  -- security-reviewer F1.
+  perform pg_advisory_xact_lock(
+    ('x' || substr(md5(v_user_id::text), 1, 16))::bit(64)::bigint
+  );
+
+  -- (5) Rolling-24h cap. 50 shifts/user/24h is far above any honest
   -- change-of-mind workload (one Drop/day + a tail of past Drops ≈ 5-10
   -- shifts) and well below the velocity needed to farm Take 5 streak credit.
   -- Uses the composite index on (user_id, topic_id, created_at DESC); the
-  -- same index serves the before_position snapshot below.
+  -- same index serves the before_position snapshot below. The advisory lock
+  -- above makes this COUNT→INSERT pair atomic per user.
   select count(*)
     into v_shifts_24h
     from public.opinion_shifts
