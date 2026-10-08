@@ -162,6 +162,24 @@ jobs:
               ok)
                 gh pr comment "$PR_NUMBER" --body-file review_output.md
                 ;;
+              ok_block)
+                # BLOCK verdict: post the review AND fail the check.
+                # The post happens FIRST so the body is on the PR even
+                # if the subsequent `exit 1` were replaced by a crash;
+                # the ::error:: annotation shows up in the GHA UI next
+                # to the red X so a reviewer scrolling the checks list
+                # sees why the gate failed without opening the comment.
+                # Mirrors the ok_block arm in claude-review.yml:351.
+                # Without this arm, a legitimate schema BLOCK fell
+                # through to the `*)` catch-all and errored before the
+                # raw agent output was dumped, so the BLOCK verdict was
+                # lost entirely (observed on PR #179's round-2 run
+                # 37717588074 — the schema-reviewer BLOCKed F-TYPES +
+                # F-RATELIMIT-IDEM, but neither finding reached the PR).
+                gh pr comment "$PR_NUMBER" --body-file review_output.md
+                echo "::error::Reviewer verdict: BLOCK — see the posted PR comment for details."
+                exit 1
+                ;;
               empty)
                 echo "schema-reviewer produced no substantive output (no files in scope)"
                 ;;
