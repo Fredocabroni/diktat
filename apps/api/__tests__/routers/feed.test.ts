@@ -75,7 +75,13 @@ describe('feedRouter.recordShift', () => {
     });
   });
 
-  it('passes p_client_key = null when the input omits clientKey (legacy PWA path)', async () => {
+  it('omits p_client_key when the input omits clientKey (legacy PWA path — SQL default NULL applies)', async () => {
+    // After the types-regen the generated .rpc() overload declares
+    // `p_client_key?: string` (optional UUID, not nullable), so the
+    // resolver passes `undefined` to opt out. The Supabase RPC call
+    // then sends the args without that key, and the SQL function's
+    // `p_client_key uuid default null` default kicks in — identical
+    // DB-side outcome to the pre-regen `null`-literal behavior.
     const { db, calls } = rpcFake([{ data: INSERTED_ROW, error: null }]);
     const caller = appRouter.createCaller(makeCtx({ db }));
 
@@ -86,7 +92,10 @@ describe('feedRouter.recordShift', () => {
     });
 
     expect(calls).toHaveLength(1);
-    expect(calls[0]!.args.p_client_key).toBeNull();
+    // Either `undefined` (post-regen) or `null` (pre-regen) is correct:
+    // both route to SQL NULL at the DB. Pin the invariant without
+    // over-constraining the TS shape.
+    expect(calls[0]!.args.p_client_key).toBeFalsy();
   });
 
   it('idempotent retry: same clientKey returns the SAME row — the RPC resolved the conflict server-side', async () => {

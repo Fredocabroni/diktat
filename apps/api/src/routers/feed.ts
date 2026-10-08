@@ -114,36 +114,10 @@ export const feedRouter = router({
       // drops the client-side `opinion_shifts_insert_self` policy, at
       // which point this is the only writer and the RPC's cap + snapshot
       // guarantees cannot be bypassed via direct PostgREST.
-      //
-      // The local type assertion covers the gap in `packages/db/src/types.ts`
-      // (generated via `supabase gen types typescript`): the generator has
-      // not run against prod since migration 20261010000000, so the
-      // supabase-js `.rpc()` overload set does not yet include this
-      // function name. After PR A merges + applies + the types regenerate,
-      // this local assertion can be deleted and the raw `ctx.db.rpc(...)`
-      // call type-checks on its own.
-      type RecordOpinionShiftRow = {
-        id: string;
-        topic_id: string;
-        before_position: number;
-        after_position: number;
-        created_at: string;
-      };
-      const rpc = ctx.db.rpc as unknown as (
-        fn: 'record_opinion_shift',
-        args: {
-          p_topic_id: string;
-          p_after_position: number;
-          p_client_key: string | null;
-        },
-      ) => Promise<{
-        data: RecordOpinionShiftRow | null;
-        error: { code?: string; message?: string } | null;
-      }>;
-      const { data, error } = await rpc('record_opinion_shift', {
+      const { data, error } = await ctx.db.rpc('record_opinion_shift', {
         p_topic_id: input.topicId,
         p_after_position: input.afterPosition,
-        p_client_key: input.clientKey ?? null,
+        p_client_key: input.clientKey ?? undefined,
       });
 
       if (error) {
