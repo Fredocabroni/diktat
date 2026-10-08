@@ -51,6 +51,15 @@ export function isLocalhostOrigin(origin: string): boolean {
   if (host === 'localhost') return true;
   if (host === '127.0.0.1') return true;
   if (host === '0.0.0.0') return true;
+  // IPv6 loopback — accept both the bracketed and bare forms.
+  // Current WHATWG-compliant runtimes (Node ≥ ~14, modern browsers)
+  // return `[::1]` from `URL.hostname` for `http://[::1]/`. The bare
+  // `::1` branch guards against older or non-standard runtimes that
+  // strip the brackets (and against callers that pass the hostname
+  // directly rather than via a URL). PRs #172 and #162 security
+  // reviewers both flagged one of these as unreachable; verified in
+  // the test suite that `[::1]` is the firing branch under current
+  // Node, so retaining both branches is defensive, not dead code.
   if (host === '::1') return true;
   if (host === '[::1]') return true;
   return false;

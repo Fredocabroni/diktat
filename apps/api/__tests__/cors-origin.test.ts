@@ -56,4 +56,16 @@ describe('decideCorsOrigin', () => {
     expect(decideCorsOrigin('NULL', ALLOW_LIST)).toEqual({ allowed: false });
     expect(decideCorsOrigin('Null', ALLOW_LIST)).toEqual({ allowed: false });
   });
+
+  it('absent origin with an empty allow-list → allow — WEB_ORIGINS can decouple from the CORS handler', () => {
+    // Guards the invariant surfaced by PR #162 round-3 security
+    // reviewer: if the boot gate and this helper are ever decoupled
+    // (e.g. a future deploy that empties WEB_ORIGINS without the gate
+    // firing), server-to-server callers (Railway healthcheck, operator
+    // curl, future webhooks) must still pass. The early-return on
+    // `undefined` makes this obviously correct by code inspection; the
+    // test pins it so a future refactor that collapses the branches
+    // can't silently flip the behavior.
+    expect(decideCorsOrigin(undefined, [])).toEqual({ allowed: true });
+  });
 });

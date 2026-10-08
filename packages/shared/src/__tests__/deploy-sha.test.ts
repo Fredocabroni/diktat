@@ -47,9 +47,20 @@ describe('resolveDeploySha', () => {
     expect(resolveDeploySha()).toBe('deadbee');
   });
 
-  it('maps a sub-4-char value to "invalid" (fails the hex-shape minimum)', () => {
-    process.env.RAILWAY_GIT_COMMIT_SHA = 'ab';
-    expect(resolveDeploySha()).toBe('invalid');
+  it('maps a sub-7-char hex value to "invalid" — git short SHAs are 7+ chars', () => {
+    // PR #162 round-3 security-reviewer LOW: the earlier `{4,64}`
+    // regex accepted non-SHA hex as short as 4 characters (e.g. a
+    // stray color code or hex port number); raised to `{7,64}` so
+    // only lengths that could plausibly be real short SHAs pass.
+    for (const sha of ['a', 'ab', 'abc', 'abcd', 'abcde', 'abcdef']) {
+      process.env.RAILWAY_GIT_COMMIT_SHA = sha;
+      expect(resolveDeploySha()).toBe('invalid');
+    }
+  });
+
+  it('accepts a 7-char hex value (the floor) and emits it verbatim', () => {
+    process.env.RAILWAY_GIT_COMMIT_SHA = 'abcdef0';
+    expect(resolveDeploySha()).toBe('abcdef0');
   });
 
   it('maps a non-hex value to "invalid" instead of propagating env text', () => {
