@@ -79,13 +79,22 @@ otp_expiry = 600
 # Local dev uses inbucket (see [inbucket] above), so this block is inert
 # for `supabase start` but authoritative for `supabase db push` + the
 # `supabase config push` flow once the project is linked.
+# Live sender confirmed as `noreply@diktat.org` via an operator-run live
+# signup test on 2026-10-07 — the hosted project's email template body
+# includes the 6-digit `{{ .Token }}` so the OTP renders in the user's
+# inbox alongside the magic link. This local config was previously
+# pointing admin_email at `auth@diktat.app` (the pre-flip domain); the
+# alignment below prevents a future `supabase config push` from
+# accidentally re-pointing the hosted sender away from the live, Resend-
+# verified `diktat.org` domain. Operator did NOT run `supabase config
+# push` for this edit; it only matters the next time one is run.
 [auth.email.smtp]
 enabled = true
 host = "smtp.resend.com"
 port = 465
 user = "resend"
 pass = "env(RESEND_API_KEY)"
-admin_email = "auth@diktat.app"
+admin_email = "noreply@diktat.org"
 sender_name = "Diktat"
 
 [auth.sms]
