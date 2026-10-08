@@ -81,6 +81,13 @@ export const feedRouter = router({
   recordShift: protectedProcedure
     // M5 — 10/min per user. One stance per Drop in practice; 10/min
     // is the anti-bot floor.
+    //
+    // The outer mutationLimit stays — it is the per-process ceiling that
+    // throttles a flooding client at the tRPC boundary. The RPC's own
+    // rolling-24h cap (migration 20261010000000, PR A of #145) is a
+    // defence-in-depth atomic ceiling INSIDE the DB transaction, serialized
+    // per-user via pg_advisory_xact_lock so parallel bursts cannot slip
+    // through between the COUNT and the INSERT.
     .use(mutationLimit('feed.recordShift', { perMin: 10 }))
     .input(
       z.object({
@@ -94,117 +101,85 @@ export const feedRouter = router({
       }),
     )
     .mutation(async ({ ctx, input }) => {
-      // #136 (H13): `before_position` is derived server-side from the
-      // caller's most-recent shift on the same topic. The client no
-      // longer sends it. Rationale: a client-supplied value is spoofable
-      // and would let a buggy or malicious client fabricate a "strong
-      // flip" delta on a first vote. Fingerprint + tribe leaderboards
-      // read `(after_position - before_position)` — unforgeable only when
-      // `before_position` reflects real prior state. First-time voters
-      // on a topic get `0` as the honest "no prior stance" default.
+      // #145 PR B: the write runs through `record_opinion_shift(uuid,
+      // smallint, uuid)` — a SECURITY DEFINER RPC that derives user_id
+      // from auth.uid(), snapshots before_position server-side (replacing
+      // the H13 pre-select below), enforces a rolling-24h cap, and
+      // ON CONFLICT no-ops the Take 5 after-insert trigger on retry. The
+      // RPC returns the opinion_shifts row either freshly inserted or
+      // pre-existing from an idempotent retry — identical wire shape to
+      // the previous .insert() path.
       //
-      // The composite index `opinion_shifts_user_topic_created_idx`
-      // (user_id, topic_id, created_at DESC) added by migration
-      // 20260420090011 makes this an index-only lookup. No schema change
-      // needed.
-      const { data: prior } = await ctx.db
-        .from('opinion_shifts')
-        .select('after_position')
-        .eq('user_id', ctx.userId)
-        .eq('topic_id', input.topicId)
-        .order('created_at', { ascending: false })
-        .limit(1)
-        .maybeSingle();
-      const derivedBeforePosition =
-        prior && typeof prior.after_position === 'number' ? prior.after_position : 0;
-
-      // Build the insert payload. When no clientKey is provided (stale
-      // client) omit the column so it lands as NULL — the partial unique
-      // index skips NULL rows, so the legacy write path stays exactly
-      // as it was pre-B2 for those callers.
-      const insertPayload: {
-        user_id: string;
-        topic_id: string;
-        before_position: number;
-        after_position: number;
-        client_key?: string;
-      } = {
-        user_id: ctx.userId,
-        topic_id: input.topicId,
-        before_position: derivedBeforePosition,
-        after_position: input.afterPosition,
-      };
-      if (input.clientKey !== undefined) {
-        insertPayload.client_key = input.clientKey;
-      }
-
-      const { data, error } = await ctx.db
-        .from('opinion_shifts')
-        .insert(insertPayload)
-        .select('id, topic_id, before_position, after_position, created_at')
-        .maybeSingle();
+      // PR A of #145 (migration 20261010000000) landed the RPC; PR C
+      // drops the client-side `opinion_shifts_insert_self` policy, at
+      // which point this is the only writer and the RPC's cap + snapshot
+      // guarantees cannot be bypassed via direct PostgREST.
+      const { data, error } = await ctx.db.rpc('record_opinion_shift', {
+        p_topic_id: input.topicId,
+        p_after_position: input.afterPosition,
+        p_client_key: input.clientKey ?? undefined,
+      });
 
       if (error) {
-        // 23503 fk_violation — the topic id doesn't exist. Surface as
-        // NOT_FOUND so the client can clear the card from the local
-        // queue without retrying.
-        if (error.code === '23503') {
+        // Map RPC SQLSTATE → tRPC code. Each raise in the RPC uses a
+        // specific code so the client (and the mutationLimit middleware)
+        // can distinguish retryable from terminal. The `cause` carries
+        // only the SQLSTATE so the raw PostgrestError's
+        // message/details/hint (which can carry schema/constraint names
+        // or raised-exception text) never reaches the tRPC wire
+        // response — same wire-safety wrap as the pre-RPC path.
+        const code = error.code;
+        if (code === 'P0002') {
+          // topic not found — client should clear the card from its
+          // local queue without retrying.
+          throw new TRPCError({ code: 'NOT_FOUND', message: 'Topic not found.' });
+        }
+        if (code === '54000') {
+          // rolling-24h cap hit. TOO_MANY_REQUESTS classifies the
+          // response for consistent client-side retry logic.
           throw new TRPCError({
-            code: 'NOT_FOUND',
-            message: 'Topic not found.',
+            code: 'TOO_MANY_REQUESTS',
+            message: 'Too many opinion shifts in the last 24 hours.',
+            cause: new Error(code),
           });
         }
-        // 23505 unique_violation on (user_id, client_key): the client
-        // already wrote this exact tap. Retry-after-lost-response case.
-        // Reachable only when input.clientKey was provided (otherwise
-        // client_key is NULL and the partial index doesn't apply).
-        // Look up the existing row through the SAME user-scoped ctx.db
-        // (RLS gates the SELECT to auth.uid()'s own rows), AND filter
-        // explicitly on user_id + client_key so a hypothetical
-        // cross-user uuid collision cannot leak another user's row via
-        // the client-supplied key. `opinion_shifts_select_self` RLS is
-        // the belt; the .eq('user_id', ...) is the suspenders.
-        if (error.code === '23505' && input.clientKey !== undefined) {
-          const { data: existing, error: lookupError } = await ctx.db
-            .from('opinion_shifts')
-            .select('id, topic_id, before_position, after_position, created_at')
-            .eq('user_id', ctx.userId)
-            .eq('client_key', input.clientKey)
-            .maybeSingle();
-
-          if (lookupError || !existing) {
-            // Should be unreachable — 23505 means a matching row exists.
-            // If we can't fetch it, prefer INTERNAL_SERVER_ERROR to a
-            // silent success (never fabricate an insert result).
-            //
-            // Cause is wrapped as `new Error(code)` so the raw
-            // PostgrestError's message/details/hint (which can carry
-            // schema/constraint names) never reaches the tRPC wire
-            // response. Round-2 security-reviewer Medium.
-            throw new TRPCError({
-              code: 'INTERNAL_SERVER_ERROR',
-              message: 'Failed to reconcile duplicate opinion shift.',
-              cause: new Error(lookupError?.code ?? error?.code ?? 'db_error'),
-            });
-          }
-          return {
-            id: existing.id,
-            topicId: existing.topic_id,
-            beforePosition: existing.before_position,
-            afterPosition: existing.after_position,
-            createdAt: existing.created_at,
-          };
+        if (code === '22023') {
+          // after_position out of range — client bug. BAD_REQUEST so
+          // the fetch is not retried.
+          throw new TRPCError({
+            code: 'BAD_REQUEST',
+            message: 'Invalid stance.',
+            cause: new Error(code),
+          });
         }
-        // Same wire-safety wrap as the 23505 fallback above.
+        if (code === '28000') {
+          // auth.uid() came back null inside the RPC. Should be
+          // unreachable from protectedProcedure (which 401s before any
+          // handler body), but defence-in-depth classification.
+          throw new TRPCError({
+            code: 'UNAUTHORIZED',
+            message: 'Not authenticated.',
+            cause: new Error(code),
+          });
+        }
         throw new TRPCError({
           code: 'INTERNAL_SERVER_ERROR',
           message: 'Failed to record opinion shift.',
-          cause: new Error(error?.code ?? 'db_error'),
+          cause: new Error(code ?? 'db_error'),
         });
       }
+
       if (!data) {
-        throw new TRPCError({ code: 'NOT_FOUND', message: 'Topic not found.' });
+        // The RPC's return type is a composite row; a null result here
+        // would mean supabase-js dropped the payload. Prefer
+        // INTERNAL_SERVER_ERROR over silently fabricating a success.
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message: 'Failed to record opinion shift.',
+          cause: new Error('rpc_null_result'),
+        });
       }
+
       return {
         id: data.id,
         topicId: data.topic_id,
