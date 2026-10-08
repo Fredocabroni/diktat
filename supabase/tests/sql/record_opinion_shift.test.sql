@@ -269,7 +269,7 @@ select 'f1111111-1111-1111-1111-111111111111',
        0::smallint, 1::smallint,
        gen_random_uuid(),
        now() - (gs || ' minutes')::interval
-  from generate_series(100, 143) gs;  -- 44 more rows, non-overlapping times
+  from generate_series(100, 144) gs;  -- 45 more rows, non-overlapping times
 alter table public.opinion_shifts enable trigger opinion_shifts_take5_after_insert;
 
 set local request.jwt.claims = '{"sub":"f1111111-1111-1111-1111-111111111111","role":"authenticated"}';
