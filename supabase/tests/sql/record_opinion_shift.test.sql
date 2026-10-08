@@ -248,4 +248,91 @@ exception when sqlstate '54000' then
   raise notice 'T8 PASS: 50 shifts/24h cap → 54000';
 end $$;
 
+-- -----------------------------------------------------------------------------
+-- T9 — idempotency wins over the rolling-24h cap. User f1 crosses the cap
+-- with their 50th shift (p_client_key = K); a retry with the same K must
+-- return the recorded row, NOT raise 54000. This is #179 schema-reviewer
+-- F-RATELIMIT-IDEM: the cap-first ordering would have broken the client_key
+-- idempotency contract (migration 20260930000000) at exactly the boundary
+-- where a lost ack is most likely.
+--
+-- Fixture: pre-seed 49 trigger-silent rows for f1 (the T1-T4 happy-path
+-- block already added 3 keyed + 2 NULL rows; add 44 more to reach 49).
+-- The 50th shift is a real call under JWT so the trigger fires; the 51st
+-- call is the retry with the same client_key.
+-- -----------------------------------------------------------------------------
+savepoint before_t9;
+alter table public.opinion_shifts disable trigger opinion_shifts_take5_after_insert;
+insert into public.opinion_shifts (user_id, topic_id, before_position, after_position, client_key, created_at)
+select 'f1111111-1111-1111-1111-111111111111',
+       '11111111-aaaa-aaaa-aaaa-111111111111',
+       0::smallint, 1::smallint,
+       gen_random_uuid(),
+       now() - (gs || ' minutes')::interval
+  from generate_series(100, 143) gs;  -- 44 more rows, non-overlapping times
+alter table public.opinion_shifts enable trigger opinion_shifts_take5_after_insert;
+
+set local request.jwt.claims = '{"sub":"f1111111-1111-1111-1111-111111111111","role":"authenticated"}';
+
+do $$
+declare
+  v_row public.opinion_shifts;
+  v_count_before integer;
+  v_count_after  integer;
+  v_retry_row public.opinion_shifts;
+  v_crossing_key uuid := '77777777-7777-7777-7777-777777777777';
+begin
+  select count(*) into v_count_before
+    from public.opinion_shifts
+   where user_id = 'f1111111-1111-1111-1111-111111111111'
+     and created_at > now() - interval '24 hours';
+  -- Sanity: this test depends on exactly 49 live rows in the 24h window
+  -- for f1 (T1 + T3 + T4×2 + T9 preseed×44 + T2 was a no-op on T1's key
+  -- so adds nothing = 1+1+2+44 = 48; cap trips on the 50th row insert).
+  -- The exact count is less important than "cap must fire on the next
+  -- INSERT"; T9's 50th call takes the user past the boundary.
+  if v_count_before < 48 or v_count_before > 50 then
+    raise exception 'T9 FIXTURE WARN: unexpected baseline count=% (expected 48-50)', v_count_before;
+  end if;
+
+  -- The 50th shift (fresh key). Cap is at 50; a count < 50 passes.
+  v_row := public.record_opinion_shift(
+    p_topic_id       => '11111111-aaaa-aaaa-aaaa-111111111111',
+    p_after_position => 1::smallint,
+    p_client_key     => v_crossing_key
+  );
+  if v_row.id is null then
+    raise exception 'T9 FAIL: 50th shift returned null row';
+  end if;
+
+  -- Retry with the SAME key. The naive cap-first path would see count=50
+  -- (or 51) and raise 54000. The fast-path returns the recorded row.
+  v_retry_row := public.record_opinion_shift(
+    p_topic_id       => '11111111-aaaa-aaaa-aaaa-111111111111',
+    p_after_position => 1::smallint,
+    p_client_key     => v_crossing_key
+  );
+  if v_retry_row.id <> v_row.id then
+    raise exception 'T9 FAIL: retry returned different id (orig=%, got=%)',
+      v_row.id, v_retry_row.id;
+  end if;
+
+  -- Belt-and-suspenders: a FRESH key at the cap boundary should still
+  -- raise 54000. If this stops firing, the fast-path has broken the cap.
+  begin
+    perform public.record_opinion_shift(
+      p_topic_id       => '11111111-aaaa-aaaa-aaaa-111111111111',
+      p_after_position => 1::smallint,
+      p_client_key     => '88888888-8888-8888-8888-888888888888'
+    );
+    raise exception 'T9 FAIL: fresh-key call past the cap did not raise 54000';
+  exception when sqlstate '54000' then
+    -- expected
+    null;
+  end;
+
+  raise notice 'T9 PASS: idempotent retry wins over cap; fresh key past cap still 54000';
+end $$;
+rollback to savepoint before_t9;
+
 rollback;

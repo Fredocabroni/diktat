@@ -72,7 +72,32 @@ begin
       using errcode = '22023';
   end if;
 
-  -- (3) Topic existence — PERFORM ... FOR SHARE pins the topic row through
+  -- (3) Idempotency fast-path. If the caller sent a client_key AND a prior
+  -- (user_id, client_key) row exists, return it immediately — before the
+  -- rolling-24h cap check below. The partial unique index
+  -- `opinion_shifts_user_client_key_uniq` serves this lookup.
+  --
+  -- Why this comes BEFORE the cap: the client_key is an idempotency token.
+  -- An honest retry (the client's request was recorded but the ack was lost
+  -- on the network) must return the recorded row no matter how many shifts
+  -- the user has in the window. Without this fast-path, a user who just
+  -- crossed 50 shifts with their 50th tap would get 54000 on the retry of
+  -- that same 50th tap — the row IS recorded, but the response says "rate
+  -- limit exceeded." The idempotency contract (migration 20260930000000)
+  -- wins over the cap when the key proves the request is a retry.
+  -- #179 schema-reviewer F-RATELIMIT-IDEM.
+  if p_client_key is not null then
+    select *
+      into v_row
+      from public.opinion_shifts
+     where user_id = v_user_id
+       and client_key = p_client_key;
+    if found then
+      return v_row;
+    end if;
+  end if;
+
+  -- (4) Topic existence — PERFORM ... FOR SHARE pins the topic row through
   -- the INSERT below, so a concurrent delete between the check and the
   -- insert cannot leak a raw 23503 (FK violation) with the constraint name.
   -- The FOR SHARE lock is released at commit; it does not block other
@@ -84,7 +109,7 @@ begin
       using errcode = 'P0002';
   end if;
 
-  -- (4) Serialize concurrent writers for THIS user. Without the advisory
+  -- (5) Serialize concurrent writers for THIS user. Without the advisory
   -- lock, N parallel sessions can all read a count < 50 before any lands
   -- the first INSERT, collectively passing the gate at 50+N. The lock
   -- key is derived from the user_id uuid so it is unique per user; it is
@@ -95,7 +120,7 @@ begin
     ('x' || substr(md5(v_user_id::text), 1, 16))::bit(64)::bigint
   );
 
-  -- (5) Rolling-24h cap. 50 shifts/user/24h is far above any honest
+  -- (6) Rolling-24h cap. 50 shifts/user/24h is far above any honest
   -- change-of-mind workload (one Drop/day + a tail of past Drops ≈ 5-10
   -- shifts) and well below the velocity needed to farm Take 5 streak credit.
   -- Uses the composite index on (user_id, topic_id, created_at DESC); the
@@ -111,7 +136,7 @@ begin
       using errcode = '54000';  -- program_limit_exceeded
   end if;
 
-  -- (5) Server-authoritative before_position. The resolver no longer accepts
+  -- (7) Server-authoritative before_position. The resolver no longer accepts
   -- a client-sent value (post-#158); this RPC completes that defense in depth
   -- by making the snapshot unforgeable even on the direct-PostgREST path once
   -- PR C drops the client INSERT policy.
@@ -124,11 +149,15 @@ begin
    limit 1;
   v_before_position := coalesce(v_before_position, 0::smallint);
 
-  -- (6) Idempotent insert. ON CONFLICT ... DO NOTHING fires only when the
+  -- (8) Idempotent insert. ON CONFLICT ... DO NOTHING fires only when the
   -- partial unique index `opinion_shifts_user_client_key_uniq` matches
   -- (requires p_client_key IS NOT NULL + a prior row with that pair). On a
   -- NULL p_client_key the index predicate `client_key is not null` is false
   -- for the candidate row, so no conflict can fire and INSERT always proceeds.
+  -- The ON CONFLICT path is now defence-in-depth against a race between the
+  -- step-(3) idempotency fast-path and a concurrent writer with the same
+  -- client_key — the step-(5) advisory lock serializes same-user writers,
+  -- so the race is only reachable across advisory-lock holders (none today).
   insert into public.opinion_shifts
     (user_id, topic_id, before_position, after_position, client_key)
   values
@@ -136,7 +165,7 @@ begin
   on conflict (user_id, client_key) where client_key is not null do nothing
   returning * into v_row;
 
-  -- (7) If RETURNING produced nothing, the ON CONFLICT path NO-OPed (the AFTER
+  -- (9) If RETURNING produced nothing, the ON CONFLICT path NO-OPed (the AFTER
   -- INSERT trigger did NOT fire, no double-credit) — fetch the pre-existing
   -- row. The SELECT is scoped to (user_id, client_key); the user_id filter
   -- prevents a hypothetical cross-user uuid collision from leaking another
