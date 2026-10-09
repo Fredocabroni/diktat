@@ -349,17 +349,28 @@ export const dropPublishHandler: JobHandler = async (row, deps) => {
     );
   }
 
-  // (9) Auto-fact-check enqueue. Only when the rewrite produced a
-  //     non-empty claim — empty means "no fact-checkable proposition"
-  //     per drop-headline.ts rule 10. Mirrors trpc.factCheck.enqueue
-  //     (PR 4.7 contract): upsert claim by dedup_hash + enqueue job.
+  // (9) Auto-fact-check enqueue. Two gates:
+  //     - Non-empty claim (empty = "no fact-checkable proposition" per
+  //       drop-headline.ts rule 10).
+  //     - FACT_CHECK_ENABLED env flag = 'true' (pre-launch kill-switch —
+  //       fact-check is a hidden feature; its orchestrator does NOT
+  //       try/catch the invoke, so a stray enqueue dead-letters jobs
+  //       and burns spend. Default off until the UI ships.).
+  //     Mirrors trpc.factCheck.enqueue (PR 4.7 contract) when gated on.
   let factCheckEnqueued = false;
-  if (rewrite.claim.length > 0) {
+  const factCheckEnabled = process.env.FACT_CHECK_ENABLED === 'true';
+  if (rewrite.claim.length > 0 && factCheckEnabled) {
     factCheckEnqueued = await enqueueDropFactCheck(deps, {
       claimText: rewrite.claim,
       claimContext: `${sel.chosen.source_title}\n${sel.chosen.source_url}`,
       refId: topicData.id,
       now,
+    });
+  } else if (rewrite.claim.length > 0 && !factCheckEnabled) {
+    deps.logger.info({
+      event: 'drop_publish.fact_check_gated_off',
+      news_topic_id: topicData.id,
+      reason: 'FACT_CHECK_ENABLED !== true',
     });
   }
 

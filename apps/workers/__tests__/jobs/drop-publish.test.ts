@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { __testing, dropPublishHandler } from '../../src/jobs/drop-publish.js';
 import type { ScheduledJobRow } from '../../src/jobs/scheduler.js';
@@ -582,6 +582,16 @@ function rewriteState(): FakeState {
 }
 
 describe('dropPublishHandler — LLM rewrite + fact-check enqueue', () => {
+  // Fact-check enqueue is gated behind FACT_CHECK_ENABLED env flag
+  // (defaults off pre-launch). These tests exercise the gated-ON path;
+  // the dedicated "flag off" describe below exercises the kill-switch.
+  beforeEach(() => {
+    vi.stubEnv('FACT_CHECK_ENABLED', 'true');
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it('happy path: rewritten headline lands; verbatim source_title preserved; fact-check enqueued', async () => {
     const state = rewriteState();
     const supabase = buildSupabase(state);
@@ -716,5 +726,112 @@ describe('dropPublishHandler — LLM rewrite + fact-check enqueue', () => {
     expect(state.factCheckJobInserts).toHaveLength(0);
     const outcomeLog = logger.calls.find((c) => c.obj.event === 'drop_publish.complete');
     expect(outcomeLog?.obj.fact_check_enqueued).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pre-launch kill-switch: FACT_CHECK_ENABLED env flag
+// ---------------------------------------------------------------------------
+// Fact-check is hidden pre-launch, and its orchestrator does NOT try/catch
+// the ai-fabric invoke — a stray enqueue dead-letters jobs and burns spend.
+// The handler gates enqueue behind FACT_CHECK_ENABLED === 'true', defaulting
+// OFF so a non-empty claim never reaches the queue until the operator flips
+// the flag at deploy time.
+
+describe('dropPublishHandler — FACT_CHECK_ENABLED kill-switch', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('flag unset: non-empty claim does NOT enqueue; drop still publishes with headline + source_title', async () => {
+    vi.stubEnv('FACT_CHECK_ENABLED', '');
+    const state = rewriteState();
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+    const invoke = fakeInvoke({
+      headline: 'senate confirms smith 52-48',
+      summary: 'Senate voted 52 to 48 to confirm Smith to Treasury.',
+      claim: 'The Senate confirmed Smith by a vote of 52-48.',
+    });
+
+    await dropPublishHandler(row(), { supabase, logger, invoke });
+
+    // Publish still succeeded — the gate only governs the fact-check
+    // enqueue side-effect, not the Drop itself.
+    expect(state.newsTopicInserts[0]!.headline).toBe('senate confirms smith 52-48');
+    // Fact-check pipeline NEVER touched: no claim upsert, no job insert.
+    expect(state.factCheckClaimUpserts).toHaveLength(0);
+    expect(state.factCheckJobInserts).toHaveLength(0);
+
+    // Observability: the gate fired a structured log so prod can see
+    // which Drops would have fact-checked when the flag flips.
+    const gateLog = logger.calls.find((c) => c.obj.event === 'drop_publish.fact_check_gated_off');
+    expect(gateLog).toBeDefined();
+    expect(gateLog!.obj.reason).toBe('FACT_CHECK_ENABLED !== true');
+
+    // Outcome telemetry still reports fact_check_enqueued=false.
+    const outcomeLog = logger.calls.find((c) => c.obj.event === 'drop_publish.complete');
+    expect(outcomeLog?.obj.fact_check_enqueued).toBe(false);
+  });
+
+  it('flag = "false": same as unset (gated off)', async () => {
+    vi.stubEnv('FACT_CHECK_ENABLED', 'false');
+    const state = rewriteState();
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+    const invoke = fakeInvoke({
+      headline: 'treasury releases Q3 refunding schedule',
+      summary: 'Treasury published the Q3 debt-issuance schedule.',
+      claim: 'Treasury issued its Q3 2026 refunding plan.',
+    });
+
+    await dropPublishHandler(row(), { supabase, logger, invoke });
+
+    expect(state.factCheckClaimUpserts).toHaveLength(0);
+    expect(state.factCheckJobInserts).toHaveLength(0);
+    expect(
+      logger.calls.find((c) => c.obj.event === 'drop_publish.fact_check_gated_off'),
+    ).toBeDefined();
+  });
+
+  it('flag = "1": does NOT enable (must be literal "true")', async () => {
+    // The gate is a strict equality on the string "true"; anything else
+    // keeps the kill-switch engaged. This prevents accidental misconfig
+    // like FACT_CHECK_ENABLED=1 flipping fact-check on silently.
+    vi.stubEnv('FACT_CHECK_ENABLED', '1');
+    const state = rewriteState();
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+    const invoke = fakeInvoke({
+      headline: 'bls publishes september cpi report',
+      summary: 'BLS released the September Consumer Price Index.',
+      claim: 'BLS published September 2026 CPI.',
+    });
+
+    await dropPublishHandler(row(), { supabase, logger, invoke });
+
+    expect(state.factCheckClaimUpserts).toHaveLength(0);
+    expect(state.factCheckJobInserts).toHaveLength(0);
+  });
+
+  it('empty claim: gated-off log does NOT fire (nothing to enqueue regardless)', async () => {
+    vi.stubEnv('FACT_CHECK_ENABLED', '');
+    const state = rewriteState();
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+    const invoke = fakeInvoke({
+      headline: 'senate banking hearing scheduled',
+      summary: 'Hearing on the Smith nomination announced for next week.',
+      claim: '',
+    });
+
+    await dropPublishHandler(row(), { supabase, logger, invoke });
+
+    expect(state.factCheckClaimUpserts).toHaveLength(0);
+    expect(state.factCheckJobInserts).toHaveLength(0);
+    // Empty-claim path short-circuits BEFORE the gate; no gate log.
+    expect(
+      logger.calls.find((c) => c.obj.event === 'drop_publish.fact_check_gated_off'),
+    ).toBeUndefined();
   });
 });
