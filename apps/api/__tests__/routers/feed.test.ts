@@ -320,6 +320,11 @@ describe('feedRouter.list', () => {
       curationMode: DROP_ROW.curation_mode,
       isBlockExhausted: false,
       additionalSources: [],
+      // P2.a: userStance is null when the user has no prior shift
+      // on this topic. Populated with 'agree' | 'disagree' when a
+      // row exists in opinion_shifts. See the dedicated userStance
+      // tests below.
+      userStance: null,
     });
     // Query shape: select → eq(is_drop, true) → lte(drop_at, cursor) → order desc → limit 1.
     const ops = calls.ops.map((o) => o.op);
@@ -417,5 +422,87 @@ describe('feedRouter.list', () => {
     const caller = appRouter.createCaller(makeCtx({ db }));
 
     await expect(caller.feed.list()).rejects.toMatchObject({ code: 'INTERNAL_SERVER_ERROR' });
+  });
+
+  // ---------------------------------------------------------------------------
+  // P2.a: userStance per topic from the user's latest opinion_shifts row.
+  // ---------------------------------------------------------------------------
+
+  function listDb(opts: {
+    readonly topics: readonly Record<string, unknown>[];
+    readonly shifts: readonly { topic_id: string; after_position: number; created_at: string }[];
+  }) {
+    // Two-table fake: news_topics returns the configured topics; the
+    // opinion_shifts lookup returns the configured per-user shifts.
+    // Matches the shape feed.list runs: topics first, then shifts.
+    const topicsBuilder: Record<string, unknown> = {};
+    const shiftsBuilder: Record<string, unknown> = {};
+    for (const op of ['select', 'eq', 'in', 'lte', 'order', 'limit']) {
+      topicsBuilder[op] = () => topicsBuilder;
+      shiftsBuilder[op] = () => shiftsBuilder;
+    }
+    const topicsResult = { data: opts.topics, error: null as { message: string } | null };
+    const shiftsResult = { data: opts.shifts, error: null as { message: string } | null };
+    topicsBuilder.then = (resolve: (v: typeof topicsResult) => unknown) =>
+      Promise.resolve(resolve(topicsResult));
+    shiftsBuilder.then = (resolve: (v: typeof shiftsResult) => unknown) =>
+      Promise.resolve(resolve(shiftsResult));
+    return {
+      from: (t: string) => (t === 'opinion_shifts' ? shiftsBuilder : topicsBuilder),
+      rpc: () => ({ data: null, error: null }),
+    };
+  }
+
+  it('userStance: null when the user has no shifts on the drop topic', async () => {
+    const db = listDb({ topics: [DROP_ROW], shifts: [] });
+    const caller = appRouter.createCaller(makeCtx({ db }));
+    const result = await caller.feed.list();
+    expect(result.topics[0]?.userStance).toBeNull();
+  });
+
+  it('userStance: "agree" when the latest shift has after_position > 0', async () => {
+    const db = listDb({
+      topics: [DROP_ROW],
+      shifts: [
+        { topic_id: DROP_ROW.id, after_position: 1, created_at: '2026-10-09T13:00:00.000Z' },
+        // Older rows must be ignored (first-row-wins after desc order).
+        { topic_id: DROP_ROW.id, after_position: -1, created_at: '2026-10-09T12:00:00.000Z' },
+      ],
+    });
+    const caller = appRouter.createCaller(makeCtx({ db }));
+    const result = await caller.feed.list();
+    expect(result.topics[0]?.userStance).toBe('agree');
+  });
+
+  it('userStance: "disagree" when the latest shift has after_position < 0', async () => {
+    const db = listDb({
+      topics: [DROP_ROW],
+      shifts: [
+        { topic_id: DROP_ROW.id, after_position: -1, created_at: '2026-10-09T13:00:00.000Z' },
+      ],
+    });
+    const caller = appRouter.createCaller(makeCtx({ db }));
+    const result = await caller.feed.list();
+    expect(result.topics[0]?.userStance).toBe('disagree');
+  });
+
+  it('userStance: null and feed.list still succeeds when the shift lookup errors', async () => {
+    const topicsBuilder: Record<string, unknown> = {};
+    const shiftsBuilder: Record<string, unknown> = {};
+    for (const op of ['select', 'eq', 'in', 'lte', 'order', 'limit']) {
+      topicsBuilder[op] = () => topicsBuilder;
+      shiftsBuilder[op] = () => shiftsBuilder;
+    }
+    topicsBuilder.then = (resolve: (v: unknown) => unknown) =>
+      Promise.resolve(resolve({ data: [DROP_ROW], error: null }));
+    shiftsBuilder.then = (resolve: (v: unknown) => unknown) =>
+      Promise.resolve(resolve({ data: null, error: { message: 'shift lookup kaboom' } }));
+    const db = {
+      from: (t: string) => (t === 'opinion_shifts' ? shiftsBuilder : topicsBuilder),
+      rpc: () => ({ data: null, error: null }),
+    };
+    const caller = appRouter.createCaller(makeCtx({ db }));
+    const result = await caller.feed.list();
+    expect(result.topics[0]?.userStance).toBeNull();
   });
 });

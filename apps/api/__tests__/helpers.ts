@@ -113,6 +113,7 @@ export function fakeDb<T>(table: string, result: FakeQueryResult<T>) {
   for (const op of [
     'select',
     'eq',
+    'in',
     'lt',
     'lte',
     'gt',
@@ -149,10 +150,27 @@ export function fakeDb<T>(table: string, result: FakeQueryResult<T>) {
   rpcBuilder.single = () => Promise.resolve(rpcOk);
   rpcBuilder.then = (resolve: (v: typeof rpcOk) => unknown) => Promise.resolve(resolve(rpcOk));
 
+  // A dedicated sidecar builder for non-primary tables. Returns an
+  // empty data array for any chained read, so a router that follows
+  // its primary query with a second lookup (e.g. feed.list's per-topic
+  // stance join against opinion_shifts) sees the expected
+  // `{data: [], error: null}` shape without failing the "unexpected
+  // table" guard. Tests that need to assert the shape of a secondary
+  // query should still use `fakeDbMulti` (below).
+  const sidecarBuilder: Record<string, unknown> = {};
+  for (const op of ['select', 'eq', 'in', 'lt', 'lte', 'gt', 'gte', 'order', 'limit']) {
+    sidecarBuilder[op] = () => sidecarBuilder;
+  }
+  const sidecarOk = { data: [], error: null };
+  sidecarBuilder.maybeSingle = () => Promise.resolve(sidecarOk);
+  sidecarBuilder.single = () => Promise.resolve(sidecarOk);
+  sidecarBuilder.then = (resolve: (v: typeof sidecarOk) => unknown) =>
+    Promise.resolve(resolve(sidecarOk));
+
   const db = {
     from: (t: string) => {
       if (t !== table) {
-        throw new Error(`fakeDb: unexpected table "${t}", expected "${table}"`);
+        return sidecarBuilder;
       }
       return builder;
     },

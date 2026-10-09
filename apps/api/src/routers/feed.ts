@@ -222,7 +222,45 @@ export const feedRouter = router({
         });
       }
 
-      const topics = (data ?? []).map((row) => ({
+      const topicRows = data ?? [];
+      const topicIds = topicRows.map((row) => row.id);
+
+      // Per-user latest-stance lookup for P2.a. One query across the
+      // returned topics (uses the composite index on
+      // (user_id, topic_id, created_at desc) added in migration
+      // 20260420090011). Mapped to {agree, disagree, null}; a null
+      // keeps the DropCard's buttons in their neutral unselected state.
+      const latestStance: Record<string, 'agree' | 'disagree' | null> = {};
+      if (topicIds.length > 0) {
+        const { data: shiftRows, error: shiftErr } = (await ctx.db
+          .from('opinion_shifts')
+          .select('topic_id, after_position, created_at')
+          .eq('user_id', ctx.userId)
+          .in('topic_id', topicIds)
+          .order('created_at', { ascending: false })) as unknown as {
+          data: { topic_id: string; after_position: number; created_at: string }[] | null;
+          error: { message: string } | null;
+        };
+        if (shiftErr) {
+          // Non-fatal — a stance-lookup failure must not block the Drop
+          // from rendering. Fall through with an empty map so the
+          // DropCard shows neutral buttons.
+          console.warn(
+            JSON.stringify({
+              event: 'feed.list.stance_lookup_failed',
+              message: shiftErr.message,
+            }),
+          );
+        } else {
+          for (const row of shiftRows ?? []) {
+            if (row.topic_id in latestStance) continue; // first row wins (ordered desc)
+            latestStance[row.topic_id] =
+              row.after_position > 0 ? 'agree' : row.after_position < 0 ? 'disagree' : null;
+          }
+        }
+      }
+
+      const topics = topicRows.map((row) => ({
         id: row.id,
         headline: row.headline,
         sourceTitle: row.source_title,
@@ -234,6 +272,7 @@ export const feedRouter = router({
         curationMode: row.curation_mode,
         isBlockExhausted: row.is_block_exhausted,
         additionalSources: Array.isArray(row.additional_sources) ? row.additional_sources : [],
+        userStance: latestStance[row.id] ?? null,
       }));
 
       return { topics };
