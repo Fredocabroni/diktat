@@ -1,7 +1,7 @@
 import { GoogleGenAI } from '@google/genai';
 import { ProviderError, ValidationError } from '@diktat/shared';
-import { zodToJsonSchema } from 'zod-to-json-schema';
 import type { ZodTypeAny } from 'zod';
+import { toToolSchema } from '../structured.js';
 import type { AdapterResult, ProviderEnv } from '../types.js';
 
 const PRICE_PER_M_INPUT_USD: Record<string, number> = {
@@ -65,7 +65,7 @@ export const googleAdapter = {
       maxOutputTokens: maxTokens ?? 4096,
     };
     if (schema) {
-      const jsonSchema = zodToJsonSchema(schema, { target: 'jsonSchema7' });
+      const jsonSchema = toToolSchema(schema);
       config['responseMimeType'] = 'application/json';
       config['responseSchema'] = sanitizeForGoogle(jsonSchema);
     }
