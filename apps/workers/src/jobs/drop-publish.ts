@@ -130,6 +130,18 @@ const CLUSTER_BLOCK_DAYS = 2;
  *  this multiple of the runner-up's score. */
 const DOMINANCE_RATIO = 2.0;
 
+/** Strip control characters (every newline variant, DEL, C1 range) and
+ *  cap length before embedding in `claim_context`. The string is both a
+ *  dedup-hash input (collisions via `\n---\n` separator injection in
+ *  LLM-controlled title/url) AND the operand of the fact-check
+ *  orchestrator's user prompt. Security-reviewer PR #191 Low 6 +
+ *  PR #193 Medium 1. */
+function sanitizeClaimContextField(raw: string): string {
+  // eslint-disable-next-line no-control-regex
+  const stripped = raw.replace(/[\u0000-\u001F\u007F-\u009F]/g, ' ');
+  return stripped.replace(/\s+/g, ' ').trim().slice(0, 2000);
+}
+
 // ---------------------------------------------------------------------------
 // Pure selection logic — exposed for testing.
 // ---------------------------------------------------------------------------
@@ -360,9 +372,15 @@ export const dropPublishHandler: JobHandler = async (row, deps) => {
   let factCheckEnqueued = false;
   const factCheckEnabled = process.env.FACT_CHECK_ENABLED === 'true';
   if (rewrite.claim.length > 0 && factCheckEnabled) {
+    // Sanitize before embedding in claim_context — the string is both a
+    // dedup-hash input (collisions via embedded `\n---\n` or newline-
+    // separated injection) and the second-step prompt operand for the
+    // fact-check orchestrator. Mirrors the §11 prompt-input sanitizer
+    // (security-reviewer PR #191 Low 6 + #193 Medium 1).
+    const claimContext = `${sanitizeClaimContextField(sel.chosen.source_title)}\n${sanitizeClaimContextField(sel.chosen.source_url)}`;
     factCheckEnqueued = await enqueueDropFactCheck(deps, {
       claimText: rewrite.claim,
-      claimContext: `${sel.chosen.source_title}\n${sel.chosen.source_url}`,
+      claimContext,
       refId: topicData.id,
       now,
     });
