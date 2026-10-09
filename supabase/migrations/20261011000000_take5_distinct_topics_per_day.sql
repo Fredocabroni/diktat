@@ -103,9 +103,19 @@ begin
   --     credit a single topic"). Mirrors place_prediction's FOR UPDATE
   --     on wallet balance (migration 20260729120000).
   --
-  --     If the streaks row is missing (defensive — handle_new_user
-  --     inserts it on every signup), skip the lock and fall through to
-  --     the defensive INSERT below.
+  --     Guarantee the row exists BEFORE acquiring the lock. The
+  --     handle_new_user AFTER INSERT trigger (migration 20260420090009
+  --     line 44) inserts a public.streaks row on every signup, so the
+  --     ON CONFLICT path is the hot path for real users. The INSERT
+  --     is here as defense in depth: a brand-new user whose
+  --     handle_new_user insert somehow didn't fire (migration race, a
+  --     service-role tool that created an auth.users row without the
+  --     trigger, future test harness) would otherwise have
+  --     SELECT ... FOR UPDATE match zero rows and lock nothing.
+  --     With this INSERT, the subsequent FOR UPDATE always has a row
+  --     to lock, so the credit path is serialised unconditionally.
+  insert into public.streaks (user_id) values (p_user_id)
+    on conflict (user_id) do nothing;
   perform 1 from public.streaks where user_id = p_user_id for update;
 
   -- (3) Distinct-topic gate. The AFTER INSERT trigger context means the

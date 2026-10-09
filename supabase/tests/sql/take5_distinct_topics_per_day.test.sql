@@ -231,6 +231,46 @@ begin
 end $$;
 
 -- -----------------------------------------------------------------------------
+-- T6b — Streaks row missing-but-recreatable: the function must guarantee
+--       a row to FOR UPDATE before locking. Simulate by deleting the
+--       user's streaks row, then invoking the function via the full
+--       record_opinion_shift path. The trigger's increment_take5_progress
+--       call should re-create the row (ON CONFLICT DO NOTHING) and credit
+--       progress correctly. (Operator question on the second-round fix:
+--       what if the streaks row doesn't exist?)
+-- -----------------------------------------------------------------------------
+do $$
+declare
+  v_user_id uuid := 'a3333333-3333-3333-3333-333333333333';
+  v_fresh_topic uuid := 'a0000000-aaaa-aaaa-aaaa-00000000000f';
+  v_progress int;
+begin
+  -- Fresh topic for this user; delete the streaks row to simulate a
+  -- hypothetical pre-handle_new_user state.
+  insert into public.news_topics (id, slug, headline, source_title, is_drop, drop_at)
+    values (v_fresh_topic, 'p3a-topic-g-recreate', 'Topic G recreate', 'Topic G recreate', true, now());
+  delete from public.streaks where user_id = v_user_id;
+
+  perform public.record_opinion_shift(
+    p_topic_id       => v_fresh_topic,
+    p_after_position => 1::smallint,
+    p_client_key     => gen_random_uuid()
+  );
+
+  -- The function must have recreated the row AND credited progress to 1
+  -- for this first-shift-on-first-topic-today case.
+  select take5_progress into v_progress
+    from public.streaks where user_id = v_user_id;
+  if v_progress is null then
+    raise exception 'T6b FAIL: streaks row still missing after shift';
+  end if;
+  if v_progress <> 1 then
+    raise exception 'T6b FAIL: expected progress=1 after row recreate, got %', v_progress;
+  end if;
+  raise notice 'T6b PASS: missing streaks row recreated + progress credited to 1';
+end $$;
+
+-- -----------------------------------------------------------------------------
 -- T7 — Phantom-credit guard: direct service_role call with no backing
 --      opinion_shifts row MUST NOT credit progress. In the AFTER INSERT
 --      trigger context this branch is unreachable (v_shift_count >= 1
