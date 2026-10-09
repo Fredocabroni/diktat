@@ -12,6 +12,31 @@
 // Cleanup: every assertion path runs in a try/finally with state
 // restoration. A mid-script crash leaves the dev DB at the original
 // snapshot.
+//
+// ⚠️  STALE AFTER PR #196 (P3.a — migration 20261011000000).
+//
+// This script makes direct `rpc('increment_take5_progress', {p_user_id})`
+// calls with the old single-arg signature. P3.a:
+//   * Replaced increment_take5_progress(uuid) with
+//     increment_take5_progress(uuid, uuid) — direct calls below need
+//     p_topic_id too.
+//   * Added a phantom-credit guard that returns {error:'no_shift_row'}
+//     for direct calls with no backing opinion_shifts row for that
+//     (user, topic, local-today). The script's "5 free increments"
+//     test premise no longer holds.
+//
+// Current validation surface for the streak engine:
+//   supabase/tests/sql/take5_distinct_topics_per_day.test.sql
+//   (7 cases + the T6b missing-streaks-row + T7 phantom-credit guard)
+//
+// Rewrite path when this script is next needed:
+//   1. Pre-seed opinion_shifts rows via record_opinion_shift(uuid,
+//      smallint, uuid) so the distinct-topic gate has backing rows.
+//   2. OR disable the opinion_shifts_take5_after_insert trigger and
+//      insert directly, matching the pattern in
+//      supabase/tests/sql/record_opinion_shift.test.sql.
+//   3. Pass p_topic_id in every rpc call. The composite index on
+//      (user_id, topic_id, created_at desc) serves the inner count.
 
 import { loadEnv } from '../src/env.js';
 import { buildServiceClient, type ServiceClient } from '../src/supabase.js';
