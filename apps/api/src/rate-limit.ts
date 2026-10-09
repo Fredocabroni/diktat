@@ -436,7 +436,14 @@ const QUERY_FAN_OUT: Record<string, number> = {
   'debates.getBattle': 5,
   'matchmaking.getStatus': 0, // pure Redis — no DB queries
   'user.me': 3, // 1 RPC sequential + 2 parallel
-  'feed.list': 1,
+  // 1 primary news_topics query + up to `limit` (max 50 per
+  // listInputSchema) per-topic opinion_shifts stance lookups fanned
+  // out via Promise.all. feed.list limit default is 1 (one query),
+  // so the common case under-counts if we encoded 51; the max case
+  // is 51. Encode the upper bound so pool-risk observability during
+  // a Redis-down fail-open window reflects worst case. (security-
+  // reviewer PR #196 v3 Medium.)
+  'feed.list': 51,
   'factCheck.getVerdict': 1, // defensive default; no client caller today
   'pushSubscriptions.listMine': 1, // defensive default; no client caller today
   'wallet.balance': 2, // wallets + users in parallel
