@@ -1,7 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { Message } from '@anthropic-ai/sdk/resources/messages/messages.js';
 import { ProviderError } from '@diktat/shared';
-import { zodToJsonSchema } from 'zod-to-json-schema';
+import { toToolSchema } from '../structured.js';
 import type { ZodTypeAny } from 'zod';
 import type { AdapterResult, ProviderEnv } from '../types.js';
 import { parseStructured } from '../structured.js';
@@ -87,10 +87,7 @@ export const anthropicAdapter = {
 
     let response: Message;
     if (schema) {
-      const jsonSchema = zodToJsonSchema(schema, { target: 'jsonSchema7' }) as Record<
-        string,
-        unknown
-      >;
+      const jsonSchema = toToolSchema(schema);
       // Anthropic API rejects `thinking` + forced `tool_choice` together.
       // Structured outputs always force the tool, so omit thinkingParam here.
       const toolParams = {
@@ -158,9 +155,22 @@ export const anthropicAdapter = {
         return { output, usd, latencyMs };
       } catch (parseErr) {
         // Instrumentation: the tool_use input failed Zod validation. Capture
-        // stop_reason, usage, any preamble text blocks, and the raw input —
-        // the evidence that decides whether the empty `{}` is a max_tokens
-        // truncation. The error still throws; logging only, no degradation.
+        // stop_reason, usage, any preamble text blocks, and SHAPE-ONLY
+        // metadata about the raw input (keys + size — never content). The
+        // raw input echoes feed-derived strings (source titles / summaries)
+        // and may include PII a hostile feed shipped before §11 scrubs it;
+        // logging the content leaks it into every downstream sink. Keys +
+        // size preserve the diagnostic signal — "did the model emit any
+        // fields at all? how big was the structured payload?" — without
+        // content exfil. (security-reviewer PR #191 M3.)
+        const toolInputKeys = Object.keys(toolUse.input ?? {});
+        const toolInputSize = (() => {
+          try {
+            return JSON.stringify(toolUse.input ?? {}).length;
+          } catch {
+            return -1;
+          }
+        })();
         console.warn(
           JSON.stringify({
             event: 'anthropic.structured.fail',
@@ -171,7 +181,8 @@ export const anthropicAdapter = {
             text_blocks: textBlockCount,
             text_chars: textChars,
             tool_use_present: true,
-            raw_tool_input: toolUse.input,
+            raw_tool_input_keys: toolInputKeys,
+            raw_tool_input_size: toolInputSize,
             parse_error: parseErr instanceof Error ? parseErr.message : String(parseErr),
           }),
         );

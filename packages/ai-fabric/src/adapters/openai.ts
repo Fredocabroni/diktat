@@ -1,9 +1,21 @@
 import OpenAI from 'openai';
 import type { ChatCompletion } from 'openai/resources/chat/completions';
 import { ProviderError, ValidationError } from '@diktat/shared';
-import { zodToJsonSchema } from 'zod-to-json-schema';
 import type { ZodTypeAny } from 'zod';
+import { toToolSchema } from '../structured.js';
 import type { AdapterResult, ProviderEnv } from '../types.js';
+
+/**
+ * GPT-5 renamed the token-cap parameter from `max_tokens` to
+ * `max_completion_tokens`. GPT-4-generation models (and gpt-4o) still
+ * accept `max_tokens`. Pick the parameter name by model family so one
+ * adapter supports both without a hardcoded cutover date.
+ */
+function tokenCapKey(model: string): 'max_tokens' | 'max_completion_tokens' {
+  return model.startsWith('gpt-5') || model.startsWith('o1') || model.startsWith('o3')
+    ? 'max_completion_tokens'
+    : 'max_tokens';
+}
 
 /** OpenAI per-1M-token pricing snapshot. Adjust as the price page moves. */
 const PRICE_PER_M_INPUT_USD: Record<string, number> = {
@@ -50,7 +62,7 @@ export const openaiAdapter = {
 
     const params: Record<string, unknown> = {
       model,
-      max_tokens: maxTokens ?? 4096,
+      [tokenCapKey(model)]: maxTokens ?? 4096,
       messages: [
         { role: 'system', content: system },
         { role: 'user', content: user },
@@ -58,10 +70,7 @@ export const openaiAdapter = {
     };
 
     if (schema) {
-      const jsonSchema = zodToJsonSchema(schema, { target: 'jsonSchema7' }) as Record<
-        string,
-        unknown
-      >;
+      const jsonSchema = toToolSchema(schema);
       params['response_format'] = {
         type: 'json_schema',
         json_schema: {
