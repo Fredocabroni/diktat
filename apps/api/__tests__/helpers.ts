@@ -103,8 +103,24 @@ export interface FakeQueryResult<T> {
   error: { code?: string; message: string } | null;
 }
 
-export function fakeDb<T>(table: string, result: FakeQueryResult<T>) {
+/**
+ * Build a fake Supabase client that drives `.from(primary)` through
+ * one configured result and (optionally) permits a short allowlist of
+ * sidecar tables that return `{data: [], error: null}` for any chain.
+ *
+ * Any `.from(X)` where X is neither the primary nor an allowed sidecar
+ * throws — this is a test-time guard against resolvers quietly adding
+ * new DB access that a stub silently answered (security-reviewer
+ * PR #196 Low 1). Pass `sidecars: ['opinion_shifts']` from a test that
+ * knows the resolver reads a specific second table.
+ */
+export function fakeDb<T>(
+  table: string,
+  result: FakeQueryResult<T>,
+  options?: { readonly sidecars?: readonly string[] },
+) {
   const calls: { table: string; ops: { op: string; args: unknown[] }[] } = { table, ops: [] };
+  const allowedSidecars = new Set(options?.sidecars ?? []);
 
   const builder: Record<string, unknown> = {};
 
@@ -169,10 +185,13 @@ export function fakeDb<T>(table: string, result: FakeQueryResult<T>) {
 
   const db = {
     from: (t: string) => {
-      if (t !== table) {
-        return sidecarBuilder;
-      }
-      return builder;
+      if (t === table) return builder;
+      if (allowedSidecars.has(t)) return sidecarBuilder;
+      throw new Error(
+        `fakeDb: unexpected table "${t}" (primary="${table}", sidecars=[${Array.from(
+          allowedSidecars,
+        ).join(', ')}])`,
+      );
     },
     rpc: (_fn: string, _args?: unknown) => rpcBuilder,
   };

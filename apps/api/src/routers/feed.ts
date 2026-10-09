@@ -225,39 +225,52 @@ export const feedRouter = router({
       const topicRows = data ?? [];
       const topicIds = topicRows.map((row) => row.id);
 
-      // Per-user latest-stance lookup for P2.a. One query across the
-      // returned topics (uses the composite index on
-      // (user_id, topic_id, created_at desc) added in migration
-      // 20260420090011). Mapped to {agree, disagree, null}; a null
-      // keeps the DropCard's buttons in their neutral unselected state.
+      // Per-user latest-stance lookup for P2.a. ONE query per topic,
+      // each capped to the latest row via .limit(1).maybeSingle() so
+      // the fetch is strictly bounded regardless of how many historical
+      // shifts a user has on a topic. Uses the composite index on
+      // (user_id, topic_id, created_at desc) from migration
+      // 20260420090011. Earlier draft used a single
+      // `.in('topic_id', topicIds)` query with no LIMIT — flagged by
+      // security review on #196 as an unbounded fetch (a user with
+      // 1000 historical shifts on topic A would pull all 1000 just to
+      // read the latest). The parallel-maybeSingle shape avoids that.
+      //
+      // Non-fatal on error — a stance-lookup failure for one topic
+      // falls through to a `null` stance for that topic and the
+      // DropCard shows neutral buttons. Error log carries the PG
+      // error code (short, enum-like) rather than the message
+      // (which can echo UUIDs or query text — security-reviewer
+      // PR #196 Low 2).
       const latestStance: Record<string, 'agree' | 'disagree' | null> = {};
       if (topicIds.length > 0) {
-        const { data: shiftRows, error: shiftErr } = (await ctx.db
-          .from('opinion_shifts')
-          .select('topic_id, after_position, created_at')
-          .eq('user_id', ctx.userId)
-          .in('topic_id', topicIds)
-          .order('created_at', { ascending: false })) as unknown as {
-          data: { topic_id: string; after_position: number; created_at: string }[] | null;
-          error: { message: string } | null;
-        };
-        if (shiftErr) {
-          // Non-fatal — a stance-lookup failure must not block the Drop
-          // from rendering. Fall through with an empty map so the
-          // DropCard shows neutral buttons.
-          console.warn(
-            JSON.stringify({
-              event: 'feed.list.stance_lookup_failed',
-              message: shiftErr.message,
-            }),
-          );
-        } else {
-          for (const row of shiftRows ?? []) {
-            if (row.topic_id in latestStance) continue; // first row wins (ordered desc)
-            latestStance[row.topic_id] =
-              row.after_position > 0 ? 'agree' : row.after_position < 0 ? 'disagree' : null;
-          }
-        }
+        await Promise.all(
+          topicIds.map(async (topicId) => {
+            const { data: shift, error: shiftErr } = (await ctx.db
+              .from('opinion_shifts')
+              .select('after_position')
+              .eq('user_id', ctx.userId)
+              .eq('topic_id', topicId)
+              .order('created_at', { ascending: false })
+              .limit(1)
+              .maybeSingle()) as unknown as {
+              data: { after_position: number } | null;
+              error: { code?: string; message: string } | null;
+            };
+            if (shiftErr) {
+              console.warn(
+                JSON.stringify({
+                  event: 'feed.list.stance_lookup_failed',
+                  code: shiftErr.code ?? 'unknown',
+                }),
+              );
+              return;
+            }
+            if (!shift) return;
+            latestStance[topicId] =
+              shift.after_position > 0 ? 'agree' : shift.after_position < 0 ? 'disagree' : null;
+          }),
+        );
       }
 
       const topics = topicRows.map((row) => ({

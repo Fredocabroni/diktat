@@ -1419,7 +1419,10 @@ export type Database = {
           tier_id: number
         }[]
       }
-      increment_take5_progress: { Args: { p_user_id: string }; Returns: Json }
+      increment_take5_progress: {
+        Args: { p_user_id: string; p_topic_id: string }
+        Returns: Json
+      }
       is_battle_open_debate_observable: {
         Args: { p_battle_id: string }
         Returns: boolean

@@ -302,7 +302,11 @@ describe('feedRouter.list', () => {
   };
 
   it('returns ≤1 row in default mode with the right column projection', async () => {
-    const { db, calls } = fakeDb('news_topics', { data: [DROP_ROW], error: null });
+    const { db, calls } = fakeDb(
+      'news_topics',
+      { data: [DROP_ROW], error: null },
+      { sidecars: ['opinion_shifts'] },
+    );
     const caller = appRouter.createCaller(makeCtx({ db }));
 
     const result = await caller.feed.list();
@@ -339,7 +343,11 @@ describe('feedRouter.list', () => {
   });
 
   it('returns an empty array when no Drop has been published yet', async () => {
-    const { db } = fakeDb('news_topics', { data: [], error: null });
+    const { db } = fakeDb(
+      'news_topics',
+      { data: [], error: null },
+      { sidecars: ['opinion_shifts'] },
+    );
     const caller = appRouter.createCaller(makeCtx({ db }));
 
     const result = await caller.feed.list();
@@ -347,7 +355,11 @@ describe('feedRouter.list', () => {
   });
 
   it('passes a provided cursor through to lte (archive pagination forward-compat)', async () => {
-    const { db, calls } = fakeDb('news_topics', { data: [], error: null });
+    const { db, calls } = fakeDb(
+      'news_topics',
+      { data: [], error: null },
+      { sidecars: ['opinion_shifts'] },
+    );
     const caller = appRouter.createCaller(makeCtx({ db }));
 
     const cursor = '2026-06-10T00:00:00.000Z';
@@ -360,7 +372,11 @@ describe('feedRouter.list', () => {
   });
 
   it('defaults the cursor to now when none is provided', async () => {
-    const { db, calls } = fakeDb('news_topics', { data: [], error: null });
+    const { db, calls } = fakeDb(
+      'news_topics',
+      { data: [], error: null },
+      { sidecars: ['opinion_shifts'] },
+    );
     const caller = appRouter.createCaller(makeCtx({ db }));
 
     const before = Date.now();
@@ -404,10 +420,14 @@ describe('feedRouter.list', () => {
   });
 
   it('coerces a non-array additional_sources to []', async () => {
-    const { db } = fakeDb('news_topics', {
-      data: [{ ...DROP_ROW, additional_sources: 'unexpected' as unknown as [] }],
-      error: null,
-    });
+    const { db } = fakeDb(
+      'news_topics',
+      {
+        data: [{ ...DROP_ROW, additional_sources: 'unexpected' as unknown as [] }],
+        error: null,
+      },
+      { sidecars: ['opinion_shifts'] },
+    );
     const caller = appRouter.createCaller(makeCtx({ db }));
 
     const result = await caller.feed.list();
@@ -428,33 +448,53 @@ describe('feedRouter.list', () => {
   // P2.a: userStance per topic from the user's latest opinion_shifts row.
   // ---------------------------------------------------------------------------
 
+  // Two-table fake: news_topics returns the configured topics; each
+  // per-topic opinion_shifts lookup returns the latest shift via
+  // .maybeSingle(). Mirrors the exact shape feed.list runs after the
+  // M1 bounded-query fix (one maybeSingle per topic, not one unbounded
+  // in-list fetch).
   function listDb(opts: {
     readonly topics: readonly Record<string, unknown>[];
-    readonly shifts: readonly { topic_id: string; after_position: number; created_at: string }[];
+    readonly latestShiftByTopic: Readonly<Record<string, { after_position: number } | null>>;
+    readonly shiftError?: { code?: string; message: string } | null;
   }) {
-    // Two-table fake: news_topics returns the configured topics; the
-    // opinion_shifts lookup returns the configured per-user shifts.
-    // Matches the shape feed.list runs: topics first, then shifts.
     const topicsBuilder: Record<string, unknown> = {};
-    const shiftsBuilder: Record<string, unknown> = {};
     for (const op of ['select', 'eq', 'in', 'lte', 'order', 'limit']) {
       topicsBuilder[op] = () => topicsBuilder;
-      shiftsBuilder[op] = () => shiftsBuilder;
     }
     const topicsResult = { data: opts.topics, error: null as { message: string } | null };
-    const shiftsResult = { data: opts.shifts, error: null as { message: string } | null };
     topicsBuilder.then = (resolve: (v: typeof topicsResult) => unknown) =>
       Promise.resolve(resolve(topicsResult));
-    shiftsBuilder.then = (resolve: (v: typeof shiftsResult) => unknown) =>
-      Promise.resolve(resolve(shiftsResult));
+
+    function buildShiftsBuilder() {
+      let currentTopicId: string | null = null;
+      const b: Record<string, unknown> = {};
+      b.select = () => b;
+      b.eq = (col: string, value: string) => {
+        if (col === 'topic_id') currentTopicId = value;
+        return b;
+      };
+      b.order = () => b;
+      b.limit = () => b;
+      b.maybeSingle = () => {
+        if (opts.shiftError) {
+          return Promise.resolve({ data: null, error: opts.shiftError });
+        }
+        const data =
+          currentTopicId !== null ? (opts.latestShiftByTopic[currentTopicId] ?? null) : null;
+        return Promise.resolve({ data, error: null });
+      };
+      return b;
+    }
+
     return {
-      from: (t: string) => (t === 'opinion_shifts' ? shiftsBuilder : topicsBuilder),
+      from: (t: string) => (t === 'opinion_shifts' ? buildShiftsBuilder() : topicsBuilder),
       rpc: () => ({ data: null, error: null }),
     };
   }
 
   it('userStance: null when the user has no shifts on the drop topic', async () => {
-    const db = listDb({ topics: [DROP_ROW], shifts: [] });
+    const db = listDb({ topics: [DROP_ROW], latestShiftByTopic: {} });
     const caller = appRouter.createCaller(makeCtx({ db }));
     const result = await caller.feed.list();
     expect(result.topics[0]?.userStance).toBeNull();
@@ -463,11 +503,9 @@ describe('feedRouter.list', () => {
   it('userStance: "agree" when the latest shift has after_position > 0', async () => {
     const db = listDb({
       topics: [DROP_ROW],
-      shifts: [
-        { topic_id: DROP_ROW.id, after_position: 1, created_at: '2026-10-09T13:00:00.000Z' },
-        // Older rows must be ignored (first-row-wins after desc order).
-        { topic_id: DROP_ROW.id, after_position: -1, created_at: '2026-10-09T12:00:00.000Z' },
-      ],
+      latestShiftByTopic: {
+        [DROP_ROW.id]: { after_position: 1 },
+      },
     });
     const caller = appRouter.createCaller(makeCtx({ db }));
     const result = await caller.feed.list();
@@ -477,9 +515,9 @@ describe('feedRouter.list', () => {
   it('userStance: "disagree" when the latest shift has after_position < 0', async () => {
     const db = listDb({
       topics: [DROP_ROW],
-      shifts: [
-        { topic_id: DROP_ROW.id, after_position: -1, created_at: '2026-10-09T13:00:00.000Z' },
-      ],
+      latestShiftByTopic: {
+        [DROP_ROW.id]: { after_position: -1 },
+      },
     });
     const caller = appRouter.createCaller(makeCtx({ db }));
     const result = await caller.feed.list();
@@ -487,20 +525,11 @@ describe('feedRouter.list', () => {
   });
 
   it('userStance: null and feed.list still succeeds when the shift lookup errors', async () => {
-    const topicsBuilder: Record<string, unknown> = {};
-    const shiftsBuilder: Record<string, unknown> = {};
-    for (const op of ['select', 'eq', 'in', 'lte', 'order', 'limit']) {
-      topicsBuilder[op] = () => topicsBuilder;
-      shiftsBuilder[op] = () => shiftsBuilder;
-    }
-    topicsBuilder.then = (resolve: (v: unknown) => unknown) =>
-      Promise.resolve(resolve({ data: [DROP_ROW], error: null }));
-    shiftsBuilder.then = (resolve: (v: unknown) => unknown) =>
-      Promise.resolve(resolve({ data: null, error: { message: 'shift lookup kaboom' } }));
-    const db = {
-      from: (t: string) => (t === 'opinion_shifts' ? shiftsBuilder : topicsBuilder),
-      rpc: () => ({ data: null, error: null }),
-    };
+    const db = listDb({
+      topics: [DROP_ROW],
+      latestShiftByTopic: {},
+      shiftError: { code: '42P01', message: 'relation "opinion_shifts" does not exist' },
+    });
     const caller = appRouter.createCaller(makeCtx({ db }));
     const result = await caller.feed.list();
     expect(result.topics[0]?.userStance).toBeNull();

@@ -230,4 +230,33 @@ begin
   raise notice 'T6 PASS: prior-day shift did not block today''s credit; progress=6';
 end $$;
 
+-- -----------------------------------------------------------------------------
+-- Note on concurrent-writer coverage (security-reviewer PR #196 Medium 2).
+-- -----------------------------------------------------------------------------
+-- Michael asked for a SQL test on "two concurrent shifts on different topics."
+-- A single-session psql test cannot express cross-session concurrency because:
+--   * `pg_advisory_xact_lock` and `SELECT ... FOR UPDATE` are session-scoped;
+--     a single psql transaction cannot simulate two concurrent transactions.
+--   * psql itself has no fork / multi-connection primitive.
+--   * dblink or pg_background could spin a second session, but introduces
+--     cross-session commit ordering complexity that would make the test
+--     flakier than the lock it is trying to exercise.
+--
+-- The migration's defence against the race lives on two layers, both in-tree:
+--   * `record_opinion_shift` (migration 20261010000000, line 119) acquires a
+--     per-user `pg_advisory_xact_lock` BEFORE the INSERT. The AFTER INSERT
+--     trigger (and the `increment_take5_progress` call inside it) runs in
+--     the same transaction, so two concurrent client calls for one user
+--     serialise cleanly at the RPC boundary.
+--   * `increment_take5_progress` (this migration, step 2) also acquires
+--     `SELECT 1 FROM public.streaks WHERE user_id = p_user_id FOR UPDATE`
+--     at the top. This defends against any FUTURE writer that bypasses
+--     `record_opinion_shift` (e.g. a service-role backfill): the FOR UPDATE
+--     holds for the trigger's transaction, serialising the count-check +
+--     streaks UPDATE pair regardless of how the opinion_shifts row arrived.
+--
+-- Together these form belt-and-braces coverage; an adversary would have to
+-- bypass BOTH the per-user advisory lock AND the per-user streaks row lock
+-- to double-credit a topic.
+
 rollback;
