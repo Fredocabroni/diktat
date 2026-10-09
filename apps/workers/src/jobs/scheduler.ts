@@ -67,6 +67,11 @@ export interface HandlerDeps {
   readonly providerEnv?: ProviderEnv;
   /** fetch impl — required by handlers that probe URLs. */
   readonly fetch?: typeof globalThis.fetch;
+  /** Optional alerter — passed to handlers that want to surface
+   *  Telegram alerts (e.g. drop-publish on rewrite_failed, which
+   *  previously degraded silently for 14 days before anyone noticed).
+   *  Scheduler forwards from SchedulerDeps when present. */
+  readonly alerter?: Alerter;
 }
 
 export interface SchedulerDeps {
@@ -169,6 +174,7 @@ export async function runSchedulerTick(deps: SchedulerDeps): Promise<TickResult>
         ...(deps.invoke ? { invoke: deps.invoke } : {}),
         ...(deps.providerEnv ? { providerEnv: deps.providerEnv } : {}),
         ...(deps.fetch ? { fetch: deps.fetch } : {}),
+        ...(deps.alerter ? { alerter: deps.alerter } : {}),
       });
       await markRowDone(deps, row);
       result.succeeded += 1;

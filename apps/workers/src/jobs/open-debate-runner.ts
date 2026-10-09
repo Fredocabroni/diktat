@@ -493,9 +493,18 @@ async function callAi(
     });
     return result.output as AiVerdict;
   } catch (err) {
+    const message = scrubMessage(err instanceof Error ? err.message : String(err));
     deps.logger.warn({
       event: 'open_debate.scorer_failed',
-      message: scrubMessage(err instanceof Error ? err.message : String(err)),
+      message,
+    });
+    // Telegram alert — graceful degradation (community vote still
+    // decides the winner) but a chronic AI outage should surface
+    // visibly rather than show up only as missing-reason text on
+    // battle verdicts. 1-hour dedup per task.
+    void deps.alerter?.alert('error', 'debate_score scorer_failed', message.slice(0, 500), {
+      dedupKey: 'ai:scorer_failed:debate_score',
+      dedupTtlMs: 60 * 60_000,
     });
     return null;
   }

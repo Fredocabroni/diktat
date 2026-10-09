@@ -532,11 +532,28 @@ async function rewriteHeadlineSafely(
     });
     return result.output as DropHeadlineRewriteOutput;
   } catch (err) {
+    const message = scrubMessage(err instanceof Error ? err.message : String(err));
     deps.logger.warn({
       event: 'drop_publish.rewrite_failed',
       candidateId: candidate.id,
-      message: scrubMessage(err instanceof Error ? err.message : String(err)),
+      message,
     });
+    // Telegram alert — the 14-day silent-degradation incident
+    // (Railway workers running without ANTHROPIC_API_KEY / OPENAI_API_KEY)
+    // was invisible precisely because this catch returned empty strings
+    // and the publish still marked `status='done'`. Alerter de-dups at
+    // 1 hour per task via dedupKey; the global rate cap in makeAlerter
+    // is the final safety net. Fire-and-forget so a Telegram outage
+    // never affects the Drop pipeline.
+    void deps.alerter?.alert(
+      'error',
+      'drop_publish rewrite_failed',
+      `candidate=${candidate.id} · ${message}`.slice(0, 500),
+      {
+        dedupKey: 'ai:rewrite_failed:drop_headline_rewrite',
+        dedupTtlMs: 60 * 60_000,
+      },
+    );
     return empty;
   }
 }

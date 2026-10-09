@@ -22,6 +22,7 @@ import { makeAlerter, scrubMessage } from '@diktat/shared/alerts';
 import { resolveDeploySha } from '@diktat/shared/deploy-sha';
 import { Client as PgClient } from 'pg';
 
+import { auditProviderKeys } from './audit-provider-keys.js';
 import { loadEnv, privyReady, webPushReady, type Env } from './env.js';
 import { buildBattlePoller } from './jobs/battle-poller.js';
 import { buildInvariantCheckHandler, withFreshPgClient } from './jobs/invariant-check.js';
@@ -172,6 +173,18 @@ async function main(): Promise<void> {
     xaiAvailable: Boolean(process.env.XAI_API_KEY),
     perplexityAvailable: Boolean(process.env.PERPLEXITY_API_KEY),
   };
+
+  // Boot-time audit: alert on any missing provider API key referenced by
+  // a launch-scope AI task. Non-fatal — a missing primary surfaces as a
+  // Telegram alert and keeps booting. See apps/workers/src/audit-provider-
+  // keys.ts for the rationale (14-day silent-degradation incident where
+  // Railway workers had no ANTHROPIC_API_KEY / OPENAI_API_KEY env vars).
+  auditProviderKeys({
+    providerEnv: debateProviderEnv,
+    logger,
+    alerter,
+  });
+
   const battlePoller = buildBattlePoller({
     supabase,
     logger,
