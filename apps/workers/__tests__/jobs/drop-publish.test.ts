@@ -686,6 +686,62 @@ describe('dropPublishHandler — LLM rewrite + fact-check enqueue', () => {
     expect(logger.calls.find((c) => c.obj.event === 'drop_publish.rewrite_failed')).toBeDefined();
   });
 
+  it('LLM invoke throws WITH alerter wired → Telegram alert fires with 1-hour dedup', async () => {
+    const state = rewriteState();
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+    const invoke = (async () => {
+      throw new Error('[openai] all providers exhausted');
+    }) as unknown as typeof fabricInvoke;
+    const alertCalls: Array<{
+      severity: string;
+      title: string;
+      detail: string;
+      opts: { dedupKey?: string; dedupTtlMs?: number } | undefined;
+    }> = [];
+    const alerter = {
+      enabled: true,
+      alert: async (
+        severity: string,
+        title: string,
+        detail: string,
+        opts: { dedupKey?: string; dedupTtlMs?: number } | undefined,
+      ) => {
+        alertCalls.push({ severity, title, detail, opts });
+      },
+    };
+
+    await dropPublishHandler(row(), {
+      supabase,
+      logger,
+      invoke,
+      alerter: alerter as unknown as Parameters<typeof dropPublishHandler>[1]['alerter'],
+    });
+
+    // Publish still succeeded (graceful degradation).
+    expect(state.newsTopicInserts).toHaveLength(1);
+    // Warn log fired as before.
+    expect(logger.calls.find((c) => c.obj.event === 'drop_publish.rewrite_failed')).toBeDefined();
+    // AND a Telegram alert now fires with 1-hour per-task dedup.
+    expect(alertCalls).toHaveLength(1);
+    expect(alertCalls[0]!.severity).toBe('error');
+    expect(alertCalls[0]!.title).toBe('drop_publish rewrite_failed');
+    expect(alertCalls[0]!.opts?.dedupKey).toBe('ai:rewrite_failed:drop_headline_rewrite');
+    expect(alertCalls[0]!.opts?.dedupTtlMs).toBe(60 * 60_000);
+  });
+
+  it('no alerter wired → rewrite_failed does not throw (fire-and-forget)', async () => {
+    const state = rewriteState();
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+    const invoke = (async () => {
+      throw new Error('model 503');
+    }) as unknown as typeof fabricInvoke;
+    // No alerter in deps. The handler must not throw on the catch path.
+    await expect(dropPublishHandler(row(), { supabase, logger, invoke })).resolves.toBeUndefined();
+    expect(state.newsTopicInserts).toHaveLength(1);
+  });
+
   it('rewrite OK but claim empty → headline updated; fact-check NOT enqueued', async () => {
     const state = rewriteState();
     const supabase = buildSupabase(state);

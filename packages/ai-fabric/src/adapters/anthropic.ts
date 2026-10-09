@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { Message } from '@anthropic-ai/sdk/resources/messages/messages.js';
-import { ProviderError } from '@diktat/shared';
+import { ProviderError, ValidationError } from '@diktat/shared';
 import { toToolSchema } from '../structured.js';
 import type { ZodTypeAny } from 'zod';
 import type { AdapterResult, ProviderEnv } from '../types.js';
@@ -116,10 +116,17 @@ export const anthropicAdapter = {
     if (schema) {
       const toolUse = response.content.find((block) => block.type === 'tool_use');
       const textBlockCount = response.content.filter((b) => b.type === 'text').length;
-      const textChars = response.content.reduce(
-        (n, b) => n + (b.type === 'text' ? b.text.length : 0),
-        0,
-      );
+      // `usage` object + `text_chars` were previously logged verbatim.
+      // Reduced to integer-only fields per security-reviewer PR #193
+      // Medium 1: future SDK field additions to `usage` (e.g. a `user_id`
+      // field) would otherwise silently start being logged; `text_chars`
+      // leaked the size of any text block the model returned alongside
+      // or instead of structured output, which can echo feed-derived
+      // content on a `no_tool_use_block` path.
+      const safeUsage = {
+        input_tokens: usage.input_tokens ?? 0,
+        output_tokens: usage.output_tokens ?? 0,
+      };
 
       if (!toolUse || toolUse.type !== 'tool_use') {
         // Instrumentation: a structured call that returned no tool_use block.
@@ -129,9 +136,8 @@ export const anthropicAdapter = {
             reason: 'no_tool_use_block',
             model,
             stop_reason: response.stop_reason,
-            usage,
+            usage: safeUsage,
             text_blocks: textBlockCount,
-            text_chars: textChars,
             tool_use_present: false,
           }),
         );
@@ -141,53 +147,60 @@ export const anthropicAdapter = {
         );
       }
 
-      try {
-        const output = schema.parse(toolUse.input) as never;
+      const parseResult = schema.safeParse(toolUse.input);
+      if (parseResult.success) {
         // Instrumentation: stop_reason + usage on the structured success path.
         console.info(
           JSON.stringify({
             event: 'anthropic.structured.ok',
             model,
             stop_reason: response.stop_reason,
-            usage,
+            usage: safeUsage,
           }),
         );
-        return { output, usd, latencyMs };
-      } catch (parseErr) {
-        // Instrumentation: the tool_use input failed Zod validation. Capture
-        // stop_reason, usage, any preamble text blocks, and SHAPE-ONLY
-        // metadata about the raw input (keys + size — never content). The
-        // raw input echoes feed-derived strings (source titles / summaries)
-        // and may include PII a hostile feed shipped before §11 scrubs it;
-        // logging the content leaks it into every downstream sink. Keys +
-        // size preserve the diagnostic signal — "did the model emit any
-        // fields at all? how big was the structured payload?" — without
-        // content exfil. (security-reviewer PR #191 M3.)
-        const toolInputKeys = Object.keys(toolUse.input ?? {});
-        const toolInputSize = (() => {
-          try {
-            return JSON.stringify(toolUse.input ?? {}).length;
-          } catch {
-            return -1;
-          }
-        })();
-        console.warn(
-          JSON.stringify({
-            event: 'anthropic.structured.fail',
-            reason: 'schema_parse',
-            model,
-            stop_reason: response.stop_reason,
-            usage,
-            text_blocks: textBlockCount,
-            text_chars: textChars,
-            tool_use_present: true,
-            raw_tool_input_keys: toolInputKeys,
-            raw_tool_input_size: toolInputSize,
-            parse_error: parseErr instanceof Error ? parseErr.message : String(parseErr),
-          }),
-        );
-        throw stampBilledUsd(parseErr, usd);
+        return { output: parseResult.data as never, usd, latencyMs };
       }
+
+      // Instrumentation on parse failure: structured, PII-free. Each
+      // issue carries only { path, code } — Zod's own `message` field
+      // embeds the received value (`"Expected string, received 12345
+      // at path foo.bar"`) and is dropped here (security-reviewer
+      // PR #193 Medium 2). The outer thrown error carries the same
+      // path/code list so callers can log it the same way; see
+      // `safeParseIssuesForLog` in structured.ts.
+      const issues = parseResult.error.issues.map((i) => ({
+        path: i.path.join('.'),
+        code: i.code,
+      }));
+      const toolInputKeys = Object.keys(toolUse.input ?? {});
+      const toolInputSize = (() => {
+        try {
+          return JSON.stringify(toolUse.input ?? {}).length;
+        } catch {
+          return -1;
+        }
+      })();
+      console.warn(
+        JSON.stringify({
+          event: 'anthropic.structured.fail',
+          reason: 'schema_parse',
+          model,
+          stop_reason: response.stop_reason,
+          usage: safeUsage,
+          text_blocks: textBlockCount,
+          tool_use_present: true,
+          raw_tool_input_keys: toolInputKeys,
+          raw_tool_input_size: toolInputSize,
+          parse_issues: issues,
+        }),
+      );
+      throw stampBilledUsd(
+        new ValidationError(
+          `anthropic: structured output failed schema (${issues.length} issue${issues.length === 1 ? '' : 's'})`,
+          { issues },
+        ),
+        usd,
+      );
     }
 
     const textBlocks = response.content

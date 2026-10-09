@@ -94,7 +94,21 @@ export const googleAdapter = {
       } catch (err) {
         throw new ValidationError(`google: response is not JSON: ${text.slice(0, 80)}`, err);
       }
-      return { output: schema.parse(parsed) as never, usd, latencyMs };
+      // safeParse (not .parse) so the thrown error carries only
+      // issue paths + codes, not received values. See security-
+      // reviewer PR #193 Medium 2.
+      const parseResult = schema.safeParse(parsed);
+      if (!parseResult.success) {
+        const issues = parseResult.error.issues.map((i) => ({
+          path: i.path.join('.'),
+          code: i.code,
+        }));
+        throw new ValidationError(
+          `google: structured output failed schema (${issues.length} issue${issues.length === 1 ? '' : 's'})`,
+          { issues },
+        );
+      }
+      return { output: parseResult.data as never, usd, latencyMs };
     }
     return { output: text as never, usd, latencyMs };
   },

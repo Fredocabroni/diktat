@@ -99,8 +99,23 @@ export const openaiAdapter = {
       } catch (err) {
         throw new ValidationError(`openai: response is not JSON: ${raw.slice(0, 80)}`, err);
       }
+      // safeParse (not .parse) so the thrown error carries only
+      // issue paths + codes, not received values. Received values
+      // echo model output which may contain feed-derived PII. See
+      // security-reviewer PR #193 Medium 2.
+      const parseResult = schema.safeParse(parsed);
+      if (!parseResult.success) {
+        const issues = parseResult.error.issues.map((i) => ({
+          path: i.path.join('.'),
+          code: i.code,
+        }));
+        throw new ValidationError(
+          `openai: structured output failed schema (${issues.length} issue${issues.length === 1 ? '' : 's'})`,
+          { issues },
+        );
+      }
       return {
-        output: schema.parse(parsed) as never,
+        output: parseResult.data as never,
         usd,
         latencyMs,
       };
