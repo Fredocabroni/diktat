@@ -231,6 +231,42 @@ begin
 end $$;
 
 -- -----------------------------------------------------------------------------
+-- T7 — Phantom-credit guard: direct service_role call with no backing
+--      opinion_shifts row MUST NOT credit progress. In the AFTER INSERT
+--      trigger context this branch is unreachable (v_shift_count >= 1
+--      always), so this is a direct-RPC-call sanity check.
+--      (security-reviewer PR #196 Medium — v2.)
+-- -----------------------------------------------------------------------------
+do $$
+declare
+  v_user_id uuid := 'a3333333-3333-3333-3333-333333333333';
+  v_fake_topic uuid := '00000000-0000-0000-0000-000000000000';
+  v_before_progress int;
+  v_after_progress  int;
+  v_result jsonb;
+begin
+  select coalesce(take5_progress, 0) into v_before_progress
+    from public.streaks where user_id = v_user_id;
+
+  -- Direct call with a topic the user has NOT shifted on today.
+  -- Must return error + leave progress unchanged.
+  select public.increment_take5_progress(v_user_id, v_fake_topic) into v_result;
+
+  if v_result ->> 'error' is distinct from 'no_shift_row' then
+    raise exception 'T7 FAIL: expected error=no_shift_row, got %', v_result;
+  end if;
+
+  select coalesce(take5_progress, 0) into v_after_progress
+    from public.streaks where user_id = v_user_id;
+  if v_after_progress <> v_before_progress then
+    raise exception 'T7 FAIL: phantom credit advanced progress %→%',
+      v_before_progress, v_after_progress;
+  end if;
+
+  raise notice 'T7 PASS: phantom-credit guard rejected direct call with no backing shift row';
+end $$;
+
+-- -----------------------------------------------------------------------------
 -- Note on concurrent-writer coverage (security-reviewer PR #196 Medium 2).
 -- -----------------------------------------------------------------------------
 -- Michael asked for a SQL test on "two concurrent shifts on different topics."

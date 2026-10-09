@@ -136,6 +136,27 @@ begin
     );
   end if;
 
+  -- Phantom-credit guard (security-reviewer PR #196 Medium — v2):
+  -- In the AFTER INSERT trigger context, v_shift_count is always ≥ 1
+  -- because the row that fired us is already visible. If a direct
+  -- service_role caller (backfill script, admin tool, test harness)
+  -- invokes this function with a (user, topic) pair that has no
+  -- opinion_shifts row for today, v_shift_count = 0 and the credit
+  -- path below would advance progress for a shift that never
+  -- happened. The docstring at the top of this function names the
+  -- trigger as the only legitimate caller; this guard enforces that
+  -- invariant in code with an auditable warning + an error return
+  -- rather than silently crediting.
+  if v_shift_count < 1 then
+    raise warning
+      'increment_take5_progress called with no opinion_shifts row for user=% topic=% today=%',
+      p_user_id, p_topic_id, v_today;
+    return jsonb_build_object(
+      'error', 'no_shift_row',
+      'local_date', v_today
+    );
+  end if;
+
   -- (4) First shift on this topic today-local — advance progress.
   --     Same reset-on-day-change semantics as the pre-P3.a function.
   update public.streaks
