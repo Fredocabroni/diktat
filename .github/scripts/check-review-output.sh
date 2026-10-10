@@ -9,29 +9,48 @@
 #   check-review-output.sh <output-file> <claude-exit-code>
 #
 # Outcome contract:
-#   exit 0 + stdout "ok"       — real review, verdict is NOT BLOCK
-#                                 (caller posts the body, check green).
-#   exit 0 + stdout "ok_block" — real review ending in a BLOCK verdict
-#                                 (caller posts the body AND exits 1 so
-#                                 the check turns red; the hard rule
-#                                 "a BLOCK verdict counts as blocking
-#                                 even if the check is green" is now
-#                                 enforced by the gate instead of
-#                                 relying on a human to read the body).
-#   exit 0 + stdout "empty"    — legitimate no-scope (caller skips post).
-#   exit 1 + stdout REASON     — upstream failure. REASON is a CONTROLLED
-#                                 one-line string the caller posts as the
-#                                 failure comment. REASON NEVER contains
-#                                 raw agent stdout — exfil hardening from
-#                                 PR #51 round-2 security-reviewer M1.
-#                                 The raw `$file` belongs in the workflow
-#                                 log only; the caller is responsible for
-#                                 echoing it there (not posting it as a
-#                                 comment).
-#                                 The sanitized first-line preview is
-#                                 ALSO emitted to stderr via an
-#                                 `::error::` annotation — log-only,
-#                                 never the comment (M2).
+#   exit 0 + stdout "ok"        — real review, verdict is PASS /
+#                                  APPROVE / NEEDS-USER-DECISION
+#                                  (caller posts the body, check green).
+#   exit 0 + stdout "ok_block"  — real review ending in a BLOCK verdict
+#                                  (caller posts the body AND exits 1 so
+#                                  the check turns red; the hard rule
+#                                  "a BLOCK verdict counts as blocking
+#                                  even if the check is green" is now
+#                                  enforced by the gate instead of
+#                                  relying on a human to read the body).
+#   exit 0 + stdout "ambiguous" — real-looking review with NO verdict
+#                                  marker detected in the tail scan
+#                                  window. Caller posts the body AND
+#                                  exits 1 so the check turns red
+#                                  (fail-closed per the ask on PR fix/
+#                                  reviewer-gate-multiline-block). The
+#                                  reviewer-agent prompts in
+#                                  .claude/agents/*.md all instruct
+#                                  "End with PASS or BLOCK", so a body
+#                                  with neither is a reviewer-agent
+#                                  misbehaviour and must not silently
+#                                  green-stamp the gate.
+#   exit 0 + stdout "empty"     — legitimate no-scope (caller skips
+#                                  post). This is the zero-byte /
+#                                  whitespace-only case; the scope-
+#                                  classifier gate upstream decides
+#                                  whether to run each reviewer, so an
+#                                  empty body IS the designed outcome
+#                                  on an unrelated PR.
+#   exit 1 + stdout REASON      — upstream failure. REASON is a CONTROLLED
+#                                  one-line string the caller posts as the
+#                                  failure comment. REASON NEVER contains
+#                                  raw agent stdout — exfil hardening from
+#                                  PR #51 round-2 security-reviewer M1.
+#                                  The raw `$file` belongs in the workflow
+#                                  log only; the caller is responsible for
+#                                  echoing it there (not posting it as a
+#                                  comment).
+#                                  The sanitized first-line preview is
+#                                  ALSO emitted to stderr via an
+#                                  `::error::` annotation — log-only,
+#                                  never the comment (M2).
 #
 # Detection — two independent gates, both must pass:
 #
@@ -49,6 +68,49 @@
 #       horizontal-rule dividers before the header (observed on the
 #       PR #46 copy-linter body).
 #
+# Verdict classification — three channels, each tried in order,
+# BLOCK beats PASS beats ambiguous:
+#
+#   (A) Explicit single-line verdict:
+#         `[**##_]*(Overall )?Verdict[: ]*[**_]*(BLOCK|PASS|APPROVE|NEEDS-USER-DECISION)`
+#       The verdict word and value are on the SAME line. This is the
+#       addiction-auditor convention ("Overall verdict: BLOCK") and the
+#       occasional security-reviewer shape ("**Verdict: BLOCK on H1.**").
+#
+#   (B) Trailing-line verdict:
+#         The LAST non-blank line of the review is bare BLOCK / PASS /
+#         APPROVE / NEEDS-USER-DECISION, optionally bold-decorated and
+#         with a trailing period. This is the convention in
+#         .claude/agents/security-reviewer.md and copy-linter.md ("End
+#         with PASS or BLOCK").
+#
+#   (C) Multi-line verdict (added in fix/reviewer-gate-multiline-block
+#       after #198 slipped a BLOCK verdict past the gate):
+#         A line that is JUST the word "Verdict" (optionally header-
+#         decorated, optionally "Overall "-prefixed), followed within 5
+#         non-blank lines by a VALUE line beginning with BLOCK / PASS /
+#         APPROVE / NEEDS-USER-DECISION. The copy-linter and security-
+#         reviewer agents sometimes emit this shape under some LLM
+#         temperatures:
+#
+#           ## OVERALL VERDICT
+#
+#           **BLOCK**
+#
+#           Two violations require resolution before merge.
+#
+#         The verdict value is NOT on the Verdict line and NOT the
+#         trailing line, so patterns (A) and (B) both miss. (C) catches
+#         it. The scan window is 5 non-blank lines to tolerate a short
+#         "## Verdict" header followed by markdown decorator noise
+#         (horizontal rules, etc.) before the value line.
+#
+#   Precedence: BLOCK beats PASS-family beats ambiguous. If a review
+#   emits BOTH a BLOCK marker AND a PASS marker (per-mechanic verdicts
+#   with a BLOCK on one mechanic and an APPROVE on another, with no
+#   explicit overall), BLOCK wins — the reviewer caught something, so
+#   the gate must turn red regardless of other mechanics' outcomes.
+#
 # Error-string matching exists ONLY to improve the failure message
 # (e.g. "credit exhausted, top up at console.anthropic.com"). Detection
 # itself is gate-based — anything that lacks a markdown header in the
@@ -64,6 +126,16 @@ claude_exit_code="${2:?claude exit code required}"
 # legitimate frontmatter / divider prefixes; small enough that
 # garbage bodies fail fast.
 HEADER_SCAN_LINES=10
+
+# Tail scan windows for the verdict channels. The explicit-single-line
+# and trailing-line scans look at the last 15 non-blank lines (so a
+# per-mechanic "verdict: BLOCK" high up in the body doesn't trip the
+# gate — the reviewer-agent prompts explicitly instruct "end with" the
+# overall verdict). The multi-line scan reads the FULL body because the
+# verdict-header-plus-value shape can land mid-body with explanatory
+# prose after it, as in the #198 miss that motivated this logic.
+TAIL_SCAN_LINES=15
+MULTILINE_LOOKAHEAD=5
 
 diagnose() {
   local prefix="$1"
@@ -161,64 +233,148 @@ header_line=$(awk -v limit="$HEADER_SCAN_LINES" '
   }
 ' "$file")
 
-if [ -n "$header_line" ]; then
-  # Real review. Classify verdict: BLOCK → "ok_block" (caller must
-  # exit 1 after posting so the check turns red); otherwise → "ok".
-  #
-  # The reviewer subagents (see .claude/agents/*.md) emit a verdict in
-  # one of two shapes:
-  #   (1) A standalone trailing line of just `BLOCK` (per "End with
-  #       PASS or BLOCK" in security-reviewer.md and copy-linter.md),
-  #       possibly bold-decorated.
-  #   (2) An explicit "Verdict: BLOCK" or "Overall verdict: BLOCK"
-  #       line (addiction-auditor.md uses "verdict (APPROVE | BLOCK |
-  #       NEEDS-USER-DECISION)" per-mechanic plus an overall verdict).
-  #
-  # Patterns:
-  #   - Explicit-verdict pattern: a line beginning with optional
-  #     markdown decoration, optional "overall ", the word "verdict",
-  #     optional ":", optional decoration, then the word "BLOCK".
-  #     Prose like "The verdict for this PR is: do not block merge"
-  #     does NOT match — the `^` anchor + leading-only decoration
-  #     prevents "The " from satisfying the lead.
-  #   - Trailing-line pattern: the LAST non-blank line of the body
-  #     is EXACTLY `BLOCK` (optionally bold-decorated, optionally
-  #     with a trailing period). Anything with words after `BLOCK`
-  #     (e.g. "BLOCK merge until X") doesn't match the trailing
-  #     pattern — the explicit pattern catches those if they're on
-  #     a verdict line.
-  #
-  # Scope: the explicit-verdict pattern scans ONLY the last 15 non-
-  # blank lines of the review. The reviewer agent prompts explicitly
-  # instruct to "end with" the overall verdict, so a per-mechanic
-  # finding like "mechanic X — verdict (BLOCK)" earlier in the body
-  # does NOT count. If a reviewer wants the gate to turn red, they
-  # must end the review with the verdict.
-  #
-  # Both scans use word-boundary matches (`\bBLOCK\b`), so
-  # "blockchain" / "unblock" / "blocker" / "code block" never trip
-  # the gate. "PASS" / "APPROVE" / "NEEDS-USER-DECISION" / anything
-  # else at the trailing position all classify as "ok".
-  TAIL_SCAN_LINES=15
-  tail_body=$(awk 'NF' "$file" | tail -n "$TAIL_SCAN_LINES")
-  explicit_block=$(printf '%s\n' "$tail_body" | grep -iE '^[[:space:]]*(\*\*|##? ?|_)*(overall[[:space:]]+)?verdict[[:space:]]*:?[[:space:]]*(\*\*|_)*[[:space:]]*BLOCK\b' || true)
+if [ -z "$header_line" ]; then
+  diagnose "claude -p exit 0 but no markdown header in first ${HEADER_SCAN_LINES} non-blank lines"
+  exit 1
+fi
 
-  trailing_line=$(awk 'NF {last=$0} END {print last}' "$file" | tr -d '[:space:]')
-  trailing_block=""
-  case "$trailing_line" in
-    "BLOCK"|"BLOCK."|"**BLOCK**"|"**BLOCK**."|"__BLOCK__"|"__BLOCK__.")
-      trailing_block="yes"
-      ;;
-  esac
+# ----------------------------------------------------------------------
+# Verdict classification. BLOCK beats PASS-family beats ambiguous.
+#
+# Each channel is a boolean flag; we evaluate all three for each
+# verdict family and then pick the highest-severity outcome. This keeps
+# the "BLOCK wins over PASS" rule explicit instead of relying on
+# scan-order coincidence.
+# ----------------------------------------------------------------------
 
-  if [ -n "$explicit_block" ] || [ -n "$trailing_block" ]; then
-    echo "ok_block"
-    exit 0
-  fi
+# The tail body (non-blank lines, last TAIL_SCAN_LINES of them) is the
+# input to channels (A) and (B). Non-blank reduction first so blank
+# lines don't eat into the window.
+tail_body=$(awk 'NF' "$file" | tail -n "$TAIL_SCAN_LINES")
+# The trailing non-blank line, whitespace-stripped. Trailing periods
+# are tolerated via the case-match patterns below.
+trailing_line=$(awk 'NF {last=$0} END {print last}' "$file" | tr -d '[:space:]')
+# The full non-blank body is the input to channel (C). Blank lines are
+# collapsed so the lookahead counts non-blank lines, matching the way
+# agents emit "## Verdict\n\n**BLOCK**\n...".
+full_nonblank=$(awk 'NF' "$file")
 
+# --- Channel (A): explicit single-line verdict -------------------------
+# Match `(**|##|_)*(Overall )?Verdict[: ]*(**|_)*VALUE`. Case-insensitive.
+# BLOCK: original pattern from the prior script.
+if printf '%s\n' "$tail_body" | grep -iqE '^[[:space:]]*(\*\*|##? ?|_)*(overall[[:space:]]+)?verdict[[:space:]]*:?[[:space:]]*(\*\*|_)*[[:space:]]*BLOCK\b'; then
+  explicit_block="yes"
+else
+  explicit_block=""
+fi
+# PASS family — symmetric to the BLOCK channel. `APPROVE WITH NOTES`
+# matches `APPROVE\b` because `\b` is satisfied by the space after
+# APPROVE.
+if printf '%s\n' "$tail_body" | grep -iqE '^[[:space:]]*(\*\*|##? ?|_)*(overall[[:space:]]+)?verdict[[:space:]]*:?[[:space:]]*(\*\*|_)*[[:space:]]*(PASS|APPROVE|NEEDS-USER-DECISION)\b'; then
+  explicit_pass="yes"
+else
+  explicit_pass=""
+fi
+
+# --- Channel (B): trailing-line verdict --------------------------------
+# EXACTLY the verdict word (optionally bold / italic / with trailing
+# period). The whitespace-strip above means we match against the
+# compacted form.
+case "$trailing_line" in
+  "BLOCK"|"BLOCK."|"**BLOCK**"|"**BLOCK**."|"__BLOCK__"|"__BLOCK__.")
+    trailing_block="yes"
+    ;;
+  *)
+    trailing_block=""
+    ;;
+esac
+case "$trailing_line" in
+  "PASS"|"PASS."|"**PASS**"|"**PASS**."|"__PASS__"|"__PASS__.")
+    trailing_pass="yes"
+    ;;
+  "APPROVE"|"APPROVE."|"**APPROVE**"|"**APPROVE**."|"__APPROVE__"|"__APPROVE__.")
+    trailing_pass="yes"
+    ;;
+  "NEEDS-USER-DECISION"|"NEEDS-USER-DECISION."|"**NEEDS-USER-DECISION**"|"**NEEDS-USER-DECISION**.")
+    trailing_pass="yes"
+    ;;
+  *)
+    trailing_pass="${trailing_pass:-}"
+    ;;
+esac
+
+# --- Channel (C): multi-line verdict -----------------------------------
+# A VERDICT HEADER line (just the word verdict, optionally header-
+# decorated) followed within MULTILINE_LOOKAHEAD non-blank lines by a
+# VALUE LINE that begins with the verdict word.
+#
+# Verdict header pattern — the line IS the word "verdict" (optionally
+# "overall "-prefixed, optionally `## ` / `**` / `_` decorated), with
+# nothing else on it. The regex explicitly RULES OUT a trailing BLOCK/
+# PASS/APPROVE on the same line (that would be channel A, not C) by
+# anchoring $ right after the decoration.
+#
+# Value line pattern — line BEGINS WITH the verdict word (optionally
+# bold / italic decorated). "**BLOCK**" at line start matches; prose
+# like "The committee may block" does NOT because "The" is first.
+#
+# Portability note: BSD awk (macOS default) does NOT support
+# `IGNORECASE`, which GNU awk (Ubuntu CI) does. For a case-insensitive
+# scan that works on both runners, we lowercase the body upstream via
+# `tr` and keep all awk regex patterns in lowercase.
+#
+# Implementation: scan the full non-blank body in awk. State = how many
+# more lines to look for a value match. State decrements each line
+# until it hits 0 or a value match fires.
+full_nonblank_lower=$(printf '%s' "$full_nonblank" | tr '[:upper:]' '[:lower:]')
+# The header pattern tolerates an optional numbered-list prefix
+# (`4. `, `1. `) after the ATX hashes so a heading like
+# `### 4. Overall Verdict` matches — observed on real security-reviewer
+# bodies that number their sections.
+multiline_block=$(printf '%s\n' "$full_nonblank_lower" | awk -v lookahead="$MULTILINE_LOOKAHEAD" '
+  BEGIN { waiting = 0 }
+  /^[[:space:]]*(#{1,6}[[:space:]]+)?([0-9]+\.[[:space:]]+)?(\*\*|_)*(overall[[:space:]]+)?verdict(\*\*|_)*[[:space:]]*$/ {
+    waiting = lookahead
+    next
+  }
+  waiting > 0 {
+    waiting--
+    if (match($0, /^[[:space:]]*(\*\*|_)*block([^[:alnum:]_]|$)/)) {
+      print "yes"
+      exit
+    }
+  }
+')
+multiline_pass=$(printf '%s\n' "$full_nonblank_lower" | awk -v lookahead="$MULTILINE_LOOKAHEAD" '
+  BEGIN { waiting = 0 }
+  /^[[:space:]]*(#{1,6}[[:space:]]+)?([0-9]+\.[[:space:]]+)?(\*\*|_)*(overall[[:space:]]+)?verdict(\*\*|_)*[[:space:]]*$/ {
+    waiting = lookahead
+    next
+  }
+  waiting > 0 {
+    waiting--
+    if (match($0, /^[[:space:]]*(\*\*|_)*(pass|approve|needs-user-decision)([^[:alnum:]_]|$)/)) {
+      print "yes"
+      exit
+    }
+  }
+')
+
+# --- Collapse the channels ---------------------------------------------
+if [ -n "$explicit_block" ] || [ -n "$trailing_block" ] || [ -n "$multiline_block" ]; then
+  echo "ok_block"
+  exit 0
+fi
+
+if [ -n "$explicit_pass" ] || [ -n "$trailing_pass" ] || [ -n "$multiline_pass" ]; then
   echo "ok"
   exit 0
 fi
 
-diagnose "claude -p exit 0 but no markdown header in first ${HEADER_SCAN_LINES} non-blank lines"
-exit 1
+# No verdict channel fired. The review has a header and non-trivial
+# content but neither a BLOCK nor a PASS-family marker — ambiguous.
+# Caller treats this like ok_block (post body, exit 1): the gate
+# fail-closes on reviewer-agent misbehaviour rather than silently
+# green-stamping a verdictless body.
+echo "ambiguous"
+exit 0
