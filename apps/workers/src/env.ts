@@ -43,6 +43,16 @@ const envSchema = z.object({
   VAPID_PRIVATE_KEY: z.string().default(''),
   VAPID_SUBJECT: z.string().default(''),
 
+  // GDELT trending-topic adapter (PR fix/gdelt-ingestor). The adapter is
+  // registered in DEFAULT_ADAPTERS unconditionally, but its `fetch()` is
+  // a no-op (returns []) unless this flag is true AND a GDELT API probe
+  // has been proven locally against live GDELT first. Same gated-shadow-
+  // ship pattern as PRIVY_ENABLED / FACT_CHECK_ENABLED. Keep false in
+  // Railway until the operator top-ups Anthropic credits (so the full
+  // enablement pipeline — including the AI prompts that consume GDELT
+  // candidates — is observable end to end).
+  GDELT_ENABLED: boolFromString.default(false),
+
   // Telegram alerting (optional). Missing = alerter disabled — NEVER a boot
   // failure. Kept lenient (plain optional strings, no regex, unlike the api's
   // chat-id validation) precisely because the alerter is what REPORTS a boot
