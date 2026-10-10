@@ -941,6 +941,95 @@ describe('dropPublishHandler — A4 fact explainer', () => {
     ).toBeDefined();
   });
 
+  // The Zod schema's refine on source_url is the enforcement point;
+  // the production adapter runs it via safeParse at invoke time. These
+  // unit tests exercise the schema directly (the fakeInvoke above does
+  // not run safeParse). PR #198 HIGH #2.
+  it('factExplainerSafeParse rejects javascript: source_url', () => {
+    const result = __testing.factExplainerSafeParse({
+      for_summary: 'proponents argue...',
+      against_summary: '',
+      source_url: 'javascript:alert(1)',
+      posture: 'single_sided',
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('factExplainerSafeParse rejects http:// source_url (https-only)', () => {
+    const result = __testing.factExplainerSafeParse({
+      for_summary: 'proponents argue...',
+      against_summary: '',
+      source_url: 'http://example.gov/plain',
+      posture: 'single_sided',
+    });
+    expect(result.success).toBe(false);
+  });
+
+  // L2 coverage (security-reviewer PR #199 round 2) — the write-path
+  // Zod schema must mirror the read-path parseFactExplainer schemes.
+  // These keep the two layers from drifting.
+  it('factExplainerSafeParse rejects data: source_url', () => {
+    const result = __testing.factExplainerSafeParse({
+      for_summary: 'proponents argue...',
+      against_summary: '',
+      source_url: 'data:text/html,<script>alert(1)</script>',
+      posture: 'single_sided',
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('factExplainerSafeParse rejects protocol-relative source_url', () => {
+    const result = __testing.factExplainerSafeParse({
+      for_summary: 'proponents argue...',
+      against_summary: '',
+      source_url: '//example.gov',
+      posture: 'single_sided',
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('factExplainerSafeParse rejects NBSP-prefixed https URL', () => {
+    const result = __testing.factExplainerSafeParse({
+      for_summary: 'proponents argue...',
+      against_summary: '',
+      source_url: ' https://example.gov',
+      posture: 'single_sided',
+    });
+    expect(result.success).toBe(false);
+  });
+
+  // L1 (round 2): scheme-only `https://` has 8 chars, no host.
+  // Satisfies startsWith but fails the min-length-11 guard.
+  it('factExplainerSafeParse rejects scheme-only https:// (no host)', () => {
+    const result = __testing.factExplainerSafeParse({
+      for_summary: 'proponents argue...',
+      against_summary: '',
+      source_url: 'https://',
+      posture: 'single_sided',
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('factExplainerSafeParse accepts empty source_url (empty-escape-hatch path)', () => {
+    const result = __testing.factExplainerSafeParse({
+      for_summary: 'proponents argue...',
+      against_summary: '',
+      source_url: '',
+      posture: 'single_sided',
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('factExplainerSafeParse accepts https source_url', () => {
+    const result = __testing.factExplainerSafeParse({
+      for_summary: 'proponents argue...',
+      against_summary: '',
+      source_url: 'https://www.congress.gov/example',
+      posture: 'single_sided',
+    });
+    expect(result.success).toBe(true);
+  });
+
   it('contested posture: full both-sides payload persisted', async () => {
     const state = rewriteState();
     const supabase = buildSupabase(state);

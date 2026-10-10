@@ -131,7 +131,22 @@ const FactExplainerPostureSchema = z.enum(['contested', 'single_sided', 'empiric
 const FactExplainerSchema = z.object({
   for_summary: z.string().max(1000, 'for_summary exceeds 1000 chars.'),
   against_summary: z.string().max(1000, 'against_summary exceeds 1000 chars.'),
-  source_url: z.string().max(2000, 'source_url exceeds 2000 chars.'),
+  // Scheme-constrained: empty OR https:// — never javascript:, data:, or
+  // http: (security-reviewer PR #198 HIGH #2 — stored XSS vector when
+  // DropCard renders this inside an anchor). The empty branch covers the
+  // "could not neutralize" escape hatch.
+  //
+  // Also require a minimum length of 11 so the scheme-only string
+  // `https://` (8 chars, no host) is rejected — it satisfies the prefix
+  // check but is an integrity defect, not XSS (security-reviewer PR
+  // #199 round 2 L1). 11 covers `https://a.b` and anything shorter
+  // cannot be a valid primary source.
+  source_url: z
+    .string()
+    .max(2000, 'source_url exceeds 2000 chars.')
+    .refine((v) => v === '' || (v.startsWith('https://') && v.length >= 11), {
+      message: 'source_url must be empty or a valid https:// URL (min length 11)',
+    }),
   posture: FactExplainerPostureSchema,
 });
 type FactExplainerOutput = z.infer<typeof FactExplainerSchema>;
@@ -162,10 +177,32 @@ const DOMINANCE_RATIO = 2.0;
  *  LLM-controlled title/url) AND the operand of the fact-check
  *  orchestrator's user prompt. Security-reviewer PR #191 Low 6 +
  *  PR #193 Medium 1. */
+/** Produce a diagnostic digest from an AI-invoke error that is safe to
+ *  log structurally. For Zod parse failures, flatten `issues` to
+ *  `code:path` pairs so operators can see which field drifted without
+ *  the invalid value echoing into the log (a Zod .refine failure
+ *  includes `received` by default — if the LLM returned a source-title
+ *  fragment as source_url, that fragment lands in the message).
+ *  Everything else goes through scrubMessage. Security-reviewer PR
+ *  #199 round 2 M3. */
+function aiErrorDigest(err: unknown): string {
+  if (err instanceof z.ZodError) {
+    return err.issues.map((i) => `${i.code}:${i.path.join('.') || '<root>'}`).join(', ');
+  }
+  return scrubMessage(err instanceof Error ? err.message : String(err));
+}
+
 function sanitizeClaimContextField(raw: string): string {
+  // Match the sanitize-field pattern from fact-explainer.ts / drop-
+  // headline.ts: C0/C1 + bidi overrides + Unicode tag block. The
+  // string flows into fact-check-orchestrator's user prompt, so the
+  // same prompt-injection surface applies. Security-reviewer PR #199
+  // MEDIUM #1.
   // eslint-disable-next-line no-control-regex
-  const stripped = raw.replace(/[\u0000-\u001F\u007F-\u009F]/g, ' ');
-  return stripped.replace(/\s+/g, ' ').trim().slice(0, 2000);
+  const stripControl = raw.replace(/[\u0000-\u001F\u007F-\u009F‪-‮⁦-⁩]/g, ' ');
+
+  const stripTags = stripControl.replace(/[\uDB40][\uDC00-\uDC7F]/g, ' ');
+  return stripTags.replace(/\s+/g, ' ').trim().slice(0, 2000);
 }
 
 // ---------------------------------------------------------------------------
@@ -572,11 +609,11 @@ async function rewriteHeadlineSafely(
     });
     return result.output as DropHeadlineRewriteOutput;
   } catch (err) {
-    const message = scrubMessage(err instanceof Error ? err.message : String(err));
+    const issueDigest = aiErrorDigest(err);
     deps.logger.warn({
       event: 'drop_publish.rewrite_failed',
       candidateId: candidate.id,
-      message,
+      issueDigest,
     });
     // Telegram alert — the 14-day silent-degradation incident
     // (Railway workers running without ANTHROPIC_API_KEY / OPENAI_API_KEY)
@@ -585,10 +622,16 @@ async function rewriteHeadlineSafely(
     // 1 hour per task via dedupKey; the global rate cap in makeAlerter
     // is the final safety net. Fire-and-forget so a Telegram outage
     // never affects the Drop pipeline.
+    //
+    // Body is a static stub (security-reviewer PR #199 MEDIUM #3):
+    // scrubMessage covers PII patterns, but Zod parse-failure and
+    // provider-error strings can embed raw source-title fragments
+    // from the user prompt. The internal warn log keeps the scrubbed
+    // message; the alerter sees an operator-facing pointer only.
     void deps.alerter?.alert(
       'error',
       'drop_publish rewrite_failed',
-      `candidate=${candidate.id} · ${message}`.slice(0, 500),
+      `candidate=${candidate.id} · see workers log for message`,
       {
         dedupKey: 'ai:rewrite_failed:drop_headline_rewrite',
         dedupTtlMs: 60 * 60_000,
@@ -648,16 +691,22 @@ async function generateFactExplainerSafely(
     }
     return output;
   } catch (err) {
-    const message = scrubMessage(err instanceof Error ? err.message : String(err));
+    const issueDigest = aiErrorDigest(err);
     deps.logger.warn({
       event: 'drop_publish.fact_explainer_failed',
       candidateId: candidate.id,
-      message,
+      issueDigest,
     });
+    // The alert body is static — scrubMessage covers PII-tagged
+    // patterns, but Zod parse-failure messages can embed raw model-
+    // output fragments (including source-title text that was fed into
+    // the prompt). Keep the raw message in the internal log only;
+    // the alerter sees a short, operator-facing stub.
+    // (security-reviewer PR #198 MEDIUM #3.)
     void deps.alerter?.alert(
       'error',
       'drop_publish fact_explainer_failed',
-      `candidate=${candidate.id} · ${message}`.slice(0, 500),
+      `candidate=${candidate.id} · see workers log for message`,
       {
         dedupKey: 'ai:failed:topic_fact_explainer',
         dedupTtlMs: 60 * 60_000,
@@ -747,4 +796,12 @@ export const __testing = {
   todayDropAtEt,
   CLUSTER_BLOCK_DAYS,
   DOMINANCE_RATIO,
+  // Expose a safeParse wrapper rather than the live schema object
+  // (security-reviewer PR #199 LOW #3). Tests can observe the
+  // refine() behaviour without the schema's full z.ZodObject surface
+  // leaking into the test seam — a `.parse` or `.extend` call-site
+  // in a test would start to look load-bearing and get mimicked
+  // elsewhere. Returns { success, data?, error? } to mirror Zod's
+  // native safeParse shape.
+  factExplainerSafeParse: (value: unknown) => FactExplainerSchema.safeParse(value),
 };
