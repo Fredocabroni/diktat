@@ -1,10 +1,12 @@
-# Phase 5 — Launch shape (recon + A1-A5 proposals)
+# Phase 5 — Launch shape (recon + A1-A6 proposals)
 
 Written for: operator (Michael), deciding what to accept before anything is built.
 
-Scope — the operator-fixed shape of the soft launch (~50 users), the architect proposals (A1-A5) layered on top, and a revised build order marking what blocks launch and what ships after.
+Scope — the operator-fixed shape of the soft launch (~50 users), the architect proposals (A1-A6) layered on top, and a revised build order marking what blocks launch and what ships after.
 
 Read-only recon through today's codebase. No code changed. No prod writes.
+
+**2026-10-10 update:** A6 (Debate question) added after the live card shipped a declarative-fact rewrite above the two vote buttons. A4 Fact explainer ships via #198 (merged) + #199 (fast-follow). Build order revised: GDELT → A6 → P6 → P2.b+auto-advance → other-topics promotion → A3 → A2 → A1 → P1.
 
 ---
 
@@ -220,6 +222,32 @@ Flow:
 
 **Migrations needed:** yes.
 
+### A6 — Debate question (architect proposal, operator-approved 2026-10-10)
+
+**Why.** The current live cards sometimes rewrite a procedural headline into a declarative fact — e.g. a Senate vote becomes `"HR-1234 passes 52-48"` — and surface it directly above two voting buttons. A voter who taps a button on a factual statement is agreeing to a fact, not expressing a stance. The result reads as voting on the news instead of voting on an opinion.
+
+**Shape.** `drop_headline_rewrite` gains a third output field: `debate_question`. The ai-fabric task returns the question (if a fair one exists) alongside the existing `headline` and `summary`. The DropCard renders the question **above** the two stance buttons; the headline becomes the context line above the question.
+
+Shape — the prompt contract (new §12, slotted after the §11 real-people clause in `drop-headline.ts`):
+
+- Must be a yes/no question answerable by "agree" or "disagree".
+- Must be fair to both sides (no leading voice, no editorial hedging — same §1 NEUTRALIZE VOICE rule).
+- Must preserve §11 real-people framing — pending-action framings carry over verbatim.
+- If no fair question exists for this topic (e.g. a BLS data release, a procedural non-controversy), return an empty string. The orchestrator interprets empty as "skip this item" — the Drop is NOT published. **Pairs with P1 (no raw-title fallback):** empty-question + P1 together guarantee the Drop never shows a declarative fact as the vote prompt.
+
+**Schema.** No new tables. The question is stored on `news_topics` as a new nullable column `debate_question text` (char_length 10..200). Written atomically with `headline` + `summary` by the existing drop-publish RPC path.
+
+**Migration:** 1 new SQL file — `ALTER TABLE news_topics ADD COLUMN debate_question text` + a CHECK on length. Timestamp per the operator's reserved range for A6: `20261013100000`.
+
+**Risks:**
+
+- **Empty-question coverage holes.** The question field is the first prompt output on which a null (empty) is a hard "skip the Drop" signal, not a soft fallback. Watch the first week's Drop skip rate; if the model emits empty on more than ~10% of candidates, the prompt is over-rejecting. Mitigation: fixture testing before merge (operator-prescribed 8 §11 fixtures + 5 real recent drop titles — in the A6 PR body).
+- **Posture collision with A4.** A4's fact_explainer `posture` field classifies the topic as `contested` / `single_sided` / `empirical`. A6's `debate_question` should be absent (empty) on single_sided and empirical topics by definition, and present on contested. Keep the two outputs independent in the prompt (don't cross-reference) so one failing doesn't drag the other.
+
+**Operator-prescribed validation (A6 PR):** run the 8 §11 fixtures + 5 recent live drop titles once locally against the real `drop_headline_rewrite` model; post outputs (input → question) in the PR description.
+
+**Migrations needed:** yes (1).
+
 ### A5 — Campus (post-launch)
 
 **Shape.** Verify school via email domain against a seed list of accepted TLDs + known domains (`.edu`, `*.ac.uk`, specific private-institution domains). Users opt-in; the verified campus becomes a profile field. Topic voting + comments gain a per-campus aggregate alongside the global aggregate. "Campus vs campus" ranked by **participation count**, not stance ratio (operator direction).
@@ -238,15 +266,19 @@ Weekly "most persuasive" award: top-5 `argument_score` deltas across the week, p
 
 ### Launch-required (in order)
 
-1. **A4 Fact explainer** — single-file prompt + one migration + drop-publish wiring. Lowest schema surface. **Why first:** gives the Drop the "neutral both-sides + source" shape before comments open on it. Also the prompt pattern established here (reusing §11) is the template for A2/A3's prompts.
+Revised 2026-10-10 after the live card showed a declarative-fact rewrite above the vote buttons. **A6 (debate question) now blocks every other new launch surface** — nothing new ships until the voter is reading a yes/no question, not a factual claim.
 
-2. **P6 vote-split RPC (`<5` hide)** — one SECURITY DEFINER RPC + one migration + feed.list extension. Blocks nothing on content; adds post-vote feedback. **Why early:** auto-advance (next) only makes sense once there's SOMETHING to show the user before advancing.
+A4 Fact explainer is live via #198 (merged 2026-10-10) + #199 (A4 security fixes fast-follow, ready for merge).
 
-3. **P2.b + auto-advance (combined)** — Take 5 dot row + auto-advance to next topic after stance. One web PR + a 1-param addition to `feed.list` (`excludeTopicIds`). **Why bundled:** both live in `DropFeedClient`; shipping separately duplicates the state-machine edit.
+1. **GDELT ingestor** — new worker + new candidate source in `news_topics_candidates`. Trend score = number of distinct outlets covering the same story in the window; big viral stories and high-profile cases rank first. Primary sources accept `.gov`, court records / filings, official agency / police statements; reject items with no primary. SSRF validation on source_url (scheme allowlist https, no private IPs / localhost, no redirects to them). §11 real-people rules apply downstream (through drop-publish's existing drop_headline_rewrite path). **Why first:** auto-advance's "next" needs something to advance to; A6 needs a steady supply of candidate topics to exercise the question prompt against. Can also absorb M1 (the `headline_rewritten` boolean on `news_topics`) if small.
 
-4. **GDELT ingestor** — new worker + new candidate source in `news_topics_candidates`. **Why here:** auto-advance's "next" needs something to advance to. GDELT fills the pool.
+2. **A6 Debate question** — adds `debate_question` to the drop_headline_rewrite output + card display above the two buttons; skip the Drop entirely if no fair question emerges (pairs with P1 — see "parallel tracks" below). Follows the §11 real-people framework reused in A4. **Why second:** the Drop surface is the voter's primary surface; nothing else should ship until it's framed as a question.
 
-5. **"Other topics" feed shape (P4.a-ish)** — nightly job promoting top-N runners-up to `news_topics` with `is_drop=false`. The home feed below the hero reads these. **Why after GDELT:** depends on the broadened candidate pool.
+3. **P6 vote-split RPC (`<5` hide)** — one SECURITY DEFINER RPC + one migration + feed.list extension. Blocks nothing on content; adds post-vote feedback. **Why after A6:** post-vote feedback only makes sense once there's an actual vote (not an acknowledgement of a fact).
+
+4. **P2.b + auto-advance (combined)** — Take 5 dot row + auto-advance to next topic after stance. One web PR + a 1-param addition to `feed.list` (`excludeTopicIds`). **Why bundled:** both live in `DropFeedClient`; shipping separately duplicates the state-machine edit.
+
+5. **"Other topics" feed shape (P4.a-ish)** — nightly job promoting top-N runners-up to `news_topics` with `is_drop=false`. **Also calls the fact-explainer task** (same task from A4, per operator decision 4). The home feed below the hero reads these. **Why after GDELT + A6:** depends on the broadened candidate pool and on the question prompt being live.
 
 6. **A3 comment safety infrastructure** — tables + report/block/rate-limit + `comment_moderate` ai-fabric task. **Why before A2/A1:** safety is the floor; the steelman flow (A2) and best-argument scoring (A1) depend on comments existing and being safe.
 
@@ -254,11 +286,13 @@ Weekly "most persuasive" award: top-5 `argument_score` deltas across the week, p
 
 8. **A1 best-argument credit** — `comment_views` + `comment_credits` + the SECURITY DEFINER credit RPC + the AFTER INSERT trigger on `opinion_shifts`. **Why last launch-required:** depends on A2/A3's comment surface + depends on P6's "post-vote" moment to render "best argument" to the voter.
 
+9. **P1 (no raw-title fallback)** — enforce "either rewrite or skip" at the drop-publish level. **Why last launch-required and not deferred post-launch:** A6 already triggers skips on no-fair-question; P1 extends that invariant to no-rewrite scenarios. Both together guarantee the voter never sees a raw source title with a vote prompt attached.
+
 ### Also-launch (parallel tracks, no ordering dependency)
 
+- **A4 Fact explainer** — live via #198 + #199.
 - **P5** (real-people clause) — already live post-#191.
 - **P3.a** (distinct-topic Take 5) — already live post-#196.
-- **P1** (no raw-title fallback) — hold until the GDELT pool is live (shipping as "no Drop ever" is the risk). After step 4 above, land it.
 - **P2.a** (stance-selected visual) — already live post-#196.
 - **Boot-time provider-key audit + rewrite_failed alerts** — already live post-#194.
 
@@ -277,17 +311,20 @@ Slider voting, "made me think" ranking, views-over-time profile, shareable resul
 
 ## Migrations summary
 
-The launch-required work introduces **~6 new migrations**, in order:
+A4's two migrations are applied (`20261012000000` from #198; `20261012010000` pending in #199). The remaining launch-required work introduces **~7 new migrations**, in order. Timestamps are pre-reserved per the overnight-run instructions to avoid collisions:
 
-1. `20261012000000_fact_explainer_column.sql` — add `fact_explainer jsonb` + `fact_explainer_generated_at timestamptz` to `news_topics`.
-2. `20261012010000_topic_vote_split_rpc.sql` — SECURITY DEFINER `topic_vote_split(topic_id)` RPC with `min_hit` privacy threshold.
-3. `20261012020000_other_topics_promotion.sql` — adds `is_drop=false` candidate promotion job state + indexes on `news_topics (drop_at, is_drop)`.
-4. `20261012030000_comments_tables.sql` — `topic_comments`, `comment_reports`, `blocked_users`, `argument_score` on `users`. RLS: read-public on comments; write via RPC only.
-5. `20261012040000_pending_replies_steelman.sql` — `pending_replies` queue + columns on `topic_comments` for steelman fields.
-6. `20261012050000_comment_views_credits.sql` — `comment_views` (append-only), `comment_credits`, SECURITY DEFINER `credit_comment_if_shifted` RPC + AFTER INSERT trigger on `opinion_shifts` that scans recent views.
-7. Forward-compat: `20261012060000_users_campus_column.sql` — nullable `users.campus` column; no behavior.
+| #              | File                                          | Purpose                                                                                                                                       | Range                  |
+| -------------- | --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- |
+| 1              | `20261013000000_gdelt_candidates.sql`         | GDELT candidate columns + `news_adapter_health` row shape                                                                                     | GDELT (20261013000000) |
+| 2              | `20261013100000_debate_question_column.sql`   | `news_topics.debate_question text` + CHECK                                                                                                    | A6 (20261013100000)    |
+| 3              | `20261013200000_topic_vote_split_rpc.sql`     | SECURITY DEFINER `topic_vote_split(topic_id)` with `min_hit` privacy threshold                                                                | P6                     |
+| 4              | `20261013300000_other_topics_promotion.sql`   | `is_drop=false` promotion job state + indexes                                                                                                 | Other topics           |
+| 5              | `20261013400000_comments_tables.sql`          | `topic_comments`, `comment_reports`, `blocked_users`, `argument_score`; RLS read-public, write via RPC only                                   | A3                     |
+| 6              | `20261013500000_pending_replies_steelman.sql` | `pending_replies` queue + steelman fields                                                                                                     | A2                     |
+| 7              | `20261013600000_comment_views_credits.sql`    | `comment_views` (append-only), `comment_credits`, SECURITY DEFINER `credit_comment_if_shifted` RPC + AFTER INSERT trigger on `opinion_shifts` | A1                     |
+| forward-compat | `20261013700000_users_campus_column.sql`      | nullable `users.campus` column, no behavior                                                                                                   | A5 forward-compat      |
 
-All timestamps > current prod max `20261011000000` (P3.a). Each ships in its own PR; schema-reviewer + security-reviewer gates on each.
+All timestamps > current prod max once #199 lands (`20261012010000`). Each ships in its own PR; schema-reviewer + security-reviewer gates on each. Reserved slots in the `20261013*` range for GDELT (`_000000` to `_099999`) and A6 (`_100000` to `_199999`) carry some slack for interim fixup migrations if either PR needs a split-into-two-files pattern (see PR #199's MEDIUM #2 comment for the pattern on high-write tables).
 
 ---
 
@@ -301,6 +338,7 @@ Operator responses to the open questions below. All build PRs must honor these.
 4. **A4 explainer generation moment = drop-publish AND other-topic promotion.** Both pipelines call the ai-fabric task. If generation fails, the topic still ships but with `fact_explainer = null` and the UI falls through to the raw primary-source link.
 5. **A5 campus verification = email domain only, post-launch.** Launch adds the nullable `users.campus` column forward-compat; verification wiring ships post-launch.
 6. **"Other topics" cadence = up to 10/day, only items that clear the GDELT trend bar.** No filler. If the trending pool is thin on a given day, the feed renders fewer than 10 rather than padding with sub-threshold candidates.
+7. **A6 (Debate question)** — approved as architect proposal. Replaces the "live card asked people to vote on a fact" shape by generating a yes/no question for each Drop; empty-question → skip the Drop. Pairs with P1. Build order moves A6 to immediately-after-GDELT (the question needs a steady supply of fresh candidate topics to prove the empty-skip rate is in bounds).
 
 ### Additional launch rule — COMMENTS_ENABLED kill-switch
 
