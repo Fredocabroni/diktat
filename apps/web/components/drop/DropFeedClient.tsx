@@ -39,6 +39,14 @@ interface DropTopic {
   /** User's latest stance on this topic from feed.list. null = user
    *  hasn't shifted on this topic yet. (P2.a server-side load.) */
   readonly userStance: SelectedStance;
+  /** A4 fact explainer. Null when generation failed or row pre-dates
+   *  A4 — DropCard falls through to the raw primary_source_url link. */
+  readonly factExplainer: {
+    readonly for_summary: string;
+    readonly against_summary: string;
+    readonly source_url: string;
+    readonly posture: 'contested' | 'single_sided' | 'empirical';
+  } | null;
 }
 
 type DropState =

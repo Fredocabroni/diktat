@@ -115,6 +115,14 @@ const TABLE: Record<Task, RawDecision> = {
     primary: { provider: 'anthropic', model: MODELS.anthropic_sonnet_46 },
     fallbacks: [{ provider: 'openai', model: MODELS.openai_gpt5 }],
   },
+  topic_fact_explainer: {
+    // Same model + fallback shape as drop_headline_rewrite — same
+    // §11 neutrality contract, same forced-tool structured-output
+    // path, same fail-tolerance profile. The two tasks share the
+    // reliability properties we trust on Sonnet 4.6.
+    primary: { provider: 'anthropic', model: MODELS.anthropic_sonnet_46 },
+    fallbacks: [{ provider: 'openai', model: MODELS.openai_gpt5 }],
+  },
   x_post: {
     primary: { provider: 'anthropic', model: MODELS.anthropic_sonnet_46 },
     fallbacks: [{ provider: 'xai', model: MODELS.xai_grok }],

@@ -563,6 +563,8 @@ export type Database = {
           curation_mode: string | null
           dedup_cluster_id: string | null
           drop_at: string | null
+          fact_explainer: Json | null
+          fact_explainer_generated_at: string | null
           headline: string
           id: string
           is_block_exhausted: boolean
@@ -581,6 +583,8 @@ export type Database = {
           curation_mode?: string | null
           dedup_cluster_id?: string | null
           drop_at?: string | null
+          fact_explainer?: Json | null
+          fact_explainer_generated_at?: string | null
           headline: string
           id?: string
           is_block_exhausted?: boolean
@@ -599,6 +603,8 @@ export type Database = {
           curation_mode?: string | null
           dedup_cluster_id?: string | null
           drop_at?: string | null
+          fact_explainer?: Json | null
+          fact_explainer_generated_at?: string | null
           headline?: string
           id?: string
           is_block_exhausted?: boolean

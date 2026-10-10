@@ -24,7 +24,7 @@ describe('cost — caps', () => {
   it('per-task caps sum to the global ceiling exactly', () => {
     const sum = Object.values(PER_TASK_CAPS_USD).reduce((a, b) => a + b, 0);
     expect(sum).toBe(GLOBAL_CAP_USD);
-    expect(GLOBAL_CAP_USD).toBe(31); // +1 with drop_headline_rewrite
+    expect(GLOBAL_CAP_USD).toBe(32); // +1 with topic_fact_explainer (A4)
   });
 
   it('assertUnderCap allows spend under per-task cap', () => {
@@ -44,6 +44,7 @@ describe('cost — caps', () => {
     recordSpend('trivia_gen', PER_TASK_CAPS_USD.trivia_gen);
     recordSpend('news_rank', PER_TASK_CAPS_USD.news_rank);
     recordSpend('drop_headline_rewrite', PER_TASK_CAPS_USD.drop_headline_rewrite);
+    recordSpend('topic_fact_explainer', PER_TASK_CAPS_USD.topic_fact_explainer);
     recordSpend('clip_gen', PER_TASK_CAPS_USD.clip_gen);
     recordSpend('x_post', PER_TASK_CAPS_USD.x_post);
     recordSpend('fingerprint', PER_TASK_CAPS_USD.fingerprint);

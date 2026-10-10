@@ -329,6 +329,10 @@ describe('feedRouter.list', () => {
       // row exists in opinion_shifts. See the dedicated userStance
       // tests below.
       userStance: null,
+      // A4: factExplainer is null when the news_topics row has no
+      // explainer (fail path or pre-A4 row). Dedicated factExplainer
+      // round-trip tests below.
+      factExplainer: null,
     });
     // Query shape: select → eq(is_drop, true) → lte(drop_at, cursor) → order desc → limit 1.
     const ops = calls.ops.map((o) => o.op);
@@ -522,6 +526,98 @@ describe('feedRouter.list', () => {
     const caller = appRouter.createCaller(makeCtx({ db }));
     const result = await caller.feed.list();
     expect(result.topics[0]?.userStance).toBe('disagree');
+  });
+
+  it('factExplainer: contested payload round-trips with for + against + posture', async () => {
+    const db = listDb({
+      topics: [
+        {
+          ...DROP_ROW,
+          fact_explainer: {
+            for_summary: 'proponents argue...',
+            against_summary: 'opponents argue...',
+            source_url: 'https://www.sec.gov/example',
+            posture: 'contested',
+          },
+        },
+      ],
+      latestShiftByTopic: {},
+    });
+    const caller = appRouter.createCaller(makeCtx({ db }));
+    const result = await caller.feed.list();
+    expect(result.topics[0]?.factExplainer).toEqual({
+      for_summary: 'proponents argue...',
+      against_summary: 'opponents argue...',
+      source_url: 'https://www.sec.gov/example',
+      posture: 'contested',
+    });
+  });
+
+  it('factExplainer: single_sided empirical payload with empty against_summary', async () => {
+    const db = listDb({
+      topics: [
+        {
+          ...DROP_ROW,
+          fact_explainer: {
+            for_summary: 'the senate passed hr-1234 by a vote of 52-48.',
+            against_summary: '',
+            source_url: 'https://www.congress.gov/example',
+            posture: 'single_sided',
+          },
+        },
+      ],
+      latestShiftByTopic: {},
+    });
+    const caller = appRouter.createCaller(makeCtx({ db }));
+    const result = await caller.feed.list();
+    expect(result.topics[0]?.factExplainer?.posture).toBe('single_sided');
+    expect(result.topics[0]?.factExplainer?.against_summary).toBe('');
+  });
+
+  it('factExplainer: null when the column is null (A4 fail path OR pre-A4 row)', async () => {
+    const db = listDb({
+      topics: [{ ...DROP_ROW, fact_explainer: null }],
+      latestShiftByTopic: {},
+    });
+    const caller = appRouter.createCaller(makeCtx({ db }));
+    const result = await caller.feed.list();
+    expect(result.topics[0]?.factExplainer).toBeNull();
+  });
+
+  it('factExplainer: malformed stored JSON reads as null (defensive narrow)', async () => {
+    const db = listDb({
+      topics: [
+        {
+          ...DROP_ROW,
+          // Posture missing / wrong value — parseFactExplainer rejects.
+          fact_explainer: { for_summary: 'x', posture: 'nonsense' },
+        },
+      ],
+      latestShiftByTopic: {},
+    });
+    const caller = appRouter.createCaller(makeCtx({ db }));
+    const result = await caller.feed.list();
+    expect(result.topics[0]?.factExplainer).toBeNull();
+  });
+
+  it('factExplainer: empty for_summary reads as null (false-balance guard)', async () => {
+    const db = listDb({
+      topics: [
+        {
+          ...DROP_ROW,
+          fact_explainer: {
+            for_summary: '',
+            against_summary: 'but...',
+            source_url: 'https://example.gov/',
+            posture: 'contested',
+          },
+        },
+      ],
+      latestShiftByTopic: {},
+    });
+    const caller = appRouter.createCaller(makeCtx({ db }));
+    const result = await caller.feed.list();
+    expect(result.topics[0]?.factExplainer).toBeNull();
   });
 
   it('userStance: null and feed.list still succeeds when the shift lookup errors', async () => {
