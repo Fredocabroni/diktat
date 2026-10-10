@@ -291,14 +291,26 @@ All timestamps > current prod max `20261011000000` (P3.a). Each ships in its own
 
 ---
 
-## Open questions (operator decides before build)
+## Operator decisions (2026-10-10) — locked
 
-1. **A1 attribution window N.** 30 min is my pick (long enough to let a user read + reflect; short enough to be causally honest). 15 min / 60 min alternatives.
-2. **A2 steelman fail-closed vs 2-min fallback publish.** My pick: 2-min fallback with `moderation_status='ai_down_approved'` flag so an operator can audit. Pure fail-closed (reply never posts during AI outage) is the alternative — same shape as drop-headline's "no Drop today" posture.
-3. **A3 report threshold.** 3 reports → auto-hide pending operator review is my pick. 5 is more conservative; 1 is operator-only triage. Depends on expected false-report rate.
-4. **A4 explainer generation moment.** My pick: at drop-publish time (synchronous with the headline rewrite). Alternative: on first user-view (lazy; adds latency to the first open of each drop).
-5. **A5 campus verification evidence.** Email domain is the minimum. Alternatives (SSO, student-ID OCR) ship later; the schema column stays nullable and the field semantics stay stable.
-6. **"Other topics" feed cadence.** How many non-Drop candidates get promoted per day? My pick: 10 (fits a 5-row-above-the-fold layout with scroll). Alternative: tie to the number of fresh candidates and cap at 20.
+Operator responses to the open questions below. All build PRs must honor these.
+
+1. **A1 attribution window N = 30 min.**
+2. **A2/A3 AI outage behavior = FAIL CLOSED.** No unchecked publishing ever. The reply/comment is written to `pending_replies` / `pending_comments` with `moderation_status='pending'`; the author sees their own pending row in-feed with an "awaiting review" affordance; nothing else is visible to any other user. A workers handler retries the AI check on scheduler cadence; on success → publishes; on persistent failure → the existing AI-failure Telegram alerter (PR #194) covers operator awareness. The 2-minute auto-fallback option is **withdrawn**.
+3. **A3 report threshold = 3 reports → hidden pending operator review + Telegram alert.** Only reports from **established accounts** count toward the threshold. Established = **account age ≥ 7 days AND at least 3 distinct `opinion_shifts.topic_id` recorded AND `tier_id ≥ 1`** (above the Citizen floor). Reports from un-established accounts still log for operator analytics but do not advance the auto-hide counter. (Design-review-ready proposal; operator can tune the three thresholds before build.)
+4. **A4 explainer generation moment = drop-publish AND other-topic promotion.** Both pipelines call the ai-fabric task. If generation fails, the topic still ships but with `fact_explainer = null` and the UI falls through to the raw primary-source link.
+5. **A5 campus verification = email domain only, post-launch.** Launch adds the nullable `users.campus` column forward-compat; verification wiring ships post-launch.
+6. **"Other topics" cadence = up to 10/day, only items that clear the GDELT trend bar.** No filler. If the trending pool is thin on a given day, the feed renders fewer than 10 rather than padding with sub-threshold candidates.
+
+### Additional launch rule — COMMENTS_ENABLED kill-switch
+
+Comments ship behind `process.env.COMMENTS_ENABLED === 'true'` (strict equality, default off). Same pattern as `FACT_CHECK_ENABLED` from PR #192. The flag is flipped **only after A2 + A3 are merged AND deployed to Railway workers**. Launch-phase operator action: keep the flag unset until A2 + A3 land green; flip it once both are deployed and smoke-tested on prod.
+
+The flag gates: every write path into `topic_comments` (reply + top-level comment); every read path from `topic_comments` in the feed; the comment-moderation workers handler enqueue. Workers continue to drain any pending moderation jobs when the flag flips off (no abandoned rows).
+
+### Still-open questions (not yet decided)
+
+None at this point. Build order proceeds per the sequence below.
 
 ---
 
