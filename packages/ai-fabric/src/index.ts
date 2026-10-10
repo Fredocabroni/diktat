@@ -15,6 +15,10 @@ export * from './head-gate.js';
 export * from './prompts/fact-check.js';
 export * from './prompts/drop-sources.js';
 export * from './prompts/drop-headline.js';
+export {
+  TOPIC_FACT_EXPLAINER_SYSTEM_PROMPT,
+  buildTopicFactExplainerUserPrompt,
+} from './prompts/fact-explainer.js';
 export { anthropicAdapter } from './adapters/anthropic.js';
 export { openaiAdapter } from './adapters/openai.js';
 export { googleAdapter } from './adapters/google.js';

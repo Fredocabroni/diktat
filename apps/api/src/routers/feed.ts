@@ -61,7 +61,7 @@ const listInputSchema = z
   .optional();
 
 const TOPIC_SELECT =
-  'id, headline, source_title, summary, primary_source_url, category, drop_at, dedup_cluster_id, curation_mode, is_block_exhausted, additional_sources';
+  'id, headline, source_title, summary, primary_source_url, category, drop_at, dedup_cluster_id, curation_mode, is_block_exhausted, additional_sources, fact_explainer';
 
 interface TopicRow {
   id: string;
@@ -75,6 +75,37 @@ interface TopicRow {
   curation_mode: string | null;
   is_block_exhausted: boolean;
   additional_sources: unknown;
+  // A4 (migration 20261012000000): nullable jsonb. Shape when non-null:
+  // { for_summary, against_summary, source_url, posture }. See
+  // packages/ai-fabric/src/prompts/fact-explainer.ts for the contract.
+  fact_explainer: unknown;
+}
+
+/** Narrow + validate the fact_explainer JSON shape before returning
+ *  to the client. Preserves the fail-tolerant posture — a malformed
+ *  stored payload reads as null (UI falls through to raw source link). */
+function parseFactExplainer(raw: unknown): {
+  readonly for_summary: string;
+  readonly against_summary: string;
+  readonly source_url: string;
+  readonly posture: 'contested' | 'single_sided' | 'empirical';
+} | null {
+  if (raw === null || raw === undefined || typeof raw !== 'object') return null;
+  const obj = raw as Record<string, unknown>;
+  const forSummary = typeof obj.for_summary === 'string' ? obj.for_summary : '';
+  const againstSummary = typeof obj.against_summary === 'string' ? obj.against_summary : '';
+  const sourceUrl = typeof obj.source_url === 'string' ? obj.source_url : '';
+  const posture = obj.posture;
+  if (forSummary.length === 0) return null;
+  if (posture !== 'contested' && posture !== 'single_sided' && posture !== 'empirical') {
+    return null;
+  }
+  return {
+    for_summary: forSummary,
+    against_summary: againstSummary,
+    source_url: sourceUrl,
+    posture,
+  };
 }
 
 export const feedRouter = router({
@@ -286,6 +317,7 @@ export const feedRouter = router({
         isBlockExhausted: row.is_block_exhausted,
         additionalSources: Array.isArray(row.additional_sources) ? row.additional_sources : [],
         userStance: latestStance[row.id] ?? null,
+        factExplainer: parseFactExplainer(row.fact_explainer),
       }));
 
       return { topics };

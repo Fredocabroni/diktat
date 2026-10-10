@@ -548,20 +548,34 @@ describe('dropPublishHandler', () => {
 
 import type { invoke as fabricInvoke } from '@diktat/ai-fabric';
 
-function fakeInvoke(output: {
-  headline: string;
-  summary: string;
-  claim: string;
-}): typeof fabricInvoke {
-  return (async (_req: unknown) => ({
-    output,
-    provider: 'anthropic' as const,
-    model: 'claude-sonnet-4-6',
-    task: 'drop_headline_rewrite' as const,
-    usd: 0.002,
-    latencyMs: 250,
-    routeDecision: { primary: 'anthropic' as const, model: 'claude-sonnet-4-6', fallbacks: [] },
-  })) as unknown as typeof fabricInvoke;
+/** Default empty A4 output: posture=single_sided with empty for_summary,
+ *  which the handler treats as "could not neutralize" and persists null. */
+const EMPTY_EXPLAINER = {
+  for_summary: '',
+  against_summary: '',
+  source_url: '',
+  posture: 'single_sided' as const,
+};
+
+/** Build a fake fabric invoke that routes by `task`. Default A4 output
+ *  is empty (handler → null fact_explainer); override with
+ *  `explainer` when a test wants to exercise the happy path. */
+function fakeInvoke(
+  rewriteOutput: { headline: string; summary: string; claim: string },
+  explainerOutput: typeof EMPTY_EXPLAINER = EMPTY_EXPLAINER,
+): typeof fabricInvoke {
+  return (async (req: { task: string }) => {
+    const output = req.task === 'topic_fact_explainer' ? explainerOutput : rewriteOutput;
+    return {
+      output,
+      provider: 'anthropic' as const,
+      model: 'claude-sonnet-4-6',
+      task: req.task as 'drop_headline_rewrite',
+      usd: 0.002,
+      latencyMs: 250,
+      routeDecision: { primary: 'anthropic' as const, model: 'claude-sonnet-4-6', fallbacks: [] },
+    };
+  }) as unknown as typeof fabricInvoke;
 }
 
 function rewriteState(): FakeState {
@@ -722,12 +736,15 @@ describe('dropPublishHandler — LLM rewrite + fact-check enqueue', () => {
     expect(state.newsTopicInserts).toHaveLength(1);
     // Warn log fired as before.
     expect(logger.calls.find((c) => c.obj.event === 'drop_publish.rewrite_failed')).toBeDefined();
-    // AND a Telegram alert now fires with 1-hour per-task dedup.
-    expect(alertCalls).toHaveLength(1);
-    expect(alertCalls[0]!.severity).toBe('error');
-    expect(alertCalls[0]!.title).toBe('drop_publish rewrite_failed');
-    expect(alertCalls[0]!.opts?.dedupKey).toBe('ai:rewrite_failed:drop_headline_rewrite');
-    expect(alertCalls[0]!.opts?.dedupTtlMs).toBe(60 * 60_000);
+    // AND a Telegram alert fires with 1-hour per-task dedup. A4 adds a
+    // second alert when the fact-explainer invoke also throws — both
+    // valid, both deduped per task. Filter by title to pin the
+    // rewrite-specific alert shape.
+    const rewriteAlert = alertCalls.find((a) => a.title === 'drop_publish rewrite_failed');
+    expect(rewriteAlert).toBeDefined();
+    expect(rewriteAlert!.severity).toBe('error');
+    expect(rewriteAlert!.opts?.dedupKey).toBe('ai:rewrite_failed:drop_headline_rewrite');
+    expect(rewriteAlert!.opts?.dedupTtlMs).toBe(60 * 60_000);
   });
 
   it('no alerter wired → rewrite_failed does not throw (fire-and-forget)', async () => {
@@ -782,6 +799,178 @@ describe('dropPublishHandler — LLM rewrite + fact-check enqueue', () => {
     expect(state.factCheckJobInserts).toHaveLength(0);
     const outcomeLog = logger.calls.find((c) => c.obj.event === 'drop_publish.complete');
     expect(outcomeLog?.obj.fact_check_enqueued).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A4 — topic_fact_explainer wiring
+// ---------------------------------------------------------------------------
+
+describe('dropPublishHandler — A4 fact explainer', () => {
+  it('happy path: fact_explainer written to news_topics INSERT', async () => {
+    const state = rewriteState();
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+    const invoke = fakeInvoke(
+      {
+        headline: 'senate confirms smith 52-48',
+        summary: 'Senate voted 52 to 48 to confirm Smith to Treasury.',
+        claim: 'The Senate confirmed Smith by a vote of 52-48.',
+      },
+      {
+        for_summary:
+          'the senate confirmed smith with a 52-48 majority, advancing the nomination to the treasury.',
+        against_summary: '',
+        source_url: 'https://www.congress.gov/example',
+        posture: 'single_sided',
+      },
+    );
+
+    await dropPublishHandler(row(), { supabase, logger, invoke });
+
+    const insert = state.newsTopicInserts[0]!;
+    const explainer = insert.fact_explainer as {
+      for_summary: string;
+      against_summary: string;
+      posture: string;
+    };
+    expect(explainer).toBeDefined();
+    expect(explainer.for_summary).toMatch(/senate confirmed smith/);
+    expect(explainer.posture).toBe('single_sided');
+    expect(insert.fact_explainer_generated_at).not.toBeNull();
+  });
+
+  it('empty for_summary: fact_explainer persisted as null; publish still happens', async () => {
+    const state = rewriteState();
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+    // Default EMPTY_EXPLAINER (overridable) has an empty for_summary.
+    const invoke = fakeInvoke({
+      headline: 'senate confirms smith 52-48',
+      summary: 'Senate voted 52 to 48 to confirm Smith to Treasury.',
+      claim: 'The Senate confirmed Smith by a vote of 52-48.',
+    });
+
+    await dropPublishHandler(row(), { supabase, logger, invoke });
+
+    const insert = state.newsTopicInserts[0]!;
+    expect(insert.fact_explainer).toBeNull();
+    expect(insert.fact_explainer_generated_at).toBeNull();
+    expect(
+      logger.calls.find((c) => c.obj.event === 'drop_publish.fact_explainer_empty'),
+    ).toBeDefined();
+    // Headline rewrite still landed.
+    expect(insert.headline).toBe('senate confirms smith 52-48');
+  });
+
+  it('generator throws: fact_explainer null + telegram alert fires with per-task dedup', async () => {
+    const state = rewriteState();
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+    const alertCalls: Array<{
+      severity: string;
+      title: string;
+      detail: string;
+      opts: { dedupKey?: string; dedupTtlMs?: number } | undefined;
+    }> = [];
+    const alerter = {
+      enabled: true,
+      alert: async (
+        severity: string,
+        title: string,
+        detail: string,
+        opts: { dedupKey?: string; dedupTtlMs?: number } | undefined,
+      ) => {
+        alertCalls.push({ severity, title, detail, opts });
+      },
+    };
+    // invoke throws only on the fact-explainer task; rewrite succeeds.
+    const invoke = (async (req: { task: string }) => {
+      if (req.task === 'topic_fact_explainer') {
+        throw new Error('model 503');
+      }
+      return {
+        output: {
+          headline: 'senate confirms smith 52-48',
+          summary: 'Senate confirmed Smith 52-48.',
+          claim: 'The Senate confirmed Smith by a vote of 52-48.',
+        },
+        provider: 'anthropic' as const,
+        model: 'claude-sonnet-4-6',
+        task: 'drop_headline_rewrite' as const,
+        usd: 0.002,
+        latencyMs: 250,
+        routeDecision: { primary: 'anthropic' as const, model: 'claude-sonnet-4-6', fallbacks: [] },
+      };
+    }) as unknown as typeof fabricInvoke;
+
+    await dropPublishHandler(row(), {
+      supabase,
+      logger,
+      invoke,
+      alerter: alerter as unknown as Parameters<typeof dropPublishHandler>[1]['alerter'],
+    });
+
+    // Rewrite landed; explainer null.
+    const insert = state.newsTopicInserts[0]!;
+    expect(insert.headline).toBe('senate confirms smith 52-48');
+    expect(insert.fact_explainer).toBeNull();
+
+    const explainerAlert = alertCalls.find((a) => a.title === 'drop_publish fact_explainer_failed');
+    expect(explainerAlert).toBeDefined();
+    expect(explainerAlert!.severity).toBe('error');
+    expect(explainerAlert!.opts?.dedupKey).toBe('ai:failed:topic_fact_explainer');
+    expect(explainerAlert!.opts?.dedupTtlMs).toBe(60 * 60_000);
+  });
+
+  it('no invoke in deps: fact_explainer skipped (null); drop still publishes with raw title path', async () => {
+    const state = rewriteState();
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+    // No invoke — exercises BOTH rewrite_skipped + fact_explainer_skipped.
+    await dropPublishHandler(row(), { supabase, logger });
+
+    const insert = state.newsTopicInserts[0]!;
+    expect(insert.fact_explainer).toBeNull();
+    expect(insert.fact_explainer_generated_at).toBeNull();
+    expect(
+      logger.calls.find(
+        (c) =>
+          c.obj.event === 'drop_publish.fact_explainer_skipped' && c.obj.reason === 'no_invoke',
+      ),
+    ).toBeDefined();
+  });
+
+  it('contested posture: full both-sides payload persisted', async () => {
+    const state = rewriteState();
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+    const invoke = fakeInvoke(
+      {
+        headline: 'sec proposes custody rules for crypto assets',
+        summary: 'SEC proposed a tailored custody framework for crypto assets held by advisers.',
+        claim: 'The SEC proposed custody rules for crypto assets.',
+      },
+      {
+        for_summary:
+          'proponents argue the rules close a long-standing gap in how registered advisers safeguard digital assets, protecting retail investors.',
+        against_summary:
+          'opponents argue the rules impose costly compliance burdens on smaller advisers and reduce access to a legitimate asset class.',
+        source_url: 'https://www.sec.gov/example',
+        posture: 'contested',
+      },
+    );
+
+    await dropPublishHandler(row(), { supabase, logger, invoke });
+
+    const explainer = state.newsTopicInserts[0]!.fact_explainer as {
+      for_summary: string;
+      against_summary: string;
+      posture: string;
+    };
+    expect(explainer.posture).toBe('contested');
+    expect(explainer.for_summary.length).toBeGreaterThan(0);
+    expect(explainer.against_summary.length).toBeGreaterThan(0);
   });
 });
 

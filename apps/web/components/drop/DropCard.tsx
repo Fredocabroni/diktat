@@ -33,6 +33,15 @@ export interface DropCardTopic {
   readonly summary: string | null;
   readonly primarySourceUrl: string | null;
   readonly category: string | null;
+  /** A4 (migration 20261012000000): neutral both-sides-or-single-sided
+   *  explainer. null = either the row predates A4 OR generation failed;
+   *  UI falls through to the raw primary_source_url link. */
+  readonly factExplainer?: {
+    readonly for_summary: string;
+    readonly against_summary: string;
+    readonly source_url: string;
+    readonly posture: 'contested' | 'single_sided' | 'empirical';
+  } | null;
 }
 
 export type StanceAction = 'agree' | 'disagree' | 'skip';
@@ -150,6 +159,8 @@ export function DropCard({
         <p className="text-sm leading-relaxed text-text-secondary">{topic.summary}</p>
       ) : null}
 
+      {topic.factExplainer ? <FactExplainerPanel explainer={topic.factExplainer} /> : null}
+
       {source ? (
         <a
           href={source.href}
@@ -265,5 +276,55 @@ function StanceButton({
     >
       {label}
     </button>
+  );
+}
+
+interface FactExplainerPanelProps {
+  readonly explainer: NonNullable<DropCardTopic['factExplainer']>;
+}
+
+/** Renders the neutral fact explainer (A4). Posture steers the layout:
+ *  'contested' shows two paragraphs side by side; 'single_sided' and
+ *  'empirical' show a single paragraph. The against_summary is
+ *  deliberately omitted on non-contested postures to avoid false-
+ *  balance on empirical facts. */
+function FactExplainerPanel({ explainer }: FactExplainerPanelProps): React.JSX.Element {
+  const isContested = explainer.posture === 'contested';
+  const kicker =
+    explainer.posture === 'contested'
+      ? 'the debate'
+      : explainer.posture === 'empirical'
+        ? 'the data says'
+        : 'the primary source says';
+  return (
+    <section
+      aria-label="Fact explainer"
+      data-component="FactExplainerPanel"
+      data-posture={explainer.posture}
+      className="flex flex-col gap-3 rounded-xl border border-ink-300 bg-surface-raised p-4"
+    >
+      <p className="text-xs font-medium uppercase tracking-wide text-text-tertiary">{kicker}</p>
+      {isContested ? (
+        <div className="flex flex-col gap-3 md:flex-row md:gap-4">
+          <div className="flex-1" data-component="FactExplainerPanel.For">
+            <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-success">for</p>
+            <p className="text-sm leading-relaxed text-text-primary">{explainer.for_summary}</p>
+          </div>
+          <div className="flex-1" data-component="FactExplainerPanel.Against">
+            <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-danger">
+              against
+            </p>
+            <p className="text-sm leading-relaxed text-text-primary">{explainer.against_summary}</p>
+          </div>
+        </div>
+      ) : (
+        <p
+          className="text-sm leading-relaxed text-text-primary"
+          data-component="FactExplainerPanel.Single"
+        >
+          {explainer.for_summary}
+        </p>
+      )}
+    </section>
   );
 }

@@ -85,3 +85,52 @@ describe('DropFeedClient — P2.a wiring', () => {
     expect(DROP_FEED).toMatch(/Couldn&rsquo;t save your stance/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// A4 — FactExplainerPanel in DropCard
+// ---------------------------------------------------------------------------
+
+describe('DropCard — A4 FactExplainerPanel', () => {
+  it('declares the factExplainer prop with the shape from feed.list', () => {
+    expect(DROP_CARD).toMatch(/factExplainer\?: \{/);
+    expect(DROP_CARD).toMatch(/readonly for_summary: string/);
+    expect(DROP_CARD).toMatch(/readonly against_summary: string/);
+    expect(DROP_CARD).toMatch(/readonly source_url: string/);
+    expect(DROP_CARD).toMatch(/readonly posture: 'contested' \| 'single_sided' \| 'empirical'/);
+  });
+
+  it('renders FactExplainerPanel conditionally on non-null factExplainer', () => {
+    // Pin the conditional render guard so a future edit can't quietly
+    // show the panel when the explainer is null (would render empty
+    // "for" / "against" labels). Formatter may collapse the ternary
+    // to one line; match either single- or multi-line form.
+    expect(DROP_CARD).toMatch(/topic\.factExplainer \?/);
+    expect(DROP_CARD).toMatch(/<FactExplainerPanel\s+explainer=\{topic\.factExplainer\}/);
+  });
+
+  it('contested posture renders both for and against; non-contested renders single', () => {
+    // Posture steering is the false-balance guard. If a future refactor
+    // flips this logic (always-two-paragraphs regardless of posture),
+    // the §11 integrity contract degrades.
+    expect(DROP_CARD).toMatch(/isContested[\s\S]*posture === 'contested'/);
+    expect(DROP_CARD).toMatch(/FactExplainerPanel\.For/);
+    expect(DROP_CARD).toMatch(/FactExplainerPanel\.Against/);
+    expect(DROP_CARD).toMatch(/FactExplainerPanel\.Single/);
+  });
+
+  it('kicker copy is lowercase + posture-specific (no urgency, no celebration)', () => {
+    expect(DROP_CARD).toContain("'the debate'");
+    expect(DROP_CARD).toContain("'the data says'");
+    expect(DROP_CARD).toContain("'the primary source says'");
+    // Anti-pattern pins — no exclamation / hype on the explainer surface.
+    const factPanel = DROP_CARD.match(/function FactExplainerPanel[\s\S]*?^}/m);
+    expect(factPanel).not.toBeNull();
+    for (const bad of ['!', 'BREAKING', 'URGENT', 'MUST READ']) {
+      expect(factPanel![0]!).not.toContain(bad);
+    }
+  });
+
+  it('data-posture attribute exposes posture for addiction-auditor + e2e assertions', () => {
+    expect(DROP_CARD).toMatch(/data-posture=\{explainer\.posture\}/);
+  });
+});

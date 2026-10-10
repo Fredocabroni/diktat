@@ -56,7 +56,9 @@ import { scrubMessage } from '@diktat/shared/alerts';
 
 import {
   DROP_HEADLINE_REWRITE_SYSTEM_PROMPT,
+  TOPIC_FACT_EXPLAINER_SYSTEM_PROMPT,
   buildDropHeadlineUserPrompt,
+  buildTopicFactExplainerUserPrompt,
 } from '@diktat/ai-fabric';
 import { z } from 'zod';
 
@@ -115,11 +117,35 @@ const DropHeadlineRewriteSchema = z.object({
 });
 type DropHeadlineRewriteOutput = z.infer<typeof DropHeadlineRewriteSchema>;
 
+/** Structured-output contract for the topic_fact_explainer task (A4).
+ *  All four fields may be empty / null — "empty output preferred to a
+ *  slanted explainer" per packages/ai-fabric/src/prompts/fact-explainer.ts
+ *  rule 10. The handler persists null when the explainer isn't neutral-
+ *  able, and the UI falls through to the raw primary_source_url link.
+ *
+ *  Posture steers UI copy:
+ *    - 'contested'   → render both for_summary + against_summary
+ *    - 'single_sided'→ render for_summary; against_summary must be empty
+ *    - 'empirical'   → same as single_sided (false-balance guard) */
+const FactExplainerPostureSchema = z.enum(['contested', 'single_sided', 'empirical']);
+const FactExplainerSchema = z.object({
+  for_summary: z.string().max(1000, 'for_summary exceeds 1000 chars.'),
+  against_summary: z.string().max(1000, 'against_summary exceeds 1000 chars.'),
+  source_url: z.string().max(2000, 'source_url exceeds 2000 chars.'),
+  posture: FactExplainerPostureSchema,
+});
+type FactExplainerOutput = z.infer<typeof FactExplainerSchema>;
+
 /** Projected USD cost for one drop_headline_rewrite call. Sonnet 4.6
  *  pricing × short input + short output ≈ $0.002. The cost ledger
  *  asserts under this projection before invoking; failures stamp the
  *  real spend per the ai-fabric contract. */
 const REWRITE_PROJECTED_USD = 0.005;
+
+/** Projected USD cost for one topic_fact_explainer call. Sonnet 4.6 +
+ *  slightly longer output than headline rewrite (two paragraphs vs. a
+ *  headline+summary+claim). ~$0.004. */
+const EXPLAINER_PROJECTED_USD = 0.005;
 
 /** How far back the cluster-block lookup reaches. 2 days back + today
  *  = the 3-consecutive-day window from the founder spec ("today + next 2
@@ -328,6 +354,15 @@ export const dropPublishHandler: JobHandler = async (row, deps) => {
   //     "never skip a day" trumps voice polish.
   const rewrite = await rewriteHeadlineSafely(deps, sel.chosen);
 
+  // (7b) Fact explainer (A4) — neutral both-sides-or-single-side
+  //     explainer the user reads before voting. Same fail-tolerant
+  //     posture as the headline rewrite: on any failure (missing
+  //     invoke, model error, Zod parse fail, empty output), persist
+  //     null and let the UI fall through to the raw primary_source_url
+  //     link. The explainer and the headline rewrite are independent
+  //     ai-fabric calls; a failure in one must not block the other.
+  const factExplainer = await generateFactExplainerSafely(deps, sel.chosen);
+
   // (8) Promote to news_topics. source_title preserved verbatim
   //     regardless of rewrite outcome.
   const dropAt = todayDropAtEt(now);
@@ -352,6 +387,11 @@ export const dropPublishHandler: JobHandler = async (row, deps) => {
       dedup_cluster_id: sel.chosen.dedup_cluster_id,
       curation_mode: curationMode,
       additional_sources: [],
+      // A4: fact_explainer is nullable — persist non-null only when
+      // the generator produced a valid payload with a non-empty
+      // for_summary (empty = "could not neutralize" per rule 10).
+      fact_explainer: factExplainer,
+      fact_explainer_generated_at: factExplainer === null ? null : now.toISOString(),
     })
     .select('id')
     .single()) as { data: { id: string } | null; error: { message: string } | null };
@@ -555,6 +595,75 @@ async function rewriteHeadlineSafely(
       },
     );
     return empty;
+  }
+}
+
+/** Call the ai-fabric topic_fact_explainer task (A4). Returns the
+ *  structured payload on success, or null on any failure mode
+ *  (missing invoke, model error, Zod parse fail, empty for_summary).
+ *  The handler persists null and the UI falls through to the raw
+ *  primary_source_url link — same fail-tolerant posture as the
+ *  headline rewrite. Independent of the rewrite call: a rewrite
+ *  success + explainer failure is a valid, published Drop with no
+ *  explainer; a rewrite failure + explainer success writes the raw
+ *  title AND the explainer. */
+async function generateFactExplainerSafely(
+  deps: Parameters<JobHandler>[1],
+  candidate: ActiveCandidate,
+): Promise<FactExplainerOutput | null> {
+  if (!deps.invoke) {
+    deps.logger.warn({
+      event: 'drop_publish.fact_explainer_skipped',
+      reason: 'no_invoke',
+      candidateId: candidate.id,
+    });
+    return null;
+  }
+  try {
+    const result = await deps.invoke({
+      task: 'topic_fact_explainer',
+      system: TOPIC_FACT_EXPLAINER_SYSTEM_PROMPT,
+      user: buildTopicFactExplainerUserPrompt({
+        sourceTitle: candidate.source_title,
+        sourceUrl: candidate.source_url,
+        sourceHost: candidate.source_host,
+        sourceCategory: candidate.source_category,
+        sourceSummary: candidate.summary,
+      }),
+      schema: FactExplainerSchema,
+      env: deps.providerEnv ?? { xaiAvailable: false, perplexityAvailable: false },
+      projectedUsd: EXPLAINER_PROJECTED_USD,
+      maxTokens: 1024,
+    });
+    const output = result.output as FactExplainerOutput;
+    // Empty for_summary = "could not neutralize" per fact-explainer.ts
+    // rule 10. Treat as null so the UI falls through to the raw link.
+    if (output.for_summary.trim().length === 0) {
+      deps.logger.info({
+        event: 'drop_publish.fact_explainer_empty',
+        candidateId: candidate.id,
+        posture: output.posture,
+      });
+      return null;
+    }
+    return output;
+  } catch (err) {
+    const message = scrubMessage(err instanceof Error ? err.message : String(err));
+    deps.logger.warn({
+      event: 'drop_publish.fact_explainer_failed',
+      candidateId: candidate.id,
+      message,
+    });
+    void deps.alerter?.alert(
+      'error',
+      'drop_publish fact_explainer_failed',
+      `candidate=${candidate.id} · ${message}`.slice(0, 500),
+      {
+        dedupKey: 'ai:failed:topic_fact_explainer',
+        dedupTtlMs: 60 * 60_000,
+      },
+    );
+    return null;
   }
 }
 

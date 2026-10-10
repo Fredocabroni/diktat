@@ -14,6 +14,9 @@ import type { CostSink } from './redis-cost-sink.js';
  * - trivia_gen $3: batch generation, can throttle
  * - news_rank $2: Haiku is cheap; covers high request count
  * - drop_headline_rewrite $1: one rewrite/day, ~$0.005/call
+ * - topic_fact_explainer $1: one call per published topic (daily Drop +
+ *   up to 10 "other topics" promotions). ~$0.004/call × 11/day = ~$0.044/day
+ *   headroom under the cap.
  * - clip_gen $2: Gemini 2.5 Pro
  * - x_post $1: low volume, short outputs
  * - fingerprint $1: incremental updates
@@ -26,6 +29,7 @@ export const PER_TASK_CAPS_USD: Record<Task, number> = {
   trivia_gen: 3,
   news_rank: 2,
   drop_headline_rewrite: 1,
+  topic_fact_explainer: 1,
   clip_gen: 2,
   x_post: 1,
   fingerprint: 1,
@@ -45,6 +49,7 @@ const ZERO_BY_TASK = (): Record<Task, number> => ({
   debate_score: 0,
   news_rank: 0,
   drop_headline_rewrite: 0,
+  topic_fact_explainer: 0,
   clip_gen: 0,
   x_post: 0,
   fingerprint: 0,
