@@ -119,8 +119,12 @@ function parseFactExplainer(raw: unknown): {
   if (sourceUrl.length > FACT_EXPLAINER_SOURCE_URL_MAX) return null;
   // Scheme guard — never return a non-https URL that DropCard would
   // render inside an anchor. Empty source_url is valid (upstream null-
-  // on-failure); any non-empty value must be https://.
-  if (sourceUrl.length > 0 && !sourceUrl.startsWith('https://')) return null;
+  // on-failure); any non-empty value must be https:// AND have a host
+  // (min length 11 covers `https://a.b`) — security-reviewer PR #199
+  // round 2 L1: `https://` alone is a scheme-only integrity defect.
+  if (sourceUrl.length > 0 && (!sourceUrl.startsWith('https://') || sourceUrl.length < 11)) {
+    return null;
+  }
   return {
     for_summary: forSummary,
     against_summary: againstSummary,

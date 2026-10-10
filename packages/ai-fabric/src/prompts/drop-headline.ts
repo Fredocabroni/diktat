@@ -116,17 +116,30 @@ const SOURCE_SUMMARY_MAX = 4000;
 const SOURCE_HOST_MAX = 253; // RFC 1035 max DNS name length.
 const SOURCE_CATEGORY_MAX = 64;
 
+// Invisible / control codepoints the sanitizer collapses to space.
+// Mirror of fact-explainer.ts (security-reviewer PR #199 round 2 M2 —
+// see that file for the covered-class breakdown and the Prettier-
+// rewrite incident). Built via `new RegExp(string)` so the escapes
+// cannot be collapsed into literal invisible characters.
+
+const STRIP_CONTROL_PATTERN =
+  '[\\u0000-\\u001F\\u007F-\\u009F\\u200B-\\u200F\\u2028\\u2029\\u202A-\\u202E\\u2066-\\u2069\\uFEFF]';
+const STRIP_CONTROL_RE = new RegExp(STRIP_CONTROL_PATTERN, 'g');
+// Unicode tag block (U+E0000..U+E007F). JS strings are UTF-16, so these
+// codepoints appear as surrogate pairs (DB40 DC00..DB40 DC7F).
+const STRIP_TAG_BLOCK_RE = new RegExp('[\\uDB40][\\uDC00-\\uDC7F]', 'g');
+
 /**
- * Strip C0/C1 control characters, Unicode bidirectional overrides, and
+ * Strip C0/C1 control characters, Unicode bidirectional overrides +
+ * isolates + marks, zero-widths, line/paragraph separators, BOM, and
  * the Unicode tag block (U+E0000..U+E007F). Collapse whitespace, trim,
  * length-cap. Security-reviewer PR #198 HIGH #1 (mirrored here —
- * drop-headline shares the pattern from PR #191's M1/M2 fold).
+ * drop-headline shares the pattern from PR #191's M1/M2 fold); PR #199
+ * round 2 M2 widened the codepoint coverage.
  */
 function sanitizeSourceField(raw: string, maxLen: number): string {
-  // eslint-disable-next-line no-control-regex
-  const stripControl = raw.replace(/[\u0000-\u001F\u007F-\u009F‪-‮⁦-⁩]/g, ' ');
-
-  const stripTags = stripControl.replace(/[\uDB40][\uDC00-\uDC7F]/g, ' ');
+  const stripControl = raw.replace(STRIP_CONTROL_RE, ' ');
+  const stripTags = stripControl.replace(STRIP_TAG_BLOCK_RE, ' ');
   return stripTags.replace(/\s+/g, ' ').trim().slice(0, maxLen);
 }
 
@@ -191,7 +204,12 @@ export function buildDropHeadlineUserPrompt(input: {
   return lines.filter((line) => line.length > 0).join('\n');
 }
 
-/** Exported for tests. Not part of the public ai-fabric surface. */
+// Exported for character-by-character unit tests only. Prefer testing
+// xmlEscape behaviour through buildDropHeadlineUserPrompt to catch
+// ordering regressions (sanitize MUST run before escape in all callers).
+// Security-reviewer PR #199 round 2 L3 — the exported helper is a seam
+// that could invite an escape-without-sanitize test case which would
+// silently pass even if production ordering regressed.
 export const __testing = {
   sanitizeSourceField,
   sanitizeSourceUrl,

@@ -26,21 +26,35 @@
 -- statement rolls back cleanly; the fix is to clean up the bad row and
 -- re-apply.
 --
--- Lock profile (security-reviewer PR #199 MEDIUM #2):
---   `ADD CONSTRAINT ... CHECK (...)` as a single statement takes an
---   ACCESS EXCLUSIVE lock while it scans every existing row to prove
---   the constraint. On a growing production table that lock blocks
---   readers + writers for the duration of the scan. The two-step
---   `NOT VALID` + `VALIDATE CONSTRAINT` pattern narrows the window:
---     1. `ADD CONSTRAINT ... NOT VALID` — brief ACCESS EXCLUSIVE,
---        does NOT scan existing rows. Enforces the predicate on all
---        subsequent inserts/updates immediately.
---     2. `VALIDATE CONSTRAINT` — SHARE UPDATE EXCLUSIVE lock during
---        the row scan. Reads + ordinary writes proceed concurrently;
---        only DDL on the same table is blocked.
---   news_topics is small today (<1k rows), so the lock-time saving
---   is immaterial right now, but this is defense in depth for the
---   next time this shape is layered on a hot table.
+-- Lock profile (security-reviewer PR #199 MEDIUM #2 — comment-level
+-- correction after reviewer round 2 M1 pointed out the mis-stated
+-- benefit):
+--   `ADD CONSTRAINT ... NOT VALID` acquires ACCESS EXCLUSIVE briefly
+--   and does NOT scan existing rows. `VALIDATE CONSTRAINT` on its own
+--   takes SHARE UPDATE EXCLUSIVE. But when both statements run inside
+--   the same transaction (as they do here, between begin; and commit;),
+--   PostgreSQL holds the union of acquired locks until commit — so the
+--   outer ACCESS EXCLUSIVE from ADD CONSTRAINT is held through the
+--   full VALIDATE row scan AND the subsequent index rebuild. The
+--   split-into-NOT-VALID-plus-VALIDATE pattern only reduces lock time
+--   when the two statements are in SEPARATE transactions (two separate
+--   migration files).
+--
+--   Why we accept the hold here:
+--     * news_topics is <1k rows at launch; the row scan is sub-ms and
+--       the index rebuild is sub-second.
+--     * splitting into two migration files for a one-time constraint
+--       add on a small table trades a cheap commented acknowledgement
+--       for a second migration timestamp + a second deploy-migrations
+--       cycle, neither of which earns anything at this scale.
+--
+--   Do NOT cargo-cult this one-transaction shape onto a growing
+--   production table. For any table with sustained write load:
+--     1. file _a: begin; ADD CONSTRAINT ... NOT VALID; commit; -- brief AE
+--     2. file _b (separate migration): begin; VALIDATE CONSTRAINT ...; commit;
+--        -- SHARE UPDATE EXCLUSIVE, concurrent reads/writes OK
+--     3. file _c (separate migration): CREATE INDEX CONCURRENTLY ... --
+--        cannot run inside a transaction, so this is its own file.
 --
 -- Validation surface: covered via the unit tests on FactExplainerSchema
 -- in apps/workers/__tests__/jobs/drop-publish.test.ts and the
@@ -66,7 +80,7 @@ alter table public.news_topics
         or (fact_explainer->>'source_url') = ''
         or (
           (fact_explainer->>'source_url') like 'https://%'
-          and char_length(fact_explainer->>'source_url') <= 2000
+          and char_length(fact_explainer->>'source_url') between 11 and 2000
         )
       )
     )

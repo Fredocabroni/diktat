@@ -85,20 +85,41 @@ const SOURCE_SUMMARY_MAX = 4000;
 const SOURCE_HOST_MAX = 253;
 const SOURCE_CATEGORY_MAX = 64;
 
+// Invisible / control codepoints the sanitizer collapses to space.
+// Covered classes (security-reviewer PR #199 round 2 M2 — see
+// sanitizeSourceField docstring for incident context):
+//   U+0000-U+001F   C0 control chars
+//   U+007F-U+009F   DEL + C1 control chars
+//   U+200B-U+200F   zero-width space, ZWNJ, ZWJ, LRM, RLM
+//   U+2028-U+2029   line / paragraph separators (JS newline escapes
+//                   that tokenise as newlines on some LLMs)
+//   U+202A-U+202E   LRE / RLE / PDF / LRO / RLO (bidi overrides)
+//   U+2066-U+2069   LRI / RLI / FSI / PDI (bidi isolates)
+//   U+FEFF          BOM / ZWNBSP
+//
+// Built via `new RegExp(string)` rather than a regex literal so
+// Prettier cannot rewrite the escape sequences into literal invisible
+// characters — the exact unauditability the reviewer flagged.
+ 
+const STRIP_CONTROL_PATTERN =
+  '[\\u0000-\\u001F\\u007F-\\u009F\\u200B-\\u200F\\u2028\\u2029\\u202A-\\u202E\\u2066-\\u2069\\uFEFF]';
+const STRIP_CONTROL_RE = new RegExp(STRIP_CONTROL_PATTERN, 'g');
+// Unicode tag block (U+E0000..U+E007F). JS strings are UTF-16, so these
+// codepoints appear as surrogate pairs (DB40 DC00..DB40 DC7F).
+const STRIP_TAG_BLOCK_RE = new RegExp('[\\uDB40][\\uDC00-\\uDC7F]', 'g');
+
 /**
- * Strip C0/C1 control characters, Unicode bidirectional overrides, and
+ * Strip C0/C1 control characters, Unicode bidirectional overrides +
+ * isolates + marks, zero-widths, line/paragraph separators, BOM, and
  * the Unicode tag block (U+E0000..U+E007F). Collapse whitespace, trim,
  * length-cap. Security-reviewer PR #198 HIGH #1: previously the regex
  * stripped only C0/C1, leaving bidi + tag codepoints as viable prompt-
- * injection carriers that survive XML tag interpolation.
+ * injection carriers that survive XML tag interpolation. PR #199
+ * round 2 M2 added U+200B-U+200F, U+2028, U+2029, U+FEFF.
  */
 function sanitizeSourceField(raw: string, maxLen: number): string {
-  // eslint-disable-next-line no-control-regex
-  const stripControl = raw.replace(/[\u0000-\u001F\u007F-\u009F‪-‮⁦-⁩]/g, ' ');
-  // Unicode tag block (U+E0000..U+E007F). JS strings are UTF-16, so
-  // these codepoints appear as surrogate pairs (DB40 DC00..DB40 DC7F).
-
-  const stripTags = stripControl.replace(/[\uDB40][\uDC00-\uDC7F]/g, ' ');
+  const stripControl = raw.replace(STRIP_CONTROL_RE, ' ');
+  const stripTags = stripControl.replace(STRIP_TAG_BLOCK_RE, ' ');
   return stripTags.replace(/\s+/g, ' ').trim().slice(0, maxLen);
 }
 
@@ -174,7 +195,12 @@ export function buildTopicFactExplainerUserPrompt(input: {
   return lines.filter((line) => line.length > 0).join('\n');
 }
 
-/** Test seam. Not part of the public ai-fabric surface. */
+// Exported for character-by-character unit tests only. Prefer testing
+// xmlEscape behaviour through buildTopicFactExplainerUserPrompt to catch
+// ordering regressions (sanitize MUST run before escape in all callers).
+// Security-reviewer PR #199 round 2 L3 — don't let the test seam invite
+// an escape-without-sanitize call-site that would silently pass unit
+// tests even if production ordering regressed.
 export const __testing = {
   sanitizeSourceField,
   sanitizeSourceUrl,

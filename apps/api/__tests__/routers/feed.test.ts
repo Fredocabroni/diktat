@@ -600,7 +600,7 @@ describe('feedRouter.list', () => {
     expect(result.topics[0]?.factExplainer).toBeNull();
   });
 
-  it('factExplainer: non-https source_url reads as null (XSS guard — PR #198 HIGH #2)', async () => {
+  it('factExplainer: non-https source_url reads as null (XSS guard — PR #198 HIGH #2 + #199 round 2 L1)', async () => {
     for (const bad of [
       'javascript:alert(1)',
       'data:text/html,<script>alert(1)</script>',
@@ -608,6 +608,11 @@ describe('feedRouter.list', () => {
       'file:///etc/passwd',
       ' https://example.gov/',
       '\thttps://example.gov/',
+      // Scheme-only URL (no host): satisfies startsWith('https://') but
+      // fails the min-length-11 guard added in PR #199 round 2 L1.
+      'https://',
+      // 10-char: `https://a` — just below the 11-char threshold.
+      'https://a',
     ]) {
       const db = listDb({
         topics: [
