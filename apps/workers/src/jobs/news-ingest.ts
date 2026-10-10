@@ -295,11 +295,225 @@ export const secEdgarAdapter: NewsIngestAdapter = {
   },
 };
 
+// ---------------------------------------------------------------------------
+// GDELT trending adapter (PR fix/gdelt-ingestor)
+// ---------------------------------------------------------------------------
+
+/** Hard-pinned GDELT API host. The adapter refuses to fetch any other host.
+ *  Defense-in-depth: a future config bug can't accidentally point this
+ *  adapter at an attacker-controlled URL. */
+const GDELT_API_HOST = 'api.gdeltproject.org';
+const GDELT_API_URL =
+  'https://api.gdeltproject.org/api/v2/doc/doc?query=sourcecountry%3AUS%20sourcelang%3Aeng%20(domain%3Agov%20OR%20theme%3AUSCOURTS%20OR%20theme%3ATRIAL)&mode=ArtList&format=json&sort=HybridRel&maxrecords=250&timespan=15min';
+
+/** Max response body size from the GDELT API. Legitimate ArtList JSON for
+ *  250 records tops out around 400 KB; the 2MB cap is far above that while
+ *  still bounding OOM risk. */
+const GDELT_MAX_BYTES = 2 * 1024 * 1024;
+
+/** Minimum distinct-domain count below which the adapter will not surface
+ *  a candidate. The operator's trend-score rule is "number of distinct
+ *  outlets covering the same story in the window" — a one-source "story"
+ *  has no trending signal, so we require ≥ 2. */
+export const GDELT_MIN_TREND_SCORE = 2;
+
+/** Shape of the GDELT ArtList article we care about. Extra fields are
+ *  ignored — the parser stays lenient so a future field addition doesn't
+ *  break ingestion. */
+interface GdeltArticle {
+  readonly url?: unknown;
+  readonly title?: unknown;
+  readonly seendate?: unknown;
+  readonly domain?: unknown;
+  readonly language?: unknown;
+  readonly sourcecountry?: unknown;
+}
+
+interface GdeltResponse {
+  readonly articles?: unknown;
+}
+
+/** SSRF-hardened GDELT API fetch. Scoped tighter than fetchWithSafeRedirects:
+ *   - only https://api.gdeltproject.org/… is allowed
+ *   - redirect='manual' + any 3xx is rejected (GDELT API does not redirect)
+ *   - 10s per-hop timeout
+ *   - response body hard-capped at GDELT_MAX_BYTES
+ *  The three-layer SSRF guard requested in the overnight-run brief
+ *  (scheme allowlist https, no private IPs/localhost, no redirects to
+ *  them) is enforced at the host-string level — this adapter never
+ *  resolves user-supplied URLs so an IP-literal / RFC1918 target cannot
+ *  reach the fetch call. */
+async function fetchGdeltArtList(
+  fetchImpl: typeof globalThis.fetch,
+  url: string,
+): Promise<GdeltResponse> {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error(`gdelt: refusing to fetch malformed URL`);
+  }
+  if (parsed.protocol !== 'https:') {
+    throw new Error(`gdelt: refusing non-https URL (scheme=${parsed.protocol})`);
+  }
+  if (parsed.hostname !== GDELT_API_HOST) {
+    throw new Error(`gdelt: refusing non-GDELT host (${parsed.hostname})`);
+  }
+
+  const response = await fetchImpl(parsed.toString(), {
+    redirect: 'manual',
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  });
+  if (response.status >= 300 && response.status < 400) {
+    throw new Error(`gdelt: refusing to follow redirect (${response.status}) from ${parsed.host}`);
+  }
+  if (!response.ok) {
+    throw new Error(`gdelt: HTTP ${response.status} from ${parsed.host}`);
+  }
+
+  const body = await response.text();
+  if (body.length > GDELT_MAX_BYTES) {
+    throw new Error(`gdelt: response body ${body.length} exceeds ${GDELT_MAX_BYTES}B cap`);
+  }
+  try {
+    return JSON.parse(body) as GdeltResponse;
+  } catch {
+    throw new Error(`gdelt: response body is not valid JSON`);
+  }
+}
+
+/** Normalize a GDELT article title for similarity-based clustering.
+ *  Lowercase + drop non-alphanumeric + take the first 60 chars. Two
+ *  articles about the same event tend to share the first 60 chars of
+ *  their title after this normalization even when outlets re-caption
+ *  (e.g. prepending "Breaking:" or appending " – Reuters"). */
+export function gdeltTitleKey(title: string): string {
+  return title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .slice(0, 60);
+}
+
+/** From a GDELT ArtList response, cluster articles by title similarity
+ *  and produce one CandidateInput per cluster whose primary URL passes
+ *  classifyUrl(). Clusters below GDELT_MIN_TREND_SCORE (distinct outlets)
+ *  are dropped. The trend score is encoded in `summary` as a bracketed
+ *  prefix `[trend=N]` so the current ranker is tolerant of its presence
+ *  pre-column-add; the follow-up PR adds a dedicated `trend_score`
+ *  column on `news_topics_candidates` and reads it directly. */
+export function clusterGdeltArticles(response: GdeltResponse): CandidateInput[] {
+  const raw = Array.isArray(response.articles) ? response.articles : [];
+  // group articles by titleKey → { domains: Set, articles: GdeltArticle[] }
+  type Group = { readonly domains: Set<string>; readonly articles: GdeltArticle[] };
+  const groups = new Map<string, Group>();
+  for (const a of raw as GdeltArticle[]) {
+    if (typeof a?.title !== 'string' || typeof a?.url !== 'string') continue;
+    const key = gdeltTitleKey(a.title);
+    if (key.length === 0) continue;
+    const existing = groups.get(key);
+    if (existing) {
+      if (typeof a.domain === 'string') existing.domains.add(a.domain.toLowerCase());
+      existing.articles.push(a);
+    } else {
+      const domains = new Set<string>();
+      if (typeof a.domain === 'string') domains.add(a.domain.toLowerCase());
+      groups.set(key, { domains, articles: [a] });
+    }
+  }
+
+  const out: CandidateInput[] = [];
+  for (const [, group] of groups) {
+    const trendScore = group.domains.size;
+    if (trendScore < GDELT_MIN_TREND_SCORE) continue;
+
+    // Find the first article in the cluster whose URL passes classifyUrl()
+    // as a primary source. Articles are returned by GDELT in HybridRel
+    // order (most trending first), so the first primary we find is the
+    // best-signal primary for the cluster.
+    let primary: GdeltArticle | null = null;
+    for (const a of group.articles) {
+      if (typeof a.url !== 'string') continue;
+      const classification = classifyUrl(a.url);
+      if (classification.allowed && classification.role === 'primary') {
+        primary = a;
+        break;
+      }
+    }
+    if (!primary || typeof primary.url !== 'string' || typeof primary.title !== 'string') continue;
+
+    let host: string;
+    try {
+      host = normalizeHost(new URL(primary.url).hostname);
+    } catch {
+      continue;
+    }
+    const classification = classifyUrl(primary.url);
+    if (!classification.allowed || classification.role !== 'primary') continue;
+
+    out.push({
+      source_provider: 'gdelt',
+      source_category: classification.category,
+      source_title: primary.title,
+      source_url: primary.url,
+      source_host: host,
+      source_published_at:
+        typeof primary.seendate === 'string' ? parseGdeltSeenDate(primary.seendate) : null,
+      // Trend score encoded as a bracketed prefix pending the dedicated
+      // `trend_score` column on `news_topics_candidates` (follow-up PR).
+      summary: `[trend=${trendScore}] ${group.articles.length} article(s) across ${trendScore} outlet(s).`,
+      dedup_url_canon: canonicalizeUrl(primary.url),
+    });
+  }
+
+  // Sort by trend score descending so the ranker sees the highest-signal
+  // clusters first. Equal scores: stable order (first-seen wins).
+  out.sort((a, b) => {
+    const sa = extractTrendScore(a.summary);
+    const sb = extractTrendScore(b.summary);
+    return sb - sa;
+  });
+  return out;
+}
+
+/** Parse GDELT's YYYYMMDDTHHMMSSZ format back to an ISO 8601 string.
+ *  Returns null on any parse failure. */
+function parseGdeltSeenDate(s: string): string | null {
+  // Format: 20261010T053000Z
+  const m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/.exec(s);
+  if (!m) return null;
+  return `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}Z`;
+}
+
+/** Pull the trend score back out of the `[trend=N] ...` prefix, for
+ *  sorting. Returns 0 on any parse failure. */
+function extractTrendScore(summary: string | null): number {
+  if (!summary) return 0;
+  const m = /^\[trend=(\d+)]/.exec(summary);
+  return m ? Number(m[1]) : 0;
+}
+
+/** GDELT trending adapter. Only runs when GDELT_ENABLED=true in the
+ *  workers env — same gated-shadow-ship pattern as PRIVY_ENABLED /
+ *  FACT_CHECK_ENABLED. The adapter is wired into DEFAULT_ADAPTERS so
+ *  its health row appears in news_adapter_health immediately; a flag-
+ *  off tick records a success with 0 fetched. */
+export const gdeltAdapter: NewsIngestAdapter = {
+  name: 'gdelt',
+  defaultCategory: 'congress', // overridden per-article by classifyUrl.
+  async fetch(fetchImpl) {
+    if (process.env.GDELT_ENABLED !== 'true') return [];
+    const response = await fetchGdeltArtList(fetchImpl, GDELT_API_URL);
+    return clusterGdeltArticles(response);
+  },
+};
+
 /** V1 adapter registry. Future PRs append; the handler iterates. */
 export const DEFAULT_ADAPTERS: ReadonlyArray<NewsIngestAdapter> = [
   congressAdapter,
   blsAdapter,
   secEdgarAdapter,
+  gdeltAdapter,
 ];
 
 // ---------------------------------------------------------------------------

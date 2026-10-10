@@ -3,6 +3,10 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   __testing,
   buildNewsIngestHandler,
+  clusterGdeltArticles,
+  gdeltAdapter,
+  gdeltTitleKey,
+  GDELT_MIN_TREND_SCORE,
   type CandidateInput,
   type NewsIngestAdapter,
 } from '../../src/jobs/news-ingest.js';
@@ -305,6 +309,283 @@ function freshState(): FakeState {
     healthBulkRows: [],
   };
 }
+
+// ---------------------------------------------------------------------------
+// GDELT trending adapter — fixture-based tests
+// ---------------------------------------------------------------------------
+
+describe('gdeltTitleKey — cluster normalization', () => {
+  it('lowercases + strips punctuation + caps at 60 chars', () => {
+    const key = gdeltTitleKey('BREAKING: Senate Passes HR-1234, 52-48!');
+    expect(key).toBe('breaking senate passes hr 1234 52 48');
+  });
+
+  it('shares a leading substring across outlet-decorated variants of the same story', () => {
+    const a = gdeltTitleKey('Senate Passes HR-1234 — Reuters');
+    const b = gdeltTitleKey('Senate Passes HR-1234, Associated Press');
+    // The event signature `senate passes hr 1234` is stable across
+    // outlet-specific suffixes. Full-key equality requires the SAME
+    // suffix shape; realistic clustering is "same first 22 chars".
+    expect(a.slice(0, 22)).toBe('senate passes hr 1234 ');
+    expect(b.slice(0, 22)).toBe('senate passes hr 1234 ');
+  });
+
+  it('empty title → empty key (caller must drop)', () => {
+    expect(gdeltTitleKey('')).toBe('');
+    expect(gdeltTitleKey('   ')).toBe('');
+  });
+});
+
+describe('clusterGdeltArticles — operator trend-score + primary-source rules', () => {
+  // Build a fixture article. The GDELT API's ArtList response shape per
+  // https://blog.gdeltproject.org/gdelt-doc-2-0-api-debuts/ — fields url,
+  // title, seendate, domain are the four we read; others are tolerated.
+  function art(overrides: Partial<Record<string, unknown>>): Record<string, unknown> {
+    return {
+      url: 'https://www.congress.gov/bill/118hr1234',
+      title: 'Senate passes HR-1234 by vote of 52-48',
+      seendate: '20261010T053000Z',
+      domain: 'congress.gov',
+      language: 'English',
+      sourcecountry: 'United States',
+      ...overrides,
+    };
+  }
+
+  it('drops a cluster whose only outlet is a non-primary host', () => {
+    const resp = {
+      articles: [
+        art({
+          url: 'https://news.example.com/story',
+          domain: 'example.com',
+          title: 'Debate heats up over bill',
+        }),
+      ],
+    };
+    expect(clusterGdeltArticles(resp)).toEqual([]);
+  });
+
+  it('drops a cluster that only reaches 1 outlet (below GDELT_MIN_TREND_SCORE)', () => {
+    expect(GDELT_MIN_TREND_SCORE).toBe(2);
+    const resp = { articles: [art({ domain: 'congress.gov' })] };
+    expect(clusterGdeltArticles(resp)).toEqual([]);
+  });
+
+  it('emits a candidate for a cluster with ≥2 outlets AND a primary host', () => {
+    const resp = {
+      articles: [
+        art({ url: 'https://news.example.com/sen-bill', domain: 'example.com' }),
+        art({ url: 'https://other.example.net/sen-bill', domain: 'example.net' }),
+        art({ url: 'https://www.congress.gov/bill/118hr1234', domain: 'congress.gov' }),
+      ],
+    };
+    const out = clusterGdeltArticles(resp);
+    expect(out).toHaveLength(1);
+    expect(out[0]?.source_url).toBe('https://www.congress.gov/bill/118hr1234');
+    expect(out[0]?.source_provider).toBe('gdelt');
+    expect(out[0]?.source_category).toBe('congress');
+    // trend score = distinct domains = 3
+    expect(out[0]?.summary).toMatch(/^\[trend=3]/);
+  });
+
+  it('rejects a cluster of ≥2 outlets with NO primary host (operator rule)', () => {
+    const resp = {
+      articles: [
+        art({ url: 'https://news.example.com/sen-bill', domain: 'example.com' }),
+        art({ url: 'https://other.example.net/sen-bill', domain: 'example.net' }),
+      ],
+    };
+    expect(clusterGdeltArticles(resp)).toEqual([]);
+  });
+
+  it('sorts output by trend score desc (big viral first — operator rule)', () => {
+    const resp = {
+      articles: [
+        // Cluster A: 2 outlets, 1 primary (sec.gov).
+        {
+          url: 'https://www.sec.gov/litigation/litreleases/2026/lr-small',
+          domain: 'sec.gov',
+          title: 'SEC files complaint against ABC Corp',
+          seendate: '20261010T050000Z',
+        },
+        {
+          url: 'https://news.example.com/sec-abc',
+          domain: 'example.com',
+          title: 'SEC files complaint against ABC Corp',
+          seendate: '20261010T050100Z',
+        },
+        // Cluster B: 4 outlets, 1 primary (congress.gov).
+        ...[1, 2, 3].map((n) => ({
+          url: `https://news-${n}.example.com/sen-bill`,
+          domain: `news-${n}.example.com`,
+          title: 'Senate passes HR-1234 by vote of 52-48',
+          seendate: '20261010T053000Z',
+        })),
+        {
+          url: 'https://www.congress.gov/bill/118hr1234',
+          domain: 'congress.gov',
+          title: 'Senate passes HR-1234 by vote of 52-48',
+          seendate: '20261010T053000Z',
+        },
+      ],
+    };
+    const out = clusterGdeltArticles(resp);
+    expect(out).toHaveLength(2);
+    expect(out[0]?.source_url).toBe('https://www.congress.gov/bill/118hr1234');
+    expect(out[1]?.source_url).toContain('sec.gov');
+    expect(out[0]?.summary).toMatch(/^\[trend=4]/);
+    expect(out[1]?.summary).toMatch(/^\[trend=2]/);
+  });
+
+  it('parses GDELT seendate (YYYYMMDDTHHMMSSZ) to ISO 8601', () => {
+    const resp = {
+      articles: [
+        art({ url: 'https://a.example.com/story', domain: 'a.example.com' }),
+        art({ url: 'https://b.example.com/story', domain: 'b.example.com' }),
+        art({ url: 'https://www.congress.gov/bill/118hr1234', domain: 'congress.gov' }),
+      ],
+    };
+    const out = clusterGdeltArticles(resp);
+    expect(out[0]?.source_published_at).toBe('2026-10-10T05:30:00Z');
+  });
+
+  it('tolerates missing / non-string / malformed GDELT fields (lenient parser)', () => {
+    const resp = {
+      articles: [
+        // malformed: no url
+        { title: 'A', domain: 'congress.gov' },
+        // malformed: no title
+        { url: 'https://www.congress.gov/x', domain: 'congress.gov' },
+        // malformed: numeric url
+        { url: 42, title: 'X', domain: 'congress.gov' },
+        // good: a valid article
+        {
+          url: 'https://www.congress.gov/bill/118hr1234',
+          title: 'Senate passes HR-1234',
+          domain: 'congress.gov',
+          seendate: 'not-a-date',
+        },
+        {
+          url: 'https://news.example.com/sen-bill',
+          title: 'Senate passes HR-1234',
+          domain: 'example.com',
+        },
+      ],
+    };
+    const out = clusterGdeltArticles(resp);
+    expect(out).toHaveLength(1);
+    expect(out[0]?.source_published_at).toBeNull();
+  });
+
+  it('ignores a `articles: null` or non-array shape rather than throwing', () => {
+    expect(clusterGdeltArticles({ articles: null })).toEqual([]);
+    expect(clusterGdeltArticles({ articles: 'oops' })).toEqual([]);
+    expect(clusterGdeltArticles({})).toEqual([]);
+  });
+});
+
+describe('gdeltAdapter — SSRF-hardened fetch + env gate', () => {
+  const SAMPLE_JSON = JSON.stringify({
+    articles: [
+      {
+        url: 'https://www.congress.gov/bill/118hr1234',
+        title: 'Senate passes HR-1234',
+        domain: 'congress.gov',
+        seendate: '20261010T053000Z',
+      },
+      {
+        url: 'https://news.example.com/sen-bill',
+        title: 'Senate passes HR-1234',
+        domain: 'example.com',
+        seendate: '20261010T053100Z',
+      },
+    ],
+  });
+
+  it('returns [] when GDELT_ENABLED !== "true" (never hits the network)', async () => {
+    const prev = process.env.GDELT_ENABLED;
+    delete process.env.GDELT_ENABLED;
+    try {
+      const fetchImpl = vi.fn(async () => new Response('should not be called'));
+      const out = await gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch);
+      expect(out).toEqual([]);
+      expect(fetchImpl).not.toHaveBeenCalled();
+    } finally {
+      if (prev !== undefined) process.env.GDELT_ENABLED = prev;
+    }
+  });
+
+  it('fetches + parses + clusters when GDELT_ENABLED=true', async () => {
+    const prev = process.env.GDELT_ENABLED;
+    process.env.GDELT_ENABLED = 'true';
+    try {
+      const fetchImpl = vi.fn(
+        async () =>
+          new Response(SAMPLE_JSON, {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }),
+      );
+      const out = await gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch);
+      expect(fetchImpl).toHaveBeenCalledOnce();
+      const [calledUrl] = fetchImpl.mock.calls[0]!;
+      expect(String(calledUrl).startsWith('https://api.gdeltproject.org/')).toBe(true);
+      expect(out).toHaveLength(1);
+      expect(out[0]?.source_url).toBe('https://www.congress.gov/bill/118hr1234');
+    } finally {
+      if (prev === undefined) delete process.env.GDELT_ENABLED;
+      else process.env.GDELT_ENABLED = prev;
+    }
+  });
+
+  it('rejects a GDELT API redirect (3xx response is a hard fail)', async () => {
+    const prev = process.env.GDELT_ENABLED;
+    process.env.GDELT_ENABLED = 'true';
+    try {
+      const fetchImpl = vi.fn(
+        async () =>
+          new Response('', {
+            status: 302,
+            headers: { location: 'https://evil.example.com/pwn' },
+          }),
+      );
+      await expect(
+        gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch),
+      ).rejects.toThrow(/refusing to follow redirect/);
+    } finally {
+      if (prev === undefined) delete process.env.GDELT_ENABLED;
+      else process.env.GDELT_ENABLED = prev;
+    }
+  });
+
+  it('rejects a non-200 response', async () => {
+    const prev = process.env.GDELT_ENABLED;
+    process.env.GDELT_ENABLED = 'true';
+    try {
+      const fetchImpl = vi.fn(async () => new Response('server error', { status: 503 }));
+      await expect(
+        gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch),
+      ).rejects.toThrow(/HTTP 503/);
+    } finally {
+      if (prev === undefined) delete process.env.GDELT_ENABLED;
+      else process.env.GDELT_ENABLED = prev;
+    }
+  });
+
+  it('rejects malformed JSON (not-a-JSON body is a hard fail)', async () => {
+    const prev = process.env.GDELT_ENABLED;
+    process.env.GDELT_ENABLED = 'true';
+    try {
+      const fetchImpl = vi.fn(async () => new Response('not json {', { status: 200 }));
+      await expect(
+        gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch),
+      ).rejects.toThrow(/not valid JSON/);
+    } finally {
+      if (prev === undefined) delete process.env.GDELT_ENABLED;
+      else process.env.GDELT_ENABLED = prev;
+    }
+  });
+});
 
 describe('newsIngestHandler — happy path', () => {
   it('iterates all adapters and inserts allowed candidates', async () => {
