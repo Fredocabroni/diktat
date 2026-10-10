@@ -114,6 +114,19 @@ const DropHeadlineRewriteSchema = z.object({
     .max(400, 'Summary exceeds 400 chars.')
     .regex(SAFE_TEXT_RE, 'Summary may not contain angle brackets.'),
   claim: z.string().max(500, 'Claim exceeds 500 chars.'),
+  // A6 (Debate question) — the yes/no question the voter sees ABOVE
+  // the two stance buttons. Empty string = "no fair question exists for
+  // this topic (procedural event, empirical data release, or ambiguous
+  // framing)"; the drop-publish handler treats empty as a SKIP signal
+  // and never persists the row. 10..200 chars when present; angle
+  // brackets forbidden; must end with '?' when non-empty.
+  debate_question: z
+    .string()
+    .max(200, 'debate_question exceeds 200 chars.')
+    .regex(SAFE_TEXT_RE, 'debate_question may not contain angle brackets.')
+    .refine((s) => s === '' || (s.length >= 10 && s.endsWith('?')), {
+      message: 'debate_question must be empty OR 10-200 chars ending with "?"',
+    }),
 });
 type DropHeadlineRewriteOutput = z.infer<typeof DropHeadlineRewriteSchema>;
 
@@ -391,6 +404,42 @@ export const dropPublishHandler: JobHandler = async (row, deps) => {
   //     "never skip a day" trumps voice polish.
   const rewrite = await rewriteHeadlineSafely(deps, sel.chosen);
 
+  // (7a) A6 Debate question gate — if the prompt returned an empty
+  //      debate_question, the model is telling us "no fair yes/no
+  //      question exists for this topic" (empirical data release,
+  //      procedural non-controversy, §11-blocked framing). Per the A6
+  //      contract in drop-headline.ts §12, we SKIP the Drop and let
+  //      the next scheduler tick re-run against a fresh candidate.
+  //      This pairs with P1 (no raw-title fallback) to guarantee the
+  //      voter never sees a declarative fact as a vote prompt.
+  //
+  //      Gated behind A6_ENABLED so the gate ships but doesn't
+  //      activate until the DB column + the UI render-above-buttons
+  //      change are deployed. Default off; same gated-shadow-ship
+  //      pattern as COMMENTS_ENABLED / GDELT_ENABLED.
+  const a6Enabled = process.env.A6_ENABLED === 'true';
+  const debateQuestion = rewrite.debate_question ?? '';
+  if (a6Enabled && debateQuestion.length === 0) {
+    deps.logger.info({
+      event: 'drop_publish.a6_skip_no_fair_question',
+      candidateId: sel.chosen.id,
+      headlineProduced: rewrite.headline.length > 0,
+    });
+    // Stamp the skip outcome on the job row and exit — the next
+    // scheduler tick picks a fresh candidate. §5 "never skip a day"
+    // still holds via the scheduler's retry cadence; A6 only skips
+    // the SINGLE pass that produced no fair question.
+    await stampPayload(deps, row.id, {
+      ...row.payload,
+      a6_skip: {
+        reason: 'no_fair_question',
+        candidate_id: sel.chosen.id,
+        headline_produced: rewrite.headline.length > 0,
+      },
+    });
+    return;
+  }
+
   // (7b) Fact explainer (A4) — neutral both-sides-or-single-side
   //     explainer the user reads before voting. Same fail-tolerant
   //     posture as the headline rewrite: on any failure (missing
@@ -429,6 +478,14 @@ export const dropPublishHandler: JobHandler = async (row, deps) => {
       // for_summary (empty = "could not neutralize" per rule 10).
       fact_explainer: factExplainer,
       fact_explainer_generated_at: factExplainer === null ? null : now.toISOString(),
+      // A6: persist the debate_question when the model produced one.
+      // Empty string here would mean "A6_ENABLED is false AND the
+      // model returned empty" — persist null so the UI's render path
+      // falls through to the headline-only shape. Column is nullable
+      // by migration 20261013100000; the write is a no-op on a schema
+      // that lacks the column (A6 is behind A6_ENABLED and PR 199's
+      // migration gate for the shape prerequisites).
+      debate_question: debateQuestion.length > 0 ? debateQuestion : null,
     })
     .select('id')
     .single()) as { data: { id: string } | null; error: { message: string } | null };
@@ -582,7 +639,12 @@ async function rewriteHeadlineSafely(
   deps: Parameters<JobHandler>[1],
   candidate: ActiveCandidate,
 ): Promise<DropHeadlineRewriteOutput> {
-  const empty: DropHeadlineRewriteOutput = { headline: '', summary: '', claim: '' };
+  const empty: DropHeadlineRewriteOutput = {
+    headline: '',
+    summary: '',
+    claim: '',
+    debate_question: '',
+  };
   if (!deps.invoke) {
     deps.logger.warn({
       event: 'drop_publish.rewrite_skipped',

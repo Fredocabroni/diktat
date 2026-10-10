@@ -42,6 +42,14 @@ export interface DropCardTopic {
     readonly source_url: string;
     readonly posture: 'contested' | 'single_sided' | 'empirical';
   } | null;
+  /** A6 (migration 20261013100000): the yes/no debate question
+   *  rendered ABOVE the stance buttons. Null = either the row predates
+   *  A6, A6_ENABLED was off at drop-publish time, or the model
+   *  produced no fair question (in which case drop-publish SKIPS the
+   *  Drop entirely, so a null here on a visible row means the row
+   *  predates A6). Headline becomes the context line above the
+   *  question when it is present. */
+  readonly debateQuestion?: string | null;
 }
 
 export type StanceAction = 'agree' | 'disagree' | 'skip';
@@ -173,7 +181,23 @@ export function DropCard({
         </a>
       ) : null}
 
-      <div role="group" aria-label="Stance" className="mt-1 grid grid-cols-3 gap-3">
+      {topic.debateQuestion ? (
+        <p
+          id={`drop-question-${topic.id}`}
+          className="font-display text-xl font-semibold leading-snug text-text-primary"
+        >
+          {topic.debateQuestion}
+        </p>
+      ) : null}
+
+      <div
+        role="group"
+        aria-label="Stance"
+        aria-labelledby={
+          topic.debateQuestion ? `drop-question-${topic.id}` : `drop-headline-${topic.id}`
+        }
+        className="mt-1 grid grid-cols-3 gap-3"
+      >
         <StanceButton
           label="Disagree"
           tone="danger"
