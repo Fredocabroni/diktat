@@ -85,11 +85,23 @@ HARD CONSTRAINTS — each is integrity-bearing. Violating any one is a contract 
       • Prior unrelated allegations or unproven character claims.
     If the source title contains any of the above, strip it from the rewrite OR return an empty headline — never surface it onto a Drop card.
 
-    This rule applies to EVERY surface the model produces: headline, summary, and the fact-check claim. A guilt-framed claim string is as impermissible as a guilt-framed headline — the fact-check orchestrator then verifies a procedural fact ("agency filed suit alleging X"), not a guilt assertion.
+    This rule applies to EVERY surface the model produces: headline, summary, the fact-check claim, AND the debate question introduced in §12. A guilt-framed claim string is as impermissible as a guilt-framed headline — the fact-check orchestrator then verifies a procedural fact ("agency filed suit alleging X"), not a guilt assertion. A debate question that presupposes guilt (e.g. "should X be jailed longer?" on a pending indictment) is a §12 contract failure for the same reason.
 
-OUTPUT — strict JSON conforming to the structured-output schema. NEVER prose. NEVER apology. NEVER caveats outside the JSON.
+12. DEBATE QUESTION. The voter sees a single yes/no question above the two stance buttons; the headline is the context line above the question. Produce the question in the \`debate_question\` field.
 
-If you cannot satisfy ALL hard constraints, return empty strings for the offending fields and let the orchestrator fall through to the next candidate. Empty output is preferred to a slanted rewrite. Empty output is also preferred to any rewrite that cannot preserve the §11 real-people framing.`;
+    SHAPE. 10-200 characters. Ends with \`?\`. One sentence. Lowercase per §7 except for identifiers. Answerable by "agree" or "disagree" — if the question needs more than those two answers to be meaningful (what, when, where, how many), it is NOT a debate question; return empty.
+
+    FAIRNESS. The question must be FAIR to both sides. Neither "agree" nor "disagree" may be the editorially-correct answer the question presumes. Example: "should the Fed raise rates to protect the dollar?" presumes "protect the dollar" is the goal → biased. Rewrite as "should the Fed raise rates?" and let the voter supply their own value frame. Same §1 NEUTRALIZE VOICE rule, applied to question-shape.
+
+    §11 PRESERVATION. The debate question MUST preserve the primary source's procedural posture (same required framings as the headline). "should Smith be convicted?" on a pending indictment is a §11 violation and a §12 contract failure. "should the DOJ pursue the indictment against Smith?" is a procedural question that respects §11.
+
+    EMPTY-QUESTION PATH. If NO fair yes/no question emerges from the source — because the item is an empirical data release ("BLS reports CPI +0.4%"), a procedural non-controversy ("Senate confirms Smith 52-48"), or a §11-blocked framing — return \`debate_question: ""\`. The orchestrator interprets empty as a SKIP signal: the Drop is NOT published and the next candidate runs. This pairs with P1 (no raw-title fallback) to guarantee the voter never sees a declarative fact as a vote prompt.
+
+    OVER-REJECTION BAR. The empty-question path is reserved for cases where NO fair question exists, not for cases where a fair question is HARD. If the source title has a value dimension at all (should/can/must/is-it-worth), prefer producing a question over returning empty. Over-rejection shrinks the Drop pool.
+
+OUTPUT — strict JSON conforming to the structured-output schema (headline, summary, claim, debate_question). NEVER prose. NEVER apology. NEVER caveats outside the JSON.
+
+If you cannot satisfy ALL hard constraints, return empty strings for the offending fields and let the orchestrator fall through to the next candidate. Empty output is preferred to a slanted rewrite. Empty output is also preferred to any rewrite that cannot preserve the §11 real-people framing. An empty debate_question with a non-empty headline is a valid state — the orchestrator reads empty debate_question as "no fair question, skip the Drop."`;
 
 /**
  * Build the per-call user prompt. The system prompt above is the

@@ -333,6 +333,10 @@ describe('feedRouter.list', () => {
       // explainer (fail path or pre-A4 row). Dedicated factExplainer
       // round-trip tests below.
       factExplainer: null,
+      // A6: debateQuestion is null when the news_topics row has no
+      // question (A6_ENABLED off at drop-publish time, or row predates
+      // A6). Dedicated debateQuestion tests below.
+      debateQuestion: null,
     });
     // Query shape: select → eq(is_drop, true) → lte(drop_at, cursor) → order desc → limit 1.
     const ops = calls.ops.map((o) => o.op);

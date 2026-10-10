@@ -43,6 +43,15 @@ const envSchema = z.object({
   VAPID_PRIVATE_KEY: z.string().default(''),
   VAPID_SUBJECT: z.string().default(''),
 
+  // A6 (Debate question) feature gate. When true, drop-publish will
+  // skip publishing a Drop if the drop_headline_rewrite task returns
+  // an empty `debate_question` field — the model's signal that no
+  // fair yes/no question exists for the topic. Keep false until the
+  // DropCard render-above-buttons change is deployed AND the column
+  // 20261013100000 is applied. Same gated-shadow-ship pattern as
+  // GDELT_ENABLED / FACT_CHECK_ENABLED.
+  A6_ENABLED: boolFromString.default(false),
+
   // Telegram alerting (optional). Missing = alerter disabled — NEVER a boot
   // failure. Kept lenient (plain optional strings, no regex, unlike the api's
   // chat-id validation) precisely because the alerter is what REPORTS a boot
