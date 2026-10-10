@@ -37,12 +37,38 @@ alter table public.news_topics
   add column if not exists fact_explainer jsonb,
   add column if not exists fact_explainer_generated_at timestamptz;
 
+-- Defense-in-depth CHECK constraint. Application-layer validation lives
+-- in two places (Zod schema in drop-publish.ts at write; parseFactExplainer
+-- in feed.ts at read), but a direct psql session, migration script, or
+-- future misconfigured worker could persist an arbitrary payload — in
+-- particular a non-https source_url, which DropCard renders inside an
+-- anchor. The CHECK rejects any payload shape outside the contract.
+-- Security-reviewer PR #198 MEDIUM #1.
+alter table public.news_topics
+  add constraint news_topics_fact_explainer_shape check (
+    fact_explainer is null or (
+      jsonb_typeof(fact_explainer) = 'object'
+      and fact_explainer ? 'posture'
+      and (fact_explainer->>'posture') in ('contested', 'single_sided', 'empirical')
+      and fact_explainer ? 'for_summary'
+      and (
+        not (fact_explainer ? 'source_url')
+        or (fact_explainer->>'source_url') = ''
+        or (fact_explainer->>'source_url') like 'https://%'
+      )
+    )
+  );
+
 -- Partial index on NULL-explainer rows so a future backfill job can
--- find candidates cheaply. Non-NULL rows (the hot path) don't need
--- an index — they're read by news_topics_pkey or by drop_at order.
+-- find candidates cheaply. Narrowed to drop_at IS NOT NULL so retracted
+-- or pre-publication rows aren't picked up by a hypothetical backfill
+-- iterator — a retracted topic should never gain a freshly generated
+-- explainer that then flows to clients (security-reviewer PR #198
+-- LOW index-predicate fold-in).
 create index if not exists news_topics_fact_explainer_pending_idx
   on public.news_topics (drop_at desc)
-  where fact_explainer is null;
+  where fact_explainer is null
+    and drop_at is not null;
 
 commit;
 

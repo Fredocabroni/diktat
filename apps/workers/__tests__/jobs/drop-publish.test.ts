@@ -941,6 +941,50 @@ describe('dropPublishHandler — A4 fact explainer', () => {
     ).toBeDefined();
   });
 
+  // The Zod schema's refine on source_url is the enforcement point;
+  // the production adapter runs it via safeParse at invoke time. These
+  // unit tests exercise the schema directly (the fakeInvoke above does
+  // not run safeParse). PR #198 HIGH #2.
+  it('FactExplainerSchema rejects javascript: source_url', () => {
+    const result = __testing.FactExplainerSchema.safeParse({
+      for_summary: 'proponents argue...',
+      against_summary: '',
+      source_url: 'javascript:alert(1)',
+      posture: 'single_sided',
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('FactExplainerSchema rejects http:// source_url (https-only)', () => {
+    const result = __testing.FactExplainerSchema.safeParse({
+      for_summary: 'proponents argue...',
+      against_summary: '',
+      source_url: 'http://example.gov/plain',
+      posture: 'single_sided',
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('FactExplainerSchema accepts empty source_url (empty-escape-hatch path)', () => {
+    const result = __testing.FactExplainerSchema.safeParse({
+      for_summary: 'proponents argue...',
+      against_summary: '',
+      source_url: '',
+      posture: 'single_sided',
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('FactExplainerSchema accepts https source_url', () => {
+    const result = __testing.FactExplainerSchema.safeParse({
+      for_summary: 'proponents argue...',
+      against_summary: '',
+      source_url: 'https://www.congress.gov/example',
+      posture: 'single_sided',
+    });
+    expect(result.success).toBe(true);
+  });
+
   it('contested posture: full both-sides payload persisted', async () => {
     const state = rewriteState();
     const supabase = buildSupabase(state);

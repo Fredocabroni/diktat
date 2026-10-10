@@ -131,7 +131,16 @@ const FactExplainerPostureSchema = z.enum(['contested', 'single_sided', 'empiric
 const FactExplainerSchema = z.object({
   for_summary: z.string().max(1000, 'for_summary exceeds 1000 chars.'),
   against_summary: z.string().max(1000, 'against_summary exceeds 1000 chars.'),
-  source_url: z.string().max(2000, 'source_url exceeds 2000 chars.'),
+  // Scheme-constrained: empty OR https:// — never javascript:, data:, or
+  // http: (security-reviewer PR #198 HIGH #2 — stored XSS vector when
+  // DropCard renders this inside an anchor). The empty branch covers the
+  // "could not neutralize" escape hatch.
+  source_url: z
+    .string()
+    .max(2000, 'source_url exceeds 2000 chars.')
+    .refine((v) => v === '' || v.startsWith('https://'), {
+      message: 'source_url must be empty or begin with https://',
+    }),
   posture: FactExplainerPostureSchema,
 });
 type FactExplainerOutput = z.infer<typeof FactExplainerSchema>;
@@ -654,10 +663,16 @@ async function generateFactExplainerSafely(
       candidateId: candidate.id,
       message,
     });
+    // The alert body is static — scrubMessage covers PII-tagged
+    // patterns, but Zod parse-failure messages can embed raw model-
+    // output fragments (including source-title text that was fed into
+    // the prompt). Keep the raw message in the internal log only;
+    // the alerter sees a short, operator-facing stub.
+    // (security-reviewer PR #198 MEDIUM #3.)
     void deps.alerter?.alert(
       'error',
       'drop_publish fact_explainer_failed',
-      `candidate=${candidate.id} · ${message}`.slice(0, 500),
+      `candidate=${candidate.id} · see workers log for message`,
       {
         dedupKey: 'ai:failed:topic_fact_explainer',
         dedupTtlMs: 60 * 60_000,
@@ -747,4 +762,8 @@ export const __testing = {
   todayDropAtEt,
   CLUSTER_BLOCK_DAYS,
   DOMINANCE_RATIO,
+  // Zod schemas exposed so unit tests can assert the refine()
+  // constraints (scheme guard on source_url, posture enum).
+  // Production uses them via the adapter's safeParse at invoke time.
+  FactExplainerSchema,
 };

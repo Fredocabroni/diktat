@@ -600,6 +600,53 @@ describe('feedRouter.list', () => {
     expect(result.topics[0]?.factExplainer).toBeNull();
   });
 
+  it('factExplainer: non-https source_url reads as null (XSS guard — PR #198 HIGH #2)', async () => {
+    for (const bad of [
+      'javascript:alert(1)',
+      'data:text/html,<script>alert(1)</script>',
+      'http://example.gov/plain',
+      'file:///etc/passwd',
+    ]) {
+      const db = listDb({
+        topics: [
+          {
+            ...DROP_ROW,
+            fact_explainer: {
+              for_summary: 'proponents argue...',
+              against_summary: '',
+              source_url: bad,
+              posture: 'single_sided',
+            },
+          },
+        ],
+        latestShiftByTopic: {},
+      });
+      const caller = appRouter.createCaller(makeCtx({ db }));
+      const result = await caller.feed.list();
+      expect(result.topics[0]?.factExplainer).toBeNull();
+    }
+  });
+
+  it('factExplainer: oversized field reads as null (length guard — PR #198 MEDIUM #2)', async () => {
+    const db = listDb({
+      topics: [
+        {
+          ...DROP_ROW,
+          fact_explainer: {
+            for_summary: 'x'.repeat(1001),
+            against_summary: '',
+            source_url: 'https://example.gov/',
+            posture: 'single_sided',
+          },
+        },
+      ],
+      latestShiftByTopic: {},
+    });
+    const caller = appRouter.createCaller(makeCtx({ db }));
+    const result = await caller.feed.list();
+    expect(result.topics[0]?.factExplainer).toBeNull();
+  });
+
   it('factExplainer: empty for_summary reads as null (false-balance guard)', async () => {
     const db = listDb({
       topics: [
