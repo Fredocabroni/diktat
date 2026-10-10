@@ -24,7 +24,7 @@ import { useCallback, useRef, useState } from 'react';
 import { trpc } from '../../lib/trpc';
 
 import { BlockExhaustedBanner } from './BlockExhaustedBanner';
-import { DropCard, type DropCardVariant, type StanceAction } from './DropCard';
+import { DropCard, type DropCardVariant, type SelectedStance, type StanceAction } from './DropCard';
 import { NextDropCountdown } from './NextDropCountdown';
 
 interface DropTopic {
@@ -36,6 +36,9 @@ interface DropTopic {
   readonly category: string | null;
   readonly dropAt: string | null;
   readonly isBlockExhausted: boolean;
+  /** User's latest stance on this topic from feed.list. null = user
+   *  hasn't shifted on this topic yet. (P2.a server-side load.) */
+  readonly userStance: SelectedStance;
 }
 
 type DropState =
@@ -84,10 +87,24 @@ export function DropFeedClient(): React.JSX.Element {
   // Per-topic "last save failed" flag so the UI can show a retry
   // affordance. Cleared on the next successful save for that topic.
   const [saveErrorTopicId, setSaveErrorTopicId] = useState<string | null>(null);
+  // Per-topic optimistic selected stance. P2.a: the moment the user
+  // taps, this map holds the chosen stance so the button goes sticky-
+  // on immediately. On success it stays set (matching what the server
+  // now holds); on failure it's reverted and the red "couldn't save"
+  // affordance renders instead. Server-side `userStance` from feed.list
+  // is the baseline on first render and on reload — this map only
+  // overrides it mid-session.
+  const [optimisticStance, setOptimisticStance] = useState<Record<string, SelectedStance>>({});
 
   const onStance = useCallback(
     async (topicId: string, action: StanceAction) => {
       if (action === 'skip') return;
+      // Optimistic selected state. Flipped BEFORE the mutation so the
+      // UI responds instantly to the tap; reverted in the catch below
+      // if the write fails.
+      const newStance: SelectedStance = action === 'agree' ? 'agree' : 'disagree';
+      const priorOptimistic = optimisticStance[topicId];
+      setOptimisticStance((current) => ({ ...current, [topicId]: newStance }));
       // Reuse an existing pending key for this topic (a retry after a
       // failed submit) OR mint a new one. On success we clear the entry
       // so the NEXT tap always gets a fresh key — which is what makes
@@ -112,6 +129,15 @@ export function DropFeedClient(): React.JSX.Element {
         // errors are unaffected.
         setSaveErrorTopicId((current) => (current === topicId ? null : current));
       } catch {
+        // Revert optimistic selection to whatever it was before the tap
+        // (either a prior optimistic stance or `undefined`, which falls
+        // through to the server-side baseline).
+        setOptimisticStance((current) => {
+          const next = { ...current };
+          if (priorOptimistic === undefined) delete next[topicId];
+          else next[topicId] = priorOptimistic;
+          return next;
+        });
         // Retain the pending key. The next tap on this topic reuses it,
         // so the server's 23505 idempotency path returns the original
         // row if the failure was after the write hit the DB, or a
@@ -120,7 +146,7 @@ export function DropFeedClient(): React.JSX.Element {
         setSaveErrorTopicId(topicId);
       }
     },
-    [recordShift],
+    [recordShift, optimisticStance],
   );
 
   const state: DropState = list.isLoading
@@ -155,6 +181,12 @@ export function DropFeedClient(): React.JSX.Element {
           onStance={(action) => void onStance(state.topic.id, action)}
           disabled={recordShift.isPending}
           saveError={saveErrorTopicId === state.topic.id}
+          selected={
+            // Optimistic selection overrides server state so the UI
+            // responds instantly to a tap; server state is the baseline
+            // on first render and after reload.
+            optimisticStance[state.topic.id] ?? state.topic.userStance
+          }
         />
       ) : null}
     </section>
@@ -167,6 +199,7 @@ interface DropFlowProps {
   readonly onStance: (action: StanceAction) => void;
   readonly disabled: boolean;
   readonly saveError: boolean;
+  readonly selected: SelectedStance;
 }
 
 function DropFlow({
@@ -175,6 +208,7 @@ function DropFlow({
   onStance,
   disabled,
   saveError,
+  selected,
 }: DropFlowProps): React.JSX.Element {
   return (
     <div className="flex flex-col gap-4">
@@ -183,6 +217,7 @@ function DropFlow({
         variant={variant}
         onStance={onStance}
         disabled={disabled}
+        selected={selected}
         banner={topic.isBlockExhausted ? <BlockExhaustedBanner /> : null}
       />
       {saveError ? (

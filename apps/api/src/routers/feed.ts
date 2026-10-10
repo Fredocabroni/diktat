@@ -222,7 +222,58 @@ export const feedRouter = router({
         });
       }
 
-      const topics = (data ?? []).map((row) => ({
+      const topicRows = data ?? [];
+      const topicIds = topicRows.map((row) => row.id);
+
+      // Per-user latest-stance lookup for P2.a. ONE query per topic,
+      // each capped to the latest row via .limit(1).maybeSingle() so
+      // the fetch is strictly bounded regardless of how many historical
+      // shifts a user has on a topic. Uses the composite index on
+      // (user_id, topic_id, created_at desc) from migration
+      // 20260420090011. Earlier draft used a single
+      // `.in('topic_id', topicIds)` query with no LIMIT — flagged by
+      // security review on #196 as an unbounded fetch (a user with
+      // 1000 historical shifts on topic A would pull all 1000 just to
+      // read the latest). The parallel-maybeSingle shape avoids that.
+      //
+      // Non-fatal on error — a stance-lookup failure for one topic
+      // falls through to a `null` stance for that topic and the
+      // DropCard shows neutral buttons. Error log carries the PG
+      // error code (short, enum-like) rather than the message
+      // (which can echo UUIDs or query text — security-reviewer
+      // PR #196 Low 2).
+      const latestStance: Record<string, 'agree' | 'disagree' | null> = {};
+      if (topicIds.length > 0) {
+        await Promise.all(
+          topicIds.map(async (topicId) => {
+            const { data: shift, error: shiftErr } = (await ctx.db
+              .from('opinion_shifts')
+              .select('after_position')
+              .eq('user_id', ctx.userId)
+              .eq('topic_id', topicId)
+              .order('created_at', { ascending: false })
+              .limit(1)
+              .maybeSingle()) as unknown as {
+              data: { after_position: number } | null;
+              error: { code?: string; message: string } | null;
+            };
+            if (shiftErr) {
+              console.warn(
+                JSON.stringify({
+                  event: 'feed.list.stance_lookup_failed',
+                  code: shiftErr.code ?? 'unknown',
+                }),
+              );
+              return;
+            }
+            if (!shift) return;
+            latestStance[topicId] =
+              shift.after_position > 0 ? 'agree' : shift.after_position < 0 ? 'disagree' : null;
+          }),
+        );
+      }
+
+      const topics = topicRows.map((row) => ({
         id: row.id,
         headline: row.headline,
         sourceTitle: row.source_title,
@@ -234,6 +285,7 @@ export const feedRouter = router({
         curationMode: row.curation_mode,
         isBlockExhausted: row.is_block_exhausted,
         additionalSources: Array.isArray(row.additional_sources) ? row.additional_sources : [],
+        userStance: latestStance[row.id] ?? null,
       }));
 
       return { topics };

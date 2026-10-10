@@ -103,8 +103,24 @@ export interface FakeQueryResult<T> {
   error: { code?: string; message: string } | null;
 }
 
-export function fakeDb<T>(table: string, result: FakeQueryResult<T>) {
+/**
+ * Build a fake Supabase client that drives `.from(primary)` through
+ * one configured result and (optionally) permits a short allowlist of
+ * sidecar tables that return `{data: [], error: null}` for any chain.
+ *
+ * Any `.from(X)` where X is neither the primary nor an allowed sidecar
+ * throws — this is a test-time guard against resolvers quietly adding
+ * new DB access that a stub silently answered (security-reviewer
+ * PR #196 Low 1). Pass `sidecars: ['opinion_shifts']` from a test that
+ * knows the resolver reads a specific second table.
+ */
+export function fakeDb<T>(
+  table: string,
+  result: FakeQueryResult<T>,
+  options?: { readonly sidecars?: readonly string[] },
+) {
   const calls: { table: string; ops: { op: string; args: unknown[] }[] } = { table, ops: [] };
+  const allowedSidecars = new Set(options?.sidecars ?? []);
 
   const builder: Record<string, unknown> = {};
 
@@ -113,6 +129,7 @@ export function fakeDb<T>(table: string, result: FakeQueryResult<T>) {
   for (const op of [
     'select',
     'eq',
+    'in',
     'lt',
     'lte',
     'gt',
@@ -149,12 +166,32 @@ export function fakeDb<T>(table: string, result: FakeQueryResult<T>) {
   rpcBuilder.single = () => Promise.resolve(rpcOk);
   rpcBuilder.then = (resolve: (v: typeof rpcOk) => unknown) => Promise.resolve(resolve(rpcOk));
 
+  // A dedicated sidecar builder for non-primary tables. Returns an
+  // empty data array for any chained read, so a router that follows
+  // its primary query with a second lookup (e.g. feed.list's per-topic
+  // stance join against opinion_shifts) sees the expected
+  // `{data: [], error: null}` shape without failing the "unexpected
+  // table" guard. Tests that need to assert the shape of a secondary
+  // query should still use `fakeDbMulti` (below).
+  const sidecarBuilder: Record<string, unknown> = {};
+  for (const op of ['select', 'eq', 'in', 'lt', 'lte', 'gt', 'gte', 'order', 'limit']) {
+    sidecarBuilder[op] = () => sidecarBuilder;
+  }
+  const sidecarOk = { data: [], error: null };
+  sidecarBuilder.maybeSingle = () => Promise.resolve(sidecarOk);
+  sidecarBuilder.single = () => Promise.resolve(sidecarOk);
+  sidecarBuilder.then = (resolve: (v: typeof sidecarOk) => unknown) =>
+    Promise.resolve(resolve(sidecarOk));
+
   const db = {
     from: (t: string) => {
-      if (t !== table) {
-        throw new Error(`fakeDb: unexpected table "${t}", expected "${table}"`);
-      }
-      return builder;
+      if (t === table) return builder;
+      if (allowedSidecars.has(t)) return sidecarBuilder;
+      throw new Error(
+        `fakeDb: unexpected table "${t}" (primary="${table}", sidecars=[${Array.from(
+          allowedSidecars,
+        ).join(', ')}])`,
+      );
     },
     rpc: (_fn: string, _args?: unknown) => rpcBuilder,
   };

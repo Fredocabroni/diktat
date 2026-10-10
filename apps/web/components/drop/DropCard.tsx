@@ -36,6 +36,7 @@ export interface DropCardTopic {
 }
 
 export type StanceAction = 'agree' | 'disagree' | 'skip';
+export type SelectedStance = 'agree' | 'disagree' | null;
 
 export interface DropCardProps {
   readonly topic: DropCardTopic;
@@ -43,6 +44,12 @@ export interface DropCardProps {
   readonly onStance: (action: StanceAction) => void;
   readonly disabled?: boolean;
   readonly banner?: ReactNode;
+  /** User's current stance for this topic. Non-null → that button
+   *  renders in a sticky-on "selected" visual and a lowercase
+   *  confirmation pill appears below the button grid. Derived from
+   *  `feed.list` server state on first render + overridden with the
+   *  freshly-tapped stance after a successful mutation. (P2.a.) */
+  readonly selected?: SelectedStance;
 }
 
 const CATEGORY_LABELS: Record<string, string> = {
@@ -101,6 +108,7 @@ export function DropCard({
   onStance,
   disabled,
   banner,
+  selected = null,
 }: DropCardProps): React.JSX.Element {
   const source = parsePrimaryUrl(topic.primarySourceUrl);
   const categoryLabel = topic.category ? (CATEGORY_LABELS[topic.category] ?? topic.category) : null;
@@ -159,21 +167,39 @@ export function DropCard({
           label="Disagree"
           tone="danger"
           disabled={disabled}
+          selected={selected === 'disagree'}
+          dimmed={selected !== null && selected !== 'disagree'}
           onClick={() => onStance('disagree')}
         />
         <StanceButton
           label="Skip"
           tone="neutral"
           disabled={disabled}
+          selected={false}
+          dimmed={selected !== null}
           onClick={() => onStance('skip')}
         />
         <StanceButton
           label="Agree"
           tone="success"
           disabled={disabled}
+          selected={selected === 'agree'}
+          dimmed={selected !== null && selected !== 'agree'}
           onClick={() => onStance('agree')}
         />
       </div>
+
+      {selected !== null ? (
+        <p
+          role="status"
+          aria-live="polite"
+          data-component="DropCard.StanceConfirmation"
+          data-stance={selected}
+          className="-mt-2 text-sm text-text-secondary"
+        >
+          {`recorded · ${selected}`}
+        </p>
+      ) : null}
 
       <footer className="flex items-center justify-between gap-3 pt-1">
         <WhySourcesDialog />
@@ -196,22 +222,46 @@ interface StanceButtonProps {
   readonly tone: 'success' | 'danger' | 'neutral';
   readonly onClick: () => void;
   readonly disabled?: boolean;
+  /** This button is the user's current stance for this topic.
+   *  Sticky-on visual + aria-pressed. (P2.a.) */
+  readonly selected?: boolean;
+  /** Another button on the same card is selected. This button dims
+   *  to signal non-selection without disabling (user can change
+   *  their mind — "flip" is a non-progress-earning allowed path). */
+  readonly dimmed?: boolean;
 }
 
-function StanceButton({ label, tone, onClick, disabled }: StanceButtonProps): React.JSX.Element {
+function StanceButton({
+  label,
+  tone,
+  onClick,
+  disabled,
+  selected = false,
+  dimmed = false,
+}: StanceButtonProps): React.JSX.Element {
   const toneClass =
     tone === 'success'
       ? 'bg-success text-success-fg'
       : tone === 'danger'
         ? 'bg-danger text-danger-fg'
         : 'border border-ink-300 bg-surface-raised text-text-primary';
+  // Selected: thicker ring + full opacity. Dimmed: half opacity.
+  // Neither: baseline. Pointer stays active for every button so
+  // changing one's mind remains a single tap.
+  const stateClass = selected
+    ? 'ring-2 ring-brand-accent ring-offset-2 ring-offset-surface-card'
+    : dimmed
+      ? 'opacity-60'
+      : '';
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={disabled}
+      aria-pressed={selected}
       data-tone={tone}
-      className={`rounded-xl px-3 py-3 text-sm font-semibold transition-opacity disabled:cursor-not-allowed disabled:opacity-50 ${toneClass}`}
+      data-selected={selected ? 'true' : undefined}
+      className={`rounded-xl px-3 py-3 text-sm font-semibold transition-opacity disabled:cursor-not-allowed disabled:opacity-50 ${toneClass} ${stateClass}`}
     >
       {label}
     </button>
