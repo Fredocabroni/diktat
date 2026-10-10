@@ -113,11 +113,22 @@ run_failure_case() {
   fi
 }
 
-echo "=== Group A: real reviews PASS (exit 0, stdout 'ok') ==="
-run_case "H2 review body — verbatim from PR #46 r1 security-reviewer" \
+echo "=== Group A: real reviews with PASS-family verdicts (exit 0, stdout 'ok') ==="
+# H2: "### 4. Overall Verdict" + "**APPROVE WITH NOTES**" multi-line
+# shape. Classified via the multi-line PASS channel added in
+# fix/reviewer-gate-multiline-block.
+run_case "H2 review body — multi-line APPROVE WITH NOTES — verbatim from PR #46 r1 security-reviewer" \
   "${FIX}/real-review-h2.md" 0 0 ok
-run_case "H1 review body with leading '---' divider — verbatim from PR #46 r1 copy-linter" \
-  "${FIX}/real-review-h1-with-leading-divider.md" 0 0 ok
+# NOTE: real-review-h1-with-leading-divider.md was previously expected
+# as "ok" in this group. That classification was wrong — the fixture
+# contains `## OVERALL VERDICT\n\n**BLOCK**\n[prose]`, which is the
+# exact #198 multi-line BLOCK shape. The old gate missed it. The new
+# multi-line BLOCK channel catches it. See Group E for the corrected
+# expectation.
+# APPROVE.-trailing shape — addiction-auditor convention when the
+# auditor summarises after naming the verdict.
+run_case "**APPROVE.** trailing — addiction-auditor convention" \
+  "${FIX}/real-review-approve-dot.md" 0 0 ok
 
 echo
 echo "=== Group B: legitimate no-scope (exit 0, stdout 'empty') ==="
@@ -159,6 +170,17 @@ run_case "trailing standalone **BLOCK** line → ok_block" \
 # Explicit "Overall verdict: BLOCK" (addiction-auditor convention).
 run_case "explicit 'Overall verdict: BLOCK' line → ok_block" \
   "${FIX}/real-review-explicit-verdict-block.md" 0 0 ok_block
+# Multi-line "## Verdict\n\n**BLOCK**\n[prose]" shape — the shape that
+# slipped past the pre-fix gate on PR #198. See
+# check-review-output.sh channel (C) for the detection logic.
+run_case "multi-line '## Verdict\\n\\n**BLOCK**\\n[prose]' shape (verbatim from PR #198) → ok_block" \
+  "${FIX}/real-review-multiline-verdict-block.md" 0 0 ok_block
+# Previously-mislabelled H1 fixture: `## OVERALL VERDICT\n\n**BLOCK**\n[prose]`
+# is a multi-line BLOCK — the old gate returned "ok" and this test
+# suite's old expectation enshrined that bug. Correct expectation is
+# ok_block now that channel (C) fires on this shape.
+run_case "H1 fixture with 'OVERALL VERDICT' multi-line BLOCK — previously silently green-stamped → ok_block" \
+  "${FIX}/real-review-h1-with-leading-divider.md" 0 0 ok_block
 # Negative case: body mentions "blockchain" / "unblock" / ".block"
 # (prose), ends with PASS. Must NOT classify as ok_block.
 run_case "false-positive guard: 'blockchain' / 'unblock' / 'do not block merge' prose → ok (not ok_block)" \
@@ -170,6 +192,17 @@ run_case "false-positive guard: 'blockchain' / 'unblock' / 'do not block merge' 
 # over-eager "verdict" word match) is caught.
 run_case "APPROVE WITH NOTES fixture — still ok, not ok_block" \
   "${FIX}/real-review-h2.md" 0 0 ok
+
+echo
+echo "=== Group F: ambiguous-fail-closed (exit 0, stdout 'ambiguous') ==="
+# Review body with a markdown header and non-trivial content, but
+# NEITHER a BLOCK marker NOR a PASS-family marker anywhere. The
+# .claude/agents/*.md prompts all require ending with PASS or BLOCK, so
+# the absence of either is a reviewer-agent misbehaviour. The caller
+# must fail-closed on this (post body + exit 1) rather than silently
+# green-stamping the gate.
+run_case "no verdict in body + non-trivial content → ambiguous (fail-closed)" \
+  "${FIX}/real-review-ambiguous-no-verdict.md" 0 0 ambiguous
 
 echo
 echo "========================================"

@@ -359,6 +359,20 @@ jobs:
                 echo "::error::Reviewer verdict: BLOCK — see the posted PR comment for details."
                 exit 1
                 ;;
+              ambiguous)
+                # Ambiguous verdict: the body has a markdown header and
+                # non-trivial content, but no detectable BLOCK /
+                # PASS / APPROVE / NEEDS-USER-DECISION marker in the
+                # tail scan window. The reviewer-agent prompts in
+                # .claude/agents/*.md all instruct "End with PASS or
+                # BLOCK", so the absence of either is a reviewer-agent
+                # misbehaviour — fail closed. Post the body (operator
+                # needs to see what the agent emitted) and exit 1.
+                # Added in fix/reviewer-gate-multiline-block after #198.
+                gh pr comment "$PR_NUMBER" --body-file review_output.md
+                echo "::error::Reviewer gate: ambiguous verdict — review body posted but no explicit PASS/BLOCK marker found. Rerun the workflow or ask the reviewer agent to end with the explicit verdict."
+                exit 1
+                ;;
               empty)
                 echo "reviewer produced no substantive output (no files in scope)"
                 ;;
