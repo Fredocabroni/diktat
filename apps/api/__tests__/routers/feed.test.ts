@@ -606,6 +606,8 @@ describe('feedRouter.list', () => {
       'data:text/html,<script>alert(1)</script>',
       'http://example.gov/plain',
       'file:///etc/passwd',
+      ' https://example.gov/',
+      '\thttps://example.gov/',
     ]) {
       const db = listDb({
         topics: [

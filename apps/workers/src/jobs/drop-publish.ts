@@ -172,9 +172,16 @@ const DOMINANCE_RATIO = 2.0;
  *  orchestrator's user prompt. Security-reviewer PR #191 Low 6 +
  *  PR #193 Medium 1. */
 function sanitizeClaimContextField(raw: string): string {
+  // Match the sanitize-field pattern from fact-explainer.ts / drop-
+  // headline.ts: C0/C1 + bidi overrides + Unicode tag block. The
+  // string flows into fact-check-orchestrator's user prompt, so the
+  // same prompt-injection surface applies. Security-reviewer PR #199
+  // MEDIUM #1.
   // eslint-disable-next-line no-control-regex
-  const stripped = raw.replace(/[\u0000-\u001F\u007F-\u009F]/g, ' ');
-  return stripped.replace(/\s+/g, ' ').trim().slice(0, 2000);
+  const stripControl = raw.replace(/[\u0000-\u001F\u007F-\u009F‪-‮⁦-⁩]/g, ' ');
+
+  const stripTags = stripControl.replace(/[\uDB40][\uDC00-\uDC7F]/g, ' ');
+  return stripTags.replace(/\s+/g, ' ').trim().slice(0, 2000);
 }
 
 // ---------------------------------------------------------------------------
@@ -594,10 +601,16 @@ async function rewriteHeadlineSafely(
     // 1 hour per task via dedupKey; the global rate cap in makeAlerter
     // is the final safety net. Fire-and-forget so a Telegram outage
     // never affects the Drop pipeline.
+    //
+    // Body is a static stub (security-reviewer PR #199 MEDIUM #3):
+    // scrubMessage covers PII patterns, but Zod parse-failure and
+    // provider-error strings can embed raw source-title fragments
+    // from the user prompt. The internal warn log keeps the scrubbed
+    // message; the alerter sees an operator-facing pointer only.
     void deps.alerter?.alert(
       'error',
       'drop_publish rewrite_failed',
-      `candidate=${candidate.id} · ${message}`.slice(0, 500),
+      `candidate=${candidate.id} · see workers log for message`,
       {
         dedupKey: 'ai:rewrite_failed:drop_headline_rewrite',
         dedupTtlMs: 60 * 60_000,
@@ -762,8 +775,12 @@ export const __testing = {
   todayDropAtEt,
   CLUSTER_BLOCK_DAYS,
   DOMINANCE_RATIO,
-  // Zod schemas exposed so unit tests can assert the refine()
-  // constraints (scheme guard on source_url, posture enum).
-  // Production uses them via the adapter's safeParse at invoke time.
-  FactExplainerSchema,
+  // Expose a safeParse wrapper rather than the live schema object
+  // (security-reviewer PR #199 LOW #3). Tests can observe the
+  // refine() behaviour without the schema's full z.ZodObject surface
+  // leaking into the test seam — a `.parse` or `.extend` call-site
+  // in a test would start to look load-bearing and get mimicked
+  // elsewhere. Returns { success, data?, error? } to mirror Zod's
+  // native safeParse shape.
+  factExplainerSafeParse: (value: unknown) => FactExplainerSchema.safeParse(value),
 };

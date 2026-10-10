@@ -97,7 +97,7 @@ function sanitizeSourceField(raw: string, maxLen: number): string {
   const stripControl = raw.replace(/[\u0000-\u001F\u007F-\u009F‪-‮⁦-⁩]/g, ' ');
   // Unicode tag block (U+E0000..U+E007F). JS strings are UTF-16, so
   // these codepoints appear as surrogate pairs (DB40 DC00..DB40 DC7F).
-   
+
   const stripTags = stripControl.replace(/[\uDB40][\uDC00-\uDC7F]/g, ' ');
   return stripTags.replace(/\s+/g, ' ').trim().slice(0, maxLen);
 }
@@ -146,10 +146,18 @@ export function buildTopicFactExplainerUserPrompt(input: {
   // control-char strip and length cap operate on the natural form,
   // and the output lands inside the <source_*> tags as entity-encoded
   // text that cannot close the tag.
+  //
+  // The URL is intentionally NOT xml-escaped (security-reviewer PR #199
+  // HIGH): `new URL().href` already produces a well-formed URL that
+  // percent-encodes special chars; the only character xmlEscape would
+  // transform is `&` in query strings, and the correct URL escape for
+  // that is `%26`, not `&amp;`. Running xmlEscape on the URL would
+  // make the LLM echo back `&amp;`-contaminated strings that then flow
+  // to DropCard's <a href> and break navigation.
   const title = xmlEscape(sanitizeSourceField(input.sourceTitle, SOURCE_TITLE_MAX));
   const host = xmlEscape(sanitizeSourceField(input.sourceHost, SOURCE_HOST_MAX));
   const category = xmlEscape(sanitizeSourceField(input.sourceCategory, SOURCE_CATEGORY_MAX));
-  const url = xmlEscape(sanitizeSourceUrl(input.sourceUrl));
+  const url = sanitizeSourceUrl(input.sourceUrl);
   const summary = input.sourceSummary
     ? xmlEscape(sanitizeSourceField(input.sourceSummary, SOURCE_SUMMARY_MAX))
     : '';

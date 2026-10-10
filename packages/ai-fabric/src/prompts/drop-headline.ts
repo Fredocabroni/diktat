@@ -125,7 +125,7 @@ const SOURCE_CATEGORY_MAX = 64;
 function sanitizeSourceField(raw: string, maxLen: number): string {
   // eslint-disable-next-line no-control-regex
   const stripControl = raw.replace(/[\u0000-\u001F\u007F-\u009F‪-‮⁦-⁩]/g, ' ');
-   
+
   const stripTags = stripControl.replace(/[\uDB40][\uDC00-\uDC7F]/g, ' ');
   return stripTags.replace(/\s+/g, ' ').trim().slice(0, maxLen);
 }
@@ -167,10 +167,14 @@ export function buildDropHeadlineUserPrompt(input: {
   readonly sourceCategory: string;
   readonly sourceSummary: string | null;
 }): string {
+  // URL is NOT xml-escaped — new URL().href already produces a well-
+  // formed URL. xmlEscape would mangle query-string `&` into `&amp;`
+  // (security-reviewer PR #199 HIGH). All other source fields are
+  // escaped after sanitize + length-cap.
   const title = xmlEscape(sanitizeSourceField(input.sourceTitle, SOURCE_TITLE_MAX));
   const host = xmlEscape(sanitizeSourceField(input.sourceHost, SOURCE_HOST_MAX));
   const category = xmlEscape(sanitizeSourceField(input.sourceCategory, SOURCE_CATEGORY_MAX));
-  const url = xmlEscape(sanitizeSourceUrl(input.sourceUrl));
+  const url = sanitizeSourceUrl(input.sourceUrl);
   const summary = input.sourceSummary
     ? xmlEscape(sanitizeSourceField(input.sourceSummary, SOURCE_SUMMARY_MAX))
     : '';

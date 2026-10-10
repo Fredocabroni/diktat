@@ -945,8 +945,8 @@ describe('dropPublishHandler — A4 fact explainer', () => {
   // the production adapter runs it via safeParse at invoke time. These
   // unit tests exercise the schema directly (the fakeInvoke above does
   // not run safeParse). PR #198 HIGH #2.
-  it('FactExplainerSchema rejects javascript: source_url', () => {
-    const result = __testing.FactExplainerSchema.safeParse({
+  it('factExplainerSafeParse rejects javascript: source_url', () => {
+    const result = __testing.factExplainerSafeParse({
       for_summary: 'proponents argue...',
       against_summary: '',
       source_url: 'javascript:alert(1)',
@@ -955,8 +955,8 @@ describe('dropPublishHandler — A4 fact explainer', () => {
     expect(result.success).toBe(false);
   });
 
-  it('FactExplainerSchema rejects http:// source_url (https-only)', () => {
-    const result = __testing.FactExplainerSchema.safeParse({
+  it('factExplainerSafeParse rejects http:// source_url (https-only)', () => {
+    const result = __testing.factExplainerSafeParse({
       for_summary: 'proponents argue...',
       against_summary: '',
       source_url: 'http://example.gov/plain',
@@ -965,8 +965,8 @@ describe('dropPublishHandler — A4 fact explainer', () => {
     expect(result.success).toBe(false);
   });
 
-  it('FactExplainerSchema accepts empty source_url (empty-escape-hatch path)', () => {
-    const result = __testing.FactExplainerSchema.safeParse({
+  it('factExplainerSafeParse accepts empty source_url (empty-escape-hatch path)', () => {
+    const result = __testing.factExplainerSafeParse({
       for_summary: 'proponents argue...',
       against_summary: '',
       source_url: '',
@@ -975,8 +975,8 @@ describe('dropPublishHandler — A4 fact explainer', () => {
     expect(result.success).toBe(true);
   });
 
-  it('FactExplainerSchema accepts https source_url', () => {
-    const result = __testing.FactExplainerSchema.safeParse({
+  it('factExplainerSafeParse accepts https source_url', () => {
+    const result = __testing.factExplainerSafeParse({
       for_summary: 'proponents argue...',
       against_summary: '',
       source_url: 'https://www.congress.gov/example',

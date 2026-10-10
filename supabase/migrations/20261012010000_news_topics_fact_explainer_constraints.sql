@@ -22,8 +22,25 @@
 -- is permitted). Any pre-existing non-null rows must already match the
 -- shape — the Zod schema the drop-publish handler enforced at write
 -- time guarantees this. If a direct-psql write landed a non-conforming
--- row between the two migrations, ADD CONSTRAINT fails and the migration
--- rolls back cleanly; the fix is to clean up the bad row and re-apply.
+-- row between the two migrations, VALIDATE CONSTRAINT fails and that
+-- statement rolls back cleanly; the fix is to clean up the bad row and
+-- re-apply.
+--
+-- Lock profile (security-reviewer PR #199 MEDIUM #2):
+--   `ADD CONSTRAINT ... CHECK (...)` as a single statement takes an
+--   ACCESS EXCLUSIVE lock while it scans every existing row to prove
+--   the constraint. On a growing production table that lock blocks
+--   readers + writers for the duration of the scan. The two-step
+--   `NOT VALID` + `VALIDATE CONSTRAINT` pattern narrows the window:
+--     1. `ADD CONSTRAINT ... NOT VALID` — brief ACCESS EXCLUSIVE,
+--        does NOT scan existing rows. Enforces the predicate on all
+--        subsequent inserts/updates immediately.
+--     2. `VALIDATE CONSTRAINT` — SHARE UPDATE EXCLUSIVE lock during
+--        the row scan. Reads + ordinary writes proceed concurrently;
+--        only DDL on the same table is blocked.
+--   news_topics is small today (<1k rows), so the lock-time saving
+--   is immaterial right now, but this is defense in depth for the
+--   next time this shape is layered on a hot table.
 --
 -- Validation surface: covered via the unit tests on FactExplainerSchema
 -- in apps/workers/__tests__/jobs/drop-publish.test.ts and the
@@ -38,13 +55,25 @@ alter table public.news_topics
       and fact_explainer ? 'posture'
       and (fact_explainer->>'posture') in ('contested', 'single_sided', 'empirical')
       and fact_explainer ? 'for_summary'
+      and (fact_explainer->>'for_summary') <> ''
+      and char_length(fact_explainer->>'for_summary') <= 1000
+      and (
+        not (fact_explainer ? 'against_summary')
+        or char_length(fact_explainer->>'against_summary') <= 1000
+      )
       and (
         not (fact_explainer ? 'source_url')
         or (fact_explainer->>'source_url') = ''
-        or (fact_explainer->>'source_url') like 'https://%'
+        or (
+          (fact_explainer->>'source_url') like 'https://%'
+          and char_length(fact_explainer->>'source_url') <= 2000
+        )
       )
     )
-  );
+  ) not valid;
+
+alter table public.news_topics
+  validate constraint news_topics_fact_explainer_shape;
 
 -- Rebuild the partial index with the drop_at NOT NULL predicate.
 -- CREATE INDEX IF NOT EXISTS skips if a prior-shape index exists under
