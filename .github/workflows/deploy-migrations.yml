@@ -60,11 +60,41 @@ jobs:
         with:
           version: 2.107.0
 
+      # Bounded three-attempt retry on both supabase stack boot and
+      # schema apply — mirror of the pattern on migrations.yml landed
+      # in #206. The security-reviewer on #206 flagged the asymmetry:
+      # the hard-gate `validate` job here (prerequisite for `dry-run`
+      # and `apply` → prod) would still break on the same transient
+      # container-exit-1 that motivated the retry upstream, creating
+      # operational pressure to bypass on a legitimate prod deploy.
       - name: Start local supabase stack
-        run: supabase start
+        run: |
+          set -eo pipefail
+          for attempt in 1 2 3; do
+            if supabase start; then
+              echo "::notice::supabase start succeeded on attempt $attempt"
+              exit 0
+            fi
+            echo "::warning::supabase start failed on attempt $attempt; tearing down + retrying"
+            supabase stop --no-backup || true
+            sleep 5
+          done
+          echo "::error::supabase start failed after 3 attempts"
+          exit 1
 
       - name: Apply all migrations from empty
-        run: supabase db reset
+        run: |
+          set -eo pipefail
+          for attempt in 1 2 3; do
+            if supabase db reset; then
+              echo "::notice::supabase db reset succeeded on attempt $attempt"
+              exit 0
+            fi
+            echo "::warning::supabase db reset failed on attempt $attempt; retrying"
+            sleep 5
+          done
+          echo "::error::supabase db reset failed after 3 attempts"
+          exit 1
 
       - name: Behavioral DB tests (triggers / constraints / RLS)
         run: |
@@ -115,11 +145,21 @@ jobs:
         with:
           version: 2.107.0
 
+      # Route `vars.SUPABASE_PROJECT_REF` through an `env:` block —
+      # consistent with the fat-finger guard's `CONFIRM`/`REF` pattern
+      # (lines 96-103 above). PR #205-reviewer round 1 MED 1 flagged
+      # direct `${{ vars.* }}` interpolation into a shell command as a
+      # defensive-posture gap: `vars.*` is operator-controlled (not PR-
+      # author-controlled), so this is not an injection vector today,
+      # but if the var ever contains shell metacharacters the direct
+      # interpolation breaks out of the argument boundary. Via `env:`
+      # the shell never sees the value as syntax.
       - name: Link project
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
-        run: supabase link --project-ref "${{ vars.SUPABASE_PROJECT_REF }}"
+          PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+        run: supabase link --project-ref "$PROJECT_REF"
 
       - name: Dry-run — print pending migrations (applies nothing)
         env:
@@ -155,11 +195,13 @@ jobs:
         with:
           version: 2.107.0
 
+      # Same env-routing pattern as the dry-run job above.
       - name: Link project
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
-        run: supabase link --project-ref "${{ vars.SUPABASE_PROJECT_REF }}"
+          PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+        run: supabase link --project-ref "$PROJECT_REF"
 
       - name: Apply migrations to prod
         env:
