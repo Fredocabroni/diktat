@@ -10,9 +10,35 @@ import {
   type CandidateInput,
   type NewsIngestAdapter,
 } from '../../src/jobs/news-ingest.js';
+import type { Env } from '../../src/env.js';
 import type { ScheduledJobRow } from '../../src/jobs/scheduler.js';
 import type { Logger } from '../../src/logger.js';
 import type { ServiceClient } from '../../src/supabase.js';
+
+/** Hand-crafted minimal Env for tests. Avoids a full `loadEnv()` seed
+ *  (DATABASE_URL / SUPABASE_URL / UPSTASH_* would all be required
+ *  otherwise). Tests that care about GDELT_ENABLED produce a fresh
+ *  stub via `envWith({ GDELT_ENABLED: true })`. */
+const BASE_STUB_ENV: Env = {
+  NODE_ENV: 'test',
+  LOG_LEVEL: 'info',
+  DATABASE_URL: 'postgres://u:p@h:5432/d',
+  SUPABASE_URL: 'https://x.supabase.co',
+  SUPABASE_SERVICE_ROLE_KEY: 'srk',
+  UPSTASH_REDIS_REST_URL: 'https://r.upstash.io',
+  UPSTASH_REDIS_REST_TOKEN: 'tk',
+  PRIVY_ENABLED: false,
+  PRIVY_APP_ID: '',
+  PRIVY_APP_SECRET: '',
+  VAPID_PUBLIC_KEY: '',
+  VAPID_PRIVATE_KEY: '',
+  VAPID_SUBJECT: '',
+  GDELT_ENABLED: false,
+};
+function envWith(overrides: Partial<Env>): Env {
+  return { ...BASE_STUB_ENV, ...overrides };
+}
+const STUB_ENV_PROVIDER = (): Env => BASE_STUB_ENV;
 
 const { canonicalizeUrl, fetchAndParseRss } = __testing;
 
@@ -504,6 +530,39 @@ describe('clusterGdeltArticles — operator trend-score + primary-source rules',
     expect(out[0]?.trend_score).toBe(500);
   });
 
+  // Security-reviewer PR #201 round 3 MED 7.2 — explicit scheme assert.
+  // The storage-boundary scheme check lives on the clusterer, not on
+  // classifyUrl, so a future classifyUrl loosening cannot silently
+  // open a stored-XSS path through `source_url`.
+  describe('requireHttpsUrl (scheme-assert helper)', () => {
+    const { requireHttpsUrl } = __testing;
+
+    it.each([
+      ['http://congress.gov/x', 'http'],
+      ['javascript:alert(1)', 'javascript'],
+      ['data:text/html,<script>', 'data'],
+      ['file:///etc/passwd', 'file'],
+      ['ftp://congress.gov/x', 'ftp'],
+      // Protocol-relative URL — `new URL()` throws without a base, so
+      // the helper returns null via the try/catch branch.
+      ['//congress.gov/x', 'protocol-relative'],
+    ])('returns null for %s (%s)', (input, _label) => {
+      expect(requireHttpsUrl(input)).toBeNull();
+    });
+
+    it('returns the parsed URL for a well-formed https URL', () => {
+      const u = requireHttpsUrl('https://www.congress.gov/bill/118hr1234');
+      expect(u).not.toBeNull();
+      expect(u?.protocol).toBe('https:');
+      expect(u?.hostname).toBe('www.congress.gov');
+    });
+
+    it('returns null for a malformed URL that new URL() rejects', () => {
+      expect(requireHttpsUrl('not-a-url')).toBeNull();
+      expect(requireHttpsUrl('')).toBeNull();
+    });
+  });
+
   // Security-reviewer PR #201 round 2 — stamp dedicated numeric column.
   it('writes trend_score on each emitted candidate (not only in the summary prefix)', () => {
     const resp = {
@@ -543,172 +602,116 @@ describe('gdeltAdapter — SSRF-hardened fetch + env gate', () => {
       },
     ],
   });
+  const ENV_ON = envWith({ GDELT_ENABLED: true });
+  const ENV_OFF = envWith({ GDELT_ENABLED: false });
+  const okResponse = () => vi.fn(async () => new Response(SAMPLE_JSON, { status: 200 }));
 
-  it('returns [] when GDELT_ENABLED !== "true" (never hits the network)', async () => {
+  it('returns [] when env.GDELT_ENABLED is false (never hits the network)', async () => {
+    const fetchImpl = vi.fn(async () => new Response('should not be called'));
+    const out = await gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch, ENV_OFF);
+    expect(out).toEqual([]);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('fetches + parses + clusters when env.GDELT_ENABLED is true', async () => {
+    const fetchImpl = okResponse();
+    const out = await gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch, ENV_ON);
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    const [calledUrl] = fetchImpl.mock.calls[0]!;
+    expect(String(calledUrl).startsWith('https://api.gdeltproject.org/')).toBe(true);
+    expect(out).toHaveLength(1);
+    expect(out[0]?.source_url).toBe('https://www.congress.gov/bill/118hr1234');
+  });
+
+  it('rejects a GDELT API redirect (3xx response is a hard fail)', async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response('', {
+          status: 302,
+          headers: { location: 'https://evil.example.com/pwn' },
+        }),
+    );
+    await expect(
+      gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch, ENV_ON),
+    ).rejects.toThrow(/refusing to follow redirect/);
+  });
+
+  it('rejects a non-200 response', async () => {
+    const fetchImpl = vi.fn(async () => new Response('server error', { status: 503 }));
+    await expect(
+      gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch, ENV_ON),
+    ).rejects.toThrow(/HTTP 503/);
+  });
+
+  it('rejects malformed JSON (not-a-JSON body is a hard fail)', async () => {
+    const fetchImpl = vi.fn(async () => new Response('not json {', { status: 200 }));
+    await expect(
+      gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch, ENV_ON),
+    ).rejects.toThrow(/not valid JSON/);
+  });
+
+  // Security-reviewer PR #201 round 3 MED 3.1 — adapter MUST NOT read
+  // process.env; env.GDELT_ENABLED threaded through fetch() is the
+  // single source of truth.
+  it('does NOT read process.env; mutating process.env.GDELT_ENABLED has no effect', async () => {
+    const prev = process.env.GDELT_ENABLED;
+    // Set the raw env to a VALUE that would have enabled the pre-fix
+    // adapter (process.env.GDELT_ENABLED === 'true'). The adapter must
+    // ignore this and gate purely on the passed-in env parameter.
+    process.env.GDELT_ENABLED = 'true';
+    try {
+      const fetchImpl = vi.fn(async () => new Response('should not be called'));
+      const out = await gdeltAdapter.fetch(
+        fetchImpl as unknown as typeof globalThis.fetch,
+        ENV_OFF, // passed env says false → adapter must stay disabled
+      );
+      expect(out).toEqual([]);
+      expect(fetchImpl).not.toHaveBeenCalled();
+    } finally {
+      if (prev === undefined) delete process.env.GDELT_ENABLED;
+      else process.env.GDELT_ENABLED = prev;
+    }
+  });
+
+  // Mirror check — process.env says disabled but env arg says enabled;
+  // the adapter must honor the arg.
+  it('does NOT read process.env; empty raw env still fetches when passed env says enabled', async () => {
     const prev = process.env.GDELT_ENABLED;
     delete process.env.GDELT_ENABLED;
     try {
-      const fetchImpl = vi.fn(async () => new Response('should not be called'));
-      const out = await gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch);
-      expect(out).toEqual([]);
-      expect(fetchImpl).not.toHaveBeenCalled();
+      const fetchImpl = okResponse();
+      await gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch, ENV_ON);
+      expect(fetchImpl).toHaveBeenCalledOnce();
     } finally {
       if (prev !== undefined) process.env.GDELT_ENABLED = prev;
     }
   });
 
-  it('fetches + parses + clusters when GDELT_ENABLED=true', async () => {
-    const prev = process.env.GDELT_ENABLED;
-    process.env.GDELT_ENABLED = 'true';
-    try {
-      const fetchImpl = vi.fn(
-        async () =>
-          new Response(SAMPLE_JSON, {
-            status: 200,
-            headers: { 'content-type': 'application/json' },
-          }),
-      );
-      const out = await gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch);
-      expect(fetchImpl).toHaveBeenCalledOnce();
-      const [calledUrl] = fetchImpl.mock.calls[0]!;
-      expect(String(calledUrl).startsWith('https://api.gdeltproject.org/')).toBe(true);
-      expect(out).toHaveLength(1);
-      expect(out[0]?.source_url).toBe('https://www.congress.gov/bill/118hr1234');
-    } finally {
-      if (prev === undefined) delete process.env.GDELT_ENABLED;
-      else process.env.GDELT_ENABLED = prev;
-    }
-  });
-
-  it('rejects a GDELT API redirect (3xx response is a hard fail)', async () => {
-    const prev = process.env.GDELT_ENABLED;
-    process.env.GDELT_ENABLED = 'true';
-    try {
-      const fetchImpl = vi.fn(
-        async () =>
-          new Response('', {
-            status: 302,
-            headers: { location: 'https://evil.example.com/pwn' },
-          }),
-      );
-      await expect(
-        gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch),
-      ).rejects.toThrow(/refusing to follow redirect/);
-    } finally {
-      if (prev === undefined) delete process.env.GDELT_ENABLED;
-      else process.env.GDELT_ENABLED = prev;
-    }
-  });
-
-  it('rejects a non-200 response', async () => {
-    const prev = process.env.GDELT_ENABLED;
-    process.env.GDELT_ENABLED = 'true';
-    try {
-      const fetchImpl = vi.fn(async () => new Response('server error', { status: 503 }));
-      await expect(
-        gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch),
-      ).rejects.toThrow(/HTTP 503/);
-    } finally {
-      if (prev === undefined) delete process.env.GDELT_ENABLED;
-      else process.env.GDELT_ENABLED = prev;
-    }
-  });
-
-  it('rejects malformed JSON (not-a-JSON body is a hard fail)', async () => {
-    const prev = process.env.GDELT_ENABLED;
-    process.env.GDELT_ENABLED = 'true';
-    try {
-      const fetchImpl = vi.fn(async () => new Response('not json {', { status: 200 }));
-      await expect(
-        gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch),
-      ).rejects.toThrow(/not valid JSON/);
-    } finally {
-      if (prev === undefined) delete process.env.GDELT_ENABLED;
-      else process.env.GDELT_ENABLED = prev;
-    }
-  });
-
-  // Security-reviewer PR #201 round 2 — Zod-parsed env gate.
-  // boolFromString case-insensitively matches 'true'; nothing else.
-  it.each([
-    ['True', true],
-    ['TRUE', true],
-    ['true', true],
-    ['tRuE', true],
-  ])('enables on GDELT_ENABLED=%s (Zod-parse match)', async (flag, _expected) => {
-    const prev = process.env.GDELT_ENABLED;
-    process.env.GDELT_ENABLED = flag;
-    try {
-      const fetchImpl = vi.fn(async () => new Response(SAMPLE_JSON, { status: 200 }));
-      await gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch);
-      expect(fetchImpl).toHaveBeenCalledOnce();
-    } finally {
-      if (prev === undefined) delete process.env.GDELT_ENABLED;
-      else process.env.GDELT_ENABLED = prev;
-    }
-  });
-
-  it.each([
-    ['1', 'numeric string'],
-    ['yes', 'yes-string'],
-    ['on', 'on-string'],
-    ['false', 'explicit false'],
-    ['', 'empty string'],
-  ])('stays disabled on GDELT_ENABLED=%s (%s) per strict Zod bool semantics', async (flag) => {
-    const prev = process.env.GDELT_ENABLED;
-    process.env.GDELT_ENABLED = flag;
-    try {
-      const fetchImpl = vi.fn(async () => new Response('should not be called'));
-      const out = await gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch);
-      expect(out).toEqual([]);
-      expect(fetchImpl).not.toHaveBeenCalled();
-    } finally {
-      if (prev === undefined) delete process.env.GDELT_ENABLED;
-      else process.env.GDELT_ENABLED = prev;
-    }
-  });
-
   // Security-reviewer PR #201 round 2 — streaming body size cap.
-  // readBodyWithSizeCap trips mid-stream when total crosses the cap.
   it('aborts a response that streams past the size cap (does not fully buffer)', async () => {
-    const prev = process.env.GDELT_ENABLED;
-    process.env.GDELT_ENABLED = 'true';
-    try {
-      // Build a ReadableStream that yields a 3MB payload in 1MB chunks.
-      // GDELT_MAX_BYTES is 2MB — the second chunk tips us over so the
-      // reader throws BEFORE the third chunk is ever requested.
-      const chunk = new Uint8Array(1024 * 1024); // 1MB zero-filled
-      let pulls = 0;
-      const body = new ReadableStream({
-        pull(controller) {
-          if (pulls >= 3) {
-            controller.close();
-            return;
-          }
-          controller.enqueue(chunk);
-          pulls += 1;
-        },
-      });
-      const fetchImpl = vi.fn(
-        async () =>
-          new Response(body, {
-            status: 200,
-            headers: { 'content-type': 'application/json' },
-          }),
-      );
-      await expect(
-        gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch),
-      ).rejects.toThrow(/exceeds .* cap/);
-      // The pull callback must have fired at most 3 times — the reader
-      // tripped the cap after chunk 2 (2 MB) + 1 (3 MB total) and stopped
-      // pulling. The precise count varies with reader buffering; the
-      // important invariant is that we DID NOT buffer the full 3 MB
-      // response into memory before checking the size.
-      expect(pulls).toBeLessThanOrEqual(3);
-    } finally {
-      if (prev === undefined) delete process.env.GDELT_ENABLED;
-      else process.env.GDELT_ENABLED = prev;
-    }
+    const chunk = new Uint8Array(1024 * 1024); // 1 MB zero-filled
+    let pulls = 0;
+    const body = new ReadableStream({
+      pull(controller) {
+        if (pulls >= 3) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(chunk);
+        pulls += 1;
+      },
+    });
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(body, {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+    );
+    await expect(
+      gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch, ENV_ON),
+    ).rejects.toThrow(/exceeds .* cap/);
+    expect(pulls).toBeLessThanOrEqual(3);
   });
 });
 
@@ -729,7 +732,7 @@ describe('newsIngestHandler — happy path', () => {
         }),
       ]),
     ];
-    const handler = buildNewsIngestHandler(adapters);
+    const handler = buildNewsIngestHandler(adapters, STUB_ENV_PROVIDER);
 
     await handler(row(), { supabase, logger, fetch: vi.fn() as never });
 
@@ -757,7 +760,7 @@ describe('newsIngestHandler — happy path', () => {
         }),
       ]),
     ];
-    const handler = buildNewsIngestHandler(adapters);
+    const handler = buildNewsIngestHandler(adapters, STUB_ENV_PROVIDER);
 
     await handler(row(), { supabase, logger, fetch: vi.fn() as never });
 
@@ -781,7 +784,7 @@ describe('newsIngestHandler — happy path', () => {
         }),
       ]),
     ];
-    const handler = buildNewsIngestHandler(adapters);
+    const handler = buildNewsIngestHandler(adapters, STUB_ENV_PROVIDER);
 
     await handler(row(), { supabase, logger, fetch: vi.fn() as never });
 
@@ -808,7 +811,7 @@ describe('newsIngestHandler — happy path', () => {
         dedup_url_canon: 'https://bls.gov/news.release/empsit.htm',
       }),
     ]);
-    const handler = buildNewsIngestHandler([failingAdapter, goodAdapter]);
+    const handler = buildNewsIngestHandler([failingAdapter, goodAdapter], STUB_ENV_PROVIDER);
 
     await handler(row(), { supabase, logger, fetch: vi.fn() as never });
 
@@ -824,7 +827,7 @@ describe('newsIngestHandler — happy path', () => {
     const supabase = buildSupabase(state);
     const logger = buildLogger();
     const adapters = [fakeAdapter('congress', [candidate()])];
-    const handler = buildNewsIngestHandler(adapters);
+    const handler = buildNewsIngestHandler(adapters, STUB_ENV_PROVIDER);
 
     await handler(row(), { supabase, logger, fetch: vi.fn() as never });
 
@@ -849,7 +852,7 @@ describe('newsIngestHandler — happy path', () => {
         }),
       ]),
     ];
-    const handler = buildNewsIngestHandler(adapters);
+    const handler = buildNewsIngestHandler(adapters, STUB_ENV_PROVIDER);
 
     await handler(row(), { supabase, logger, fetch: vi.fn() as never });
 
@@ -868,7 +871,7 @@ describe('news_adapter_health — per-adapter liveness tracking', () => {
     const supabase = buildSupabase(state);
     const logger = buildLogger();
     const adapters = [fakeAdapter('congress', [candidate()])];
-    const handler = buildNewsIngestHandler(adapters);
+    const handler = buildNewsIngestHandler(adapters, STUB_ENV_PROVIDER);
 
     await handler(row(), { supabase, logger, fetch: vi.fn() as never });
 
@@ -898,7 +901,7 @@ describe('news_adapter_health — per-adapter liveness tracking', () => {
     const supabase = buildSupabase(state);
     const logger = buildLogger();
     const adapters = [fakeAdapter('congress', [candidate()])];
-    const handler = buildNewsIngestHandler(adapters);
+    const handler = buildNewsIngestHandler(adapters, STUB_ENV_PROVIDER);
 
     await handler(row(), { supabase, logger, fetch: vi.fn() as never });
 
@@ -927,7 +930,7 @@ describe('news_adapter_health — per-adapter liveness tracking', () => {
       defaultCategory: 'congress',
       fetch: vi.fn().mockRejectedValue(new Error('feed 503')),
     };
-    const handler = buildNewsIngestHandler([broken]);
+    const handler = buildNewsIngestHandler([broken], STUB_ENV_PROVIDER);
 
     await handler(row(), { supabase, logger, fetch: vi.fn() as never });
 
@@ -963,7 +966,10 @@ describe('news_adapter_health — per-adapter liveness tracking', () => {
     ];
     const supabase = buildSupabase(state);
     const logger = buildLogger();
-    const handler = buildNewsIngestHandler([fakeAdapter('congress', [candidate()])]);
+    const handler = buildNewsIngestHandler(
+      [fakeAdapter('congress', [candidate()])],
+      STUB_ENV_PROVIDER,
+    );
 
     await handler(row(), { supabase, logger, fetch: vi.fn() as never });
 
@@ -988,7 +994,10 @@ describe('news_adapter_health — per-adapter liveness tracking', () => {
     ];
     const supabase = buildSupabase(state);
     const logger = buildLogger();
-    const handler = buildNewsIngestHandler([fakeAdapter('brand_new', [candidate()])]);
+    const handler = buildNewsIngestHandler(
+      [fakeAdapter('brand_new', [candidate()])],
+      STUB_ENV_PROVIDER,
+    );
 
     await handler(row(), { supabase, logger, fetch: vi.fn() as never });
 
@@ -1008,7 +1017,10 @@ describe('news_adapter_health — per-adapter liveness tracking', () => {
     ];
     const supabase = buildSupabase(state);
     const logger = buildLogger();
-    const handler = buildNewsIngestHandler([fakeAdapter('never_fresh', [candidate()])]);
+    const handler = buildNewsIngestHandler(
+      [fakeAdapter('never_fresh', [candidate()])],
+      STUB_ENV_PROVIDER,
+    );
 
     await handler(row(), { supabase, logger, fetch: vi.fn() as never });
 

@@ -30,7 +30,7 @@ import Parser from 'rss-parser';
 
 import { classifyUrl, normalizeHost, type SourceCategory } from '@diktat/ai-fabric';
 
-import { readBoolEnv } from '../env.js';
+import { loadEnv, type Env } from '../env.js';
 import type { JobHandler } from './scheduler.js';
 
 // ---------------------------------------------------------------------------
@@ -58,13 +58,24 @@ export interface CandidateInput {
   readonly trend_score?: number | null;
 }
 
-/** Per-source adapter. Receives the fetch impl from HandlerDeps;
- *  returns the normalized candidate list. Failures throw — the
- *  scheduler retries the whole news_ingest tick with backoff. */
+/** Per-source adapter. Receives the fetch impl AND the validated Env
+ *  from the handler closure. Returns the normalized candidate list;
+ *  failures throw and the scheduler retries the whole news_ingest tick
+ *  with backoff.
+ *
+ *  Env is threaded explicitly (security-reviewer PR #201 round 3 MED
+ *  3.1) so no adapter ever reads `process.env` directly. The caller
+ *  — `buildNewsIngestHandler` — loads env once per tick via
+ *  `loadEnv()`, Zod-validates it, and passes the validated object
+ *  down. Hot-reloads of env vars without process restart cannot
+ *  toggle an adapter's feature flag without the Zod schema seeing
+ *  the new value, and a future refactor cannot silently drop the
+ *  gate because the gate variable is a function parameter, not a
+ *  module-scope `process.env` read. */
 export interface NewsIngestAdapter {
   readonly name: string;
   readonly defaultCategory: SourceCategory;
-  fetch(fetchImpl: typeof globalThis.fetch): Promise<CandidateInput[]>;
+  fetch(fetchImpl: typeof globalThis.fetch, env: Env): Promise<CandidateInput[]>;
 }
 
 /** Hard cap on RSS feed body size — guards against a hostile or
@@ -236,7 +247,7 @@ function normalizeRssItem(opts: {
 export const congressAdapter: NewsIngestAdapter = {
   name: 'congress',
   defaultCategory: 'congress',
-  async fetch(fetchImpl) {
+  async fetch(fetchImpl, _env) {
     // The /rss/ feeds on congress.gov cover bill actions, committee
     // reports, and floor activity. V1 uses the introduced-bills feed
     // (one of the highest-signal sources of "something happened").
@@ -268,7 +279,7 @@ export const congressAdapter: NewsIngestAdapter = {
 export const blsAdapter: NewsIngestAdapter = {
   name: 'bls',
   defaultCategory: 'bls_labor',
-  async fetch(fetchImpl) {
+  async fetch(fetchImpl, _env) {
     const feeds = ['https://www.bls.gov/feed/bls_latest.rss'];
     const all: CandidateInput[] = [];
     for (const url of feeds) {
@@ -289,7 +300,7 @@ export const blsAdapter: NewsIngestAdapter = {
 export const secEdgarAdapter: NewsIngestAdapter = {
   name: 'sec_edgar',
   defaultCategory: 'sec_filings',
-  async fetch(fetchImpl) {
+  async fetch(fetchImpl, _env) {
     const feeds = ['https://www.sec.gov/news/pressreleases.rss'];
     const all: CandidateInput[] = [];
     for (const url of feeds) {
@@ -505,12 +516,16 @@ export function clusterGdeltArticles(response: GdeltResponse): CandidateInput[] 
     }
     if (!primary || typeof primary.url !== 'string' || typeof primary.title !== 'string') continue;
 
-    let host: string;
-    try {
-      host = normalizeHost(new URL(primary.url).hostname);
-    } catch {
-      continue;
-    }
+    // Scheme assertion (security-reviewer PR #201 round 3 MED 7.2):
+    // `classifyUrl` currently rejects non-https schemes at its own
+    // first gate, but relying on that single layer couples a storage-
+    // boundary invariant to the host-classifier's internals. Assert
+    // the scheme explicitly here so a future `classifyUrl` change
+    // that loosens scheme-strictness cannot silently open a stored-
+    // XSS path through `source_url`.
+    const parsedUrl = requireHttpsUrl(primary.url);
+    if (parsedUrl === null) continue;
+    const host = normalizeHost(parsedUrl.hostname);
     const classification = classifyUrl(primary.url);
     if (!classification.allowed || classification.role !== 'primary') continue;
 
@@ -541,6 +556,25 @@ export function clusterGdeltArticles(response: GdeltResponse): CandidateInput[] 
   return out;
 }
 
+/** Parse a URL string and return the parsed URL ONLY if its scheme is
+ *  https:. Non-string input, malformed URL, or any other scheme →
+ *  null. Caller treats null as "drop this candidate".
+ *
+ *  Security-reviewer PR #201 round 3 MED 7.2: the storage-boundary
+ *  scheme assertion in `clusterGdeltArticles` was coupled to
+ *  `classifyUrl`'s internal scheme-strictness. This helper decouples
+ *  it so the invariant lives at the clusterer and can be tested in
+ *  isolation. */
+function requireHttpsUrl(raw: string): URL | null {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return null;
+  }
+  return u.protocol === 'https:' ? u : null;
+}
+
 /** Parse GDELT's YYYYMMDDTHHMMSSZ format back to an ISO 8601 string.
  *  Returns null on any parse failure. */
 function parseGdeltSeenDate(s: string): string | null {
@@ -550,24 +584,24 @@ function parseGdeltSeenDate(s: string): string | null {
   return `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}Z`;
 }
 
-/** GDELT trending adapter. Only runs when GDELT_ENABLED=true in the
- *  workers env — same gated-shadow-ship pattern as PRIVY_ENABLED /
- *  FACT_CHECK_ENABLED. The adapter is wired into DEFAULT_ADAPTERS so
- *  its health row appears in news_adapter_health immediately; a flag-
- *  off tick records a success with 0 fetched.
+/** GDELT trending adapter. Only runs when `env.GDELT_ENABLED` is true —
+ *  same gated-shadow-ship pattern as PRIVY_ENABLED / FACT_CHECK_ENABLED.
+ *  The adapter is wired into DEFAULT_ADAPTERS so its health row appears
+ *  in news_adapter_health immediately; a flag-off tick records a
+ *  success with 0 fetched.
  *
- *  Env gate goes through loadEnv() → Zod's boolFromString, which
- *  case-insensitively accepts 'true'/'True'/'TRUE' and nothing else
- *  (security-reviewer PR #201 MEDIUM). The prior `process.env.
- *  GDELT_ENABLED !== 'true'` check silently stayed disabled when
- *  Railway delivered 'True' or 'TRUE'. The fail-direction is still
- *  "errs toward disabled" on parse ambiguity: boolFromString returns
- *  false for anything that isn't lowercase-equal to 'true'. */
+ *  Env flows in through the `NewsIngestAdapter.fetch` signature from
+ *  the handler closure — the adapter NEVER reads `process.env`
+ *  directly. The validated Zod `Env` object is the single source of
+ *  truth for feature-flag state (security-reviewer PR #201 round 3
+ *  MED 3.1). boolFromString in `envSchema` normalises 'true'/'True'/
+ *  'TRUE' to boolean `true` and everything else to `false`, so a
+ *  Railway env hot-reload cannot bypass validation. */
 export const gdeltAdapter: NewsIngestAdapter = {
   name: 'gdelt',
   defaultCategory: 'congress', // overridden per-article by classifyUrl.
-  async fetch(fetchImpl) {
-    if (!readBoolEnv(process.env, 'GDELT_ENABLED')) return [];
+  async fetch(fetchImpl, env) {
+    if (!env.GDELT_ENABLED) return [];
     const response = await fetchGdeltArtList(fetchImpl, GDELT_API_URL);
     return clusterGdeltArticles(response);
   },
@@ -608,9 +642,24 @@ interface IngestSummary {
 const STALE_FRESH_WARN_MS = 24 * 60 * 60 * 1000;
 
 /** Build the news_ingest handler. Factory pattern so tests can inject
- *  an alternate adapter list (e.g. a single fake adapter). */
+ *  an alternate adapter list AND a hand-crafted `Env` stub without
+ *  needing every workers-env var (DATABASE_URL, SUPABASE_URL, ...) to
+ *  be present at test time.
+ *
+ *  Prod flow: `buildNewsIngestHandler()` is called at scheduler-build
+ *  time without args → `envProvider` defaults to `loadEnv`. At tick
+ *  time, the returned JobHandler calls `envProvider()` once to get the
+ *  validated Env snapshot, then threads it to every adapter. The
+ *  per-tick load lets us pick up Railway env rotations without a
+ *  process restart but still through the Zod validation.
+ *
+ *  Test flow: tests pass a stub `envProvider: () => fakeEnv as Env`
+ *  that returns a hand-crafted minimal Env. Each gdelt-adapter test
+ *  can toggle `GDELT_ENABLED` on that stub without touching
+ *  `process.env`. */
 export function buildNewsIngestHandler(
   adapters: ReadonlyArray<NewsIngestAdapter> = DEFAULT_ADAPTERS,
+  envProvider: () => Env = loadEnv,
 ): JobHandler {
   return async function newsIngestHandler(row, deps) {
     const fetchImpl = deps.fetch ?? globalThis.fetch;
@@ -618,9 +667,13 @@ export function buildNewsIngestHandler(
       throw new Error('news_ingest: no fetch implementation available');
     }
 
+    // Load + validate env ONCE per tick. Every adapter.fetch call
+    // receives the same validated snapshot — no mid-tick env drift.
+    const env = envProvider();
+
     const summaries: IngestSummary[] = [];
     for (const adapter of adapters) {
-      summaries.push(await ingestOne(adapter, fetchImpl, deps));
+      summaries.push(await ingestOne(adapter, fetchImpl, env, deps));
     }
 
     const totalInserted = summaries.reduce((s, x) => s + x.inserted, 0);
@@ -716,11 +769,12 @@ async function warnStaleAdapters(deps: Parameters<JobHandler>[1]): Promise<void>
 async function ingestOne(
   adapter: NewsIngestAdapter,
   fetchImpl: typeof globalThis.fetch,
+  env: Env,
   deps: Parameters<JobHandler>[1],
 ): Promise<IngestSummary> {
   let candidates: CandidateInput[];
   try {
-    candidates = await adapter.fetch(fetchImpl);
+    candidates = await adapter.fetch(fetchImpl, env);
   } catch (err) {
     const message = scrubMessage(err instanceof Error ? err.message : String(err));
     deps.logger.warn({
@@ -959,4 +1013,9 @@ async function stampPayload(
   }
 }
 
-export const __testing = { canonicalizeUrl, normalizeRssItem, fetchAndParseRss };
+export const __testing = {
+  canonicalizeUrl,
+  normalizeRssItem,
+  fetchAndParseRss,
+  requireHttpsUrl,
+};

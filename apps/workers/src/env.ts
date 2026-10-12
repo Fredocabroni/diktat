@@ -96,24 +96,6 @@ export function privyReady(env: Env): boolean {
   return env.PRIVY_ENABLED && env.PRIVY_APP_ID.length > 0 && env.PRIVY_APP_SECRET.length > 0;
 }
 
-/** Gate-only read of a single flag through the same boolFromString
- *  transform that `envSchema` uses, without demanding every other env
- *  var be set. Returns `false` if the var is absent, blank, or any
- *  value that isn't case-insensitively `'true'`.
- *
- *  Rationale (security-reviewer PR #201 MEDIUM): callers that only
- *  need one flag — like the GDELT adapter deciding whether to make an
- *  outbound call — would otherwise either (a) take the full `loadEnv()`
- *  dependency (which throws on missing DATABASE_URL etc. in test
- *  contexts), or (b) read `process.env.GDELT_ENABLED !== 'true'` with
- *  its own case-sensitivity logic that silently diverges from Zod. This
- *  helper is the shared one-liner that matches `boolFromString` exactly. */
-export function readBoolEnv(source: NodeJS.ProcessEnv, name: string): boolean {
-  const raw = source[name];
-  const parsed = boolFromString.safeParse(raw);
-  return parsed.success && parsed.data === true;
-}
-
 export function webPushReady(env: Env): boolean {
   return (
     env.VAPID_PUBLIC_KEY.length > 0 &&
