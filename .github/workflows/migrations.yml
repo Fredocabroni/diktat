@@ -82,16 +82,59 @@ jobs:
       # / TO {authenticated,service_role,anon} / references auth.users, so
       # the `auth` schema and the supabase roles MUST exist before the
       # migration apply — bare Postgres would fail those migrations.
+      #
+      # `supabase start` boots ~15 docker containers (Postgres, auth,
+      # storage, realtime, Studio, pgMeta, Mailpit, analytics, …) off
+      # ghcr.io-hosted images. Transient container-boot failures (image
+      # pull hiccup, random container exit 1 on the init race) are rare
+      # but observed — on commit f6fd6dd this step passed inside the
+      # deploy-migrations gate (same workflow logic, same CLI version,
+      # same runner image) and failed here on the same commit minutes
+      # apart. A bounded retry absorbs the transient without masking a
+      # genuine failure: three attempts, five-second sleep between,
+      # explicit `supabase stop` between attempts so container state is
+      # torn down cleanly, final failure propagates the exit code.
       - name: Start local supabase stack
-        run: supabase start
+        run: |
+          set -eo pipefail
+          for attempt in 1 2 3; do
+            if supabase start; then
+              echo "::notice::supabase start succeeded on attempt $attempt"
+              exit 0
+            fi
+            echo "::warning::supabase start failed on attempt $attempt; tearing down + retrying"
+            supabase stop --no-backup || true
+            sleep 5
+          done
+          echo "::error::supabase start failed after 3 attempts"
+          exit 1
 
       # `supabase db reset` drops the local DB, recreates it, and applies
       # every migration in `supabase/migrations/` in timestamp order from
       # empty. No `--no-seed` needed: `supabase/seed.sql` does not exist
       # in this repo. Non-zero exit on the first migration that errors;
       # the job inherits that exit code.
+      #
+      # Same bounded retry as `supabase start` — the failure observed on
+      # commit f6fd6dd was `error running container: exit 1` at
+      # `Initialising schema` (supabase CLI's internal init-schema
+      # container step, BEFORE any user migration runs). A real
+      # migration SQL error would surface in a subsequent attempt the
+      # same way, and three attempts bound the retry cost at ~45 s even
+      # in the worst case.
       - name: Apply all migrations from empty
-        run: supabase db reset
+        run: |
+          set -eo pipefail
+          for attempt in 1 2 3; do
+            if supabase db reset; then
+              echo "::notice::supabase db reset succeeded on attempt $attempt"
+              exit 0
+            fi
+            echo "::warning::supabase db reset failed on attempt $attempt; retrying"
+            sleep 5
+          done
+          echo "::error::supabase db reset failed after 3 attempts"
+          exit 1
 
       # Behavioral DB tests under `supabase/tests/sql/**.test.sql`.
       # The stack is still up from `supabase start`; Postgres on

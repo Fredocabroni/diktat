@@ -7,8 +7,17 @@ on:
     branches: [main]
 
 concurrency:
+  # On PR branches, cancel in-progress on rapid re-push to save CI
+  # minutes — the newer push supersedes the older. On push-to-main,
+  # NEVER cancel: Railway deploy triggers on the main CI check-suite,
+  # and a cancelled suite is treated by Railway as "CI not passed" →
+  # the deploy is silently skipped. Observed on PR #203's merge
+  # (commit 0044388): a follow-on main merge arrived while CI was
+  # still running, cancelled it, and Railway skipped the deploy. Fix
+  # keeps each main merge's CI run through to a terminal conclusion
+  # so Railway sees pass/fail, never cancelled.
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   TURBO_TELEMETRY_DISABLED: 1
