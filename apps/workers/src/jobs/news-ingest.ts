@@ -218,12 +218,16 @@ async function fetchAndParseRss(
 
 /** Build a CandidateInput from a parsed RSS item. Returns null if the
  *  item's URL fails parsing (defensive; rss-parser usually gives us
- *  well-formed URLs but the input is upstream). */
+ *  well-formed URLs but the input is upstream) OR if the URL exceeds
+ *  INGEST_MAX_URL_CHARS. source_title is truncated to
+ *  INGEST_MAX_TITLE_CHARS. These length caps mirror the GDELT path
+ *  (security-reviewer PR #207 round-1 LOW 3). */
 function normalizeRssItem(opts: {
   provider: string;
   defaultCategory: SourceCategory;
   item: { title: string; link: string; isoDate: string | null; contentSnippet: string | null };
 }): CandidateInput | null {
+  if (opts.item.link.length > INGEST_MAX_URL_CHARS) return null;
   let host: string;
   try {
     host = normalizeHost(new URL(opts.item.link).hostname);
@@ -233,11 +237,13 @@ function normalizeRssItem(opts: {
   return {
     source_provider: opts.provider,
     source_category: opts.defaultCategory,
-    source_title: opts.item.title,
+    source_title: opts.item.title.slice(0, INGEST_MAX_TITLE_CHARS),
     source_url: opts.item.link,
     source_host: host,
     source_published_at: opts.item.isoDate,
-    summary: opts.item.contentSnippet ? opts.item.contentSnippet.slice(0, 1000) : null,
+    summary: opts.item.contentSnippet
+      ? opts.item.contentSnippet.slice(0, INGEST_MAX_SUMMARY_CHARS)
+      : null,
     dedup_url_canon: canonicalizeUrl(opts.item.link),
   };
 }
@@ -514,13 +520,16 @@ export function gdeltTitleKey(title: string): string {
     .slice(0, 60);
 }
 
-/** Per-field length caps on GDELT-sourced strings before DB insert
- *  (security-reviewer PR #201 round 3 MED 2.3 + LOW 2.4). RSS adapters
- *  already apply equivalent caps via `normalizeRssItem`; mirror the
- *  defensive posture here so a hostile or misbehaved GDELT response
- *  cannot land arbitrarily long values in `source_title` / `source_url`. */
-const GDELT_MAX_TITLE_CHARS = 2000;
-const GDELT_MAX_URL_CHARS = 2048;
+/** Per-field length caps on ingest-adapter strings before DB insert
+ *  (security-reviewer PR #201 round 3 MED 2.3 + LOW 2.4 + PR #207
+ *  round-1 LOW 3). Applied in BOTH the GDELT path AND the RSS path
+ *  via `normalizeRssItem` — PR #207 round-1 reviewer correctly flagged
+ *  the earlier comment claiming "RSS adapters already apply equivalent
+ *  caps" as factually wrong; only `summary` had a cap, not title / url.
+ *  Both paths now share these constants and the defensive posture. */
+const INGEST_MAX_TITLE_CHARS = 2000;
+const INGEST_MAX_URL_CHARS = 2048;
+const INGEST_MAX_SUMMARY_CHARS = 1000;
 
 /** From a GDELT ArtList response, cluster articles by title similarity
  *  and produce one CandidateInput per cluster whose primary URL passes
@@ -605,8 +614,8 @@ export function clusterGdeltArticles(response: GdeltResponse): CandidateInput[] 
     // Length caps BEFORE the scheme-assert URL parse — a hostile upstream
     // could ship a 100 KB URL string that passes classifyUrl's hostname
     // suffix match but inflates index + TOAST storage.
-    if (primary.url.length > GDELT_MAX_URL_CHARS) continue;
-    const title = primary.title.slice(0, GDELT_MAX_TITLE_CHARS);
+    if (primary.url.length > INGEST_MAX_URL_CHARS) continue;
+    const title = primary.title.slice(0, INGEST_MAX_TITLE_CHARS);
 
     // Scheme assertion (security-reviewer PR #201 round 3 MED 7.2):
     // `classifyUrl` currently rejects non-https schemes at its own
@@ -1144,7 +1153,7 @@ export const __testing = {
   fetchAndParseRss,
   requireHttpsUrl,
   resetGdeltRateLimitState,
-  GDELT_MAX_TITLE_CHARS,
-  GDELT_MAX_URL_CHARS,
+  INGEST_MAX_TITLE_CHARS,
+  INGEST_MAX_URL_CHARS,
   GDELT_MIN_FETCH_INTERVAL_MS,
 };
