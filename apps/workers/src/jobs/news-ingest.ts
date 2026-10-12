@@ -30,6 +30,7 @@ import Parser from 'rss-parser';
 
 import { classifyUrl, normalizeHost, type SourceCategory } from '@diktat/ai-fabric';
 
+import { loadEnv, type Env } from '../env.js';
 import type { JobHandler } from './scheduler.js';
 
 // ---------------------------------------------------------------------------
@@ -48,15 +49,33 @@ export interface CandidateInput {
   readonly source_published_at: string | null; // ISO 8601
   readonly summary: string | null;
   readonly dedup_url_canon: string;
+  /** Distinct-outlet count for the cluster at ingest time. Non-null
+   *  for trending-source adapters (GDELT today, Grok + Reddit later);
+   *  null for primary-source RSS adapters whose candidates don't
+   *  carry a trending signal. Persisted to news_topics_candidates
+   *  via migration 20261014000000. news-dedup-rank will bias
+   *  rank_score on this in a follow-up PR. */
+  readonly trend_score?: number | null;
 }
 
-/** Per-source adapter. Receives the fetch impl from HandlerDeps;
- *  returns the normalized candidate list. Failures throw — the
- *  scheduler retries the whole news_ingest tick with backoff. */
+/** Per-source adapter. Receives the fetch impl AND the validated Env
+ *  from the handler closure. Returns the normalized candidate list;
+ *  failures throw and the scheduler retries the whole news_ingest tick
+ *  with backoff.
+ *
+ *  Env is threaded explicitly (security-reviewer PR #201 round 3 MED
+ *  3.1) so no adapter ever reads `process.env` directly. The caller
+ *  — `buildNewsIngestHandler` — loads env once per tick via
+ *  `loadEnv()`, Zod-validates it, and passes the validated object
+ *  down. Hot-reloads of env vars without process restart cannot
+ *  toggle an adapter's feature flag without the Zod schema seeing
+ *  the new value, and a future refactor cannot silently drop the
+ *  gate because the gate variable is a function parameter, not a
+ *  module-scope `process.env` read. */
 export interface NewsIngestAdapter {
   readonly name: string;
   readonly defaultCategory: SourceCategory;
-  fetch(fetchImpl: typeof globalThis.fetch): Promise<CandidateInput[]>;
+  fetch(fetchImpl: typeof globalThis.fetch, env: Env): Promise<CandidateInput[]>;
 }
 
 /** Hard cap on RSS feed body size — guards against a hostile or
@@ -228,7 +247,7 @@ function normalizeRssItem(opts: {
 export const congressAdapter: NewsIngestAdapter = {
   name: 'congress',
   defaultCategory: 'congress',
-  async fetch(fetchImpl) {
+  async fetch(fetchImpl, _env) {
     // The /rss/ feeds on congress.gov cover bill actions, committee
     // reports, and floor activity. V1 uses the introduced-bills feed
     // (one of the highest-signal sources of "something happened").
@@ -260,7 +279,7 @@ export const congressAdapter: NewsIngestAdapter = {
 export const blsAdapter: NewsIngestAdapter = {
   name: 'bls',
   defaultCategory: 'bls_labor',
-  async fetch(fetchImpl) {
+  async fetch(fetchImpl, _env) {
     const feeds = ['https://www.bls.gov/feed/bls_latest.rss'];
     const all: CandidateInput[] = [];
     for (const url of feeds) {
@@ -281,7 +300,7 @@ export const blsAdapter: NewsIngestAdapter = {
 export const secEdgarAdapter: NewsIngestAdapter = {
   name: 'sec_edgar',
   defaultCategory: 'sec_filings',
-  async fetch(fetchImpl) {
+  async fetch(fetchImpl, _env) {
     const feeds = ['https://www.sec.gov/news/pressreleases.rss'];
     const all: CandidateInput[] = [];
     for (const url of feeds) {
@@ -295,11 +314,305 @@ export const secEdgarAdapter: NewsIngestAdapter = {
   },
 };
 
+// ---------------------------------------------------------------------------
+// GDELT trending adapter (PR fix/gdelt-ingestor)
+// ---------------------------------------------------------------------------
+
+/** Hard-pinned GDELT API host. The adapter refuses to fetch any other host.
+ *  Defense-in-depth: a future config bug can't accidentally point this
+ *  adapter at an attacker-controlled URL. */
+const GDELT_API_HOST = 'api.gdeltproject.org';
+const GDELT_API_URL =
+  'https://api.gdeltproject.org/api/v2/doc/doc?query=sourcecountry%3AUS%20sourcelang%3Aeng%20(domain%3Agov%20OR%20theme%3AUSCOURTS%20OR%20theme%3ATRIAL)&mode=ArtList&format=json&sort=HybridRel&maxrecords=250&timespan=15min';
+
+/** Max response body size from the GDELT API. Legitimate ArtList JSON for
+ *  250 records tops out around 400 KB; the 2MB cap is far above that while
+ *  still bounding OOM risk. */
+const GDELT_MAX_BYTES = 2 * 1024 * 1024;
+
+/** Hard cap on `response.articles.length` the clusterer will process in
+ *  one tick. GDELT_API_URL hardcodes `maxrecords=250`, so a well-behaved
+ *  response fits inside this cap. Guards against a hostile or
+ *  misconfigured upstream response that ships thousands of entries:
+ *  without this cap, the O(N) grouping + per-article regex in
+ *  gdeltTitleKey would run on every entry before the 60-char slice.
+ *  Security-reviewer PR #201 MEDIUM. */
+const GDELT_MAX_ARTICLES = 500;
+
+/** Minimum distinct-domain count below which the adapter will not surface
+ *  a candidate. The operator's trend-score rule is "number of distinct
+ *  outlets covering the same story in the window" — a one-source "story"
+ *  has no trending signal, so we require ≥ 2. */
+export const GDELT_MIN_TREND_SCORE = 2;
+
+/** Shape of the GDELT ArtList article we care about. Extra fields are
+ *  ignored — the parser stays lenient so a future field addition doesn't
+ *  break ingestion. */
+interface GdeltArticle {
+  readonly url?: unknown;
+  readonly title?: unknown;
+  readonly seendate?: unknown;
+  readonly domain?: unknown;
+  readonly language?: unknown;
+  readonly sourcecountry?: unknown;
+}
+
+interface GdeltResponse {
+  readonly articles?: unknown;
+}
+
+/** SSRF-hardened GDELT API fetch. Scoped tighter than fetchWithSafeRedirects:
+ *   - only https://api.gdeltproject.org/… is allowed
+ *   - redirect='manual' + any 3xx is rejected (GDELT API does not redirect)
+ *   - 10s per-hop timeout
+ *   - response body hard-capped at GDELT_MAX_BYTES
+ *  The three-layer SSRF guard requested in the overnight-run brief
+ *  (scheme allowlist https, no private IPs/localhost, no redirects to
+ *  them) is enforced at the host-string level — this adapter never
+ *  resolves user-supplied URLs so an IP-literal / RFC1918 target cannot
+ *  reach the fetch call. */
+async function fetchGdeltArtList(
+  fetchImpl: typeof globalThis.fetch,
+  url: string,
+): Promise<GdeltResponse> {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error(`gdelt: refusing to fetch malformed URL`);
+  }
+  if (parsed.protocol !== 'https:') {
+    throw new Error(`gdelt: refusing non-https URL (scheme=${parsed.protocol})`);
+  }
+  if (parsed.hostname !== GDELT_API_HOST) {
+    throw new Error(`gdelt: refusing non-GDELT host (${parsed.hostname})`);
+  }
+
+  const response = await fetchImpl(parsed.toString(), {
+    redirect: 'manual',
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  });
+  if (response.status >= 300 && response.status < 400) {
+    throw new Error(`gdelt: refusing to follow redirect (${response.status}) from ${parsed.host}`);
+  }
+  if (!response.ok) {
+    throw new Error(`gdelt: HTTP ${response.status} from ${parsed.host}`);
+  }
+
+  // Stream-read with early size cap (security-reviewer PR #201 LOW):
+  // `await response.text()` buffers the full body before any size check,
+  // so a slow upstream shipping 100 MB would OOM the workers process
+  // before the 2 MB gate below ever fired. Reading via the ReadableStream
+  // reader lets us trip the cap mid-stream and cancel the body.
+  const body = await readBodyWithSizeCap(response, GDELT_MAX_BYTES);
+  try {
+    return JSON.parse(body) as GdeltResponse;
+  } catch {
+    throw new Error(`gdelt: response body is not valid JSON`);
+  }
+}
+
+/** Read a Response body as text with an incremental size cap. Trips on
+ *  the FIRST chunk that would exceed `maxBytes`, cancels the reader so
+ *  the connection is released, and throws. Falls back to
+ *  `response.text()` only when `response.body` is unavailable (which
+ *  shouldn't happen in Node 20+ but is defensive against polyfilled
+ *  fetch impls in test shims). Security-reviewer PR #201 LOW. */
+async function readBodyWithSizeCap(response: Response, maxBytes: number): Promise<string> {
+  if (!response.body) {
+    const buffered = await response.text();
+    if (buffered.length > maxBytes) {
+      throw new Error(`gdelt: response body ${buffered.length} exceeds ${maxBytes}B cap`);
+    }
+    return buffered;
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => {});
+      throw new Error(`gdelt: response body exceeds ${maxBytes}B cap (streamed ${total}B)`);
+    }
+    chunks.push(value);
+  }
+  // Concat Uint8Array chunks into one, then decode UTF-8.
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder('utf-8').decode(merged);
+}
+
+/** Normalize a GDELT article title for similarity-based clustering.
+ *  Lowercase + drop non-alphanumeric + take the first 60 chars. Two
+ *  articles about the same event tend to share the first 60 chars of
+ *  their title after this normalization even when outlets re-caption
+ *  (e.g. prepending "Breaking:" or appending " – Reuters"). */
+export function gdeltTitleKey(title: string): string {
+  return title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .slice(0, 60);
+}
+
+/** From a GDELT ArtList response, cluster articles by title similarity
+ *  and produce one CandidateInput per cluster whose primary URL passes
+ *  classifyUrl(). Clusters below GDELT_MIN_TREND_SCORE (distinct outlets)
+ *  are dropped. The trend score is encoded in `summary` as a bracketed
+ *  prefix `[trend=N]` so the current ranker is tolerant of its presence
+ *  pre-column-add; the follow-up PR adds a dedicated `trend_score`
+ *  column on `news_topics_candidates` and reads it directly. */
+export function clusterGdeltArticles(response: GdeltResponse): CandidateInput[] {
+  // Hard cap on how many entries the clusterer will walk in one tick
+  // (security-reviewer PR #201 MEDIUM). The GDELT API URL already asks
+  // for maxrecords=250, so a well-behaved response fits inside the cap;
+  // a misconfigured or hostile upstream shipping thousands of entries
+  // is clipped before gdeltTitleKey's per-article regex ever runs.
+  const rawFull = Array.isArray(response.articles) ? response.articles : [];
+  const raw = rawFull.slice(0, GDELT_MAX_ARTICLES);
+  // group articles by titleKey → { domains: Set, articles: GdeltArticle[] }
+  type Group = { readonly domains: Set<string>; readonly articles: GdeltArticle[] };
+  const groups = new Map<string, Group>();
+  for (const a of raw as GdeltArticle[]) {
+    if (typeof a?.title !== 'string' || typeof a?.url !== 'string') continue;
+    const key = gdeltTitleKey(a.title);
+    if (key.length === 0) continue;
+    const existing = groups.get(key);
+    if (existing) {
+      if (typeof a.domain === 'string') existing.domains.add(a.domain.toLowerCase());
+      existing.articles.push(a);
+    } else {
+      const domains = new Set<string>();
+      if (typeof a.domain === 'string') domains.add(a.domain.toLowerCase());
+      groups.set(key, { domains, articles: [a] });
+    }
+  }
+
+  const out: CandidateInput[] = [];
+  for (const [, group] of groups) {
+    const trendScore = group.domains.size;
+    if (trendScore < GDELT_MIN_TREND_SCORE) continue;
+
+    // Find the first article in the cluster whose URL passes classifyUrl()
+    // as a primary source. Articles are returned by GDELT in HybridRel
+    // order (most trending first), so the first primary we find is the
+    // best-signal primary for the cluster.
+    let primary: GdeltArticle | null = null;
+    for (const a of group.articles) {
+      if (typeof a.url !== 'string') continue;
+      const classification = classifyUrl(a.url);
+      if (classification.allowed && classification.role === 'primary') {
+        primary = a;
+        break;
+      }
+    }
+    if (!primary || typeof primary.url !== 'string' || typeof primary.title !== 'string') continue;
+
+    // Scheme assertion (security-reviewer PR #201 round 3 MED 7.2):
+    // `classifyUrl` currently rejects non-https schemes at its own
+    // first gate, but relying on that single layer couples a storage-
+    // boundary invariant to the host-classifier's internals. Assert
+    // the scheme explicitly here so a future `classifyUrl` change
+    // that loosens scheme-strictness cannot silently open a stored-
+    // XSS path through `source_url`.
+    const parsedUrl = requireHttpsUrl(primary.url);
+    if (parsedUrl === null) continue;
+    const host = normalizeHost(parsedUrl.hostname);
+    const classification = classifyUrl(primary.url);
+    if (!classification.allowed || classification.role !== 'primary') continue;
+
+    out.push({
+      source_provider: 'gdelt',
+      source_category: classification.category,
+      source_title: primary.title,
+      source_url: primary.url,
+      source_host: host,
+      source_published_at:
+        typeof primary.seendate === 'string' ? parseGdeltSeenDate(primary.seendate) : null,
+      // Human-readable summary; the numeric trend_score below is the
+      // canonical scoring input. The bracketed prefix is kept so a
+      // follow-up PR can delete it in one atomic change once the
+      // dedicated column is wired through news-dedup-rank; today the
+      // ranker still reads the prefix.
+      summary: `[trend=${trendScore}] ${group.articles.length} article(s) across ${trendScore} outlet(s).`,
+      dedup_url_canon: canonicalizeUrl(primary.url),
+      // Dedicated numeric column added by migration 20261014000000.
+      // Written on every GDELT-emitted candidate.
+      trend_score: trendScore,
+    });
+  }
+
+  // Sort by trend_score descending so the ranker sees the highest-signal
+  // clusters first. Equal scores: stable order (first-seen wins).
+  out.sort((a, b) => (b.trend_score ?? 0) - (a.trend_score ?? 0));
+  return out;
+}
+
+/** Parse a URL string and return the parsed URL ONLY if its scheme is
+ *  https:. Non-string input, malformed URL, or any other scheme →
+ *  null. Caller treats null as "drop this candidate".
+ *
+ *  Security-reviewer PR #201 round 3 MED 7.2: the storage-boundary
+ *  scheme assertion in `clusterGdeltArticles` was coupled to
+ *  `classifyUrl`'s internal scheme-strictness. This helper decouples
+ *  it so the invariant lives at the clusterer and can be tested in
+ *  isolation. */
+function requireHttpsUrl(raw: string): URL | null {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return null;
+  }
+  return u.protocol === 'https:' ? u : null;
+}
+
+/** Parse GDELT's YYYYMMDDTHHMMSSZ format back to an ISO 8601 string.
+ *  Returns null on any parse failure. */
+function parseGdeltSeenDate(s: string): string | null {
+  // Format: 20261010T053000Z
+  const m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/.exec(s);
+  if (!m) return null;
+  return `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}Z`;
+}
+
+/** GDELT trending adapter. Only runs when `env.GDELT_ENABLED` is true —
+ *  same gated-shadow-ship pattern as PRIVY_ENABLED / FACT_CHECK_ENABLED.
+ *  The adapter is wired into DEFAULT_ADAPTERS so its health row appears
+ *  in news_adapter_health immediately; a flag-off tick records a
+ *  success with 0 fetched.
+ *
+ *  Env flows in through the `NewsIngestAdapter.fetch` signature from
+ *  the handler closure — the adapter NEVER reads `process.env`
+ *  directly. The validated Zod `Env` object is the single source of
+ *  truth for feature-flag state (security-reviewer PR #201 round 3
+ *  MED 3.1). boolFromString in `envSchema` normalises 'true'/'True'/
+ *  'TRUE' to boolean `true` and everything else to `false`, so a
+ *  Railway env hot-reload cannot bypass validation. */
+export const gdeltAdapter: NewsIngestAdapter = {
+  name: 'gdelt',
+  defaultCategory: 'congress', // overridden per-article by classifyUrl.
+  async fetch(fetchImpl, env) {
+    if (!env.GDELT_ENABLED) return [];
+    const response = await fetchGdeltArtList(fetchImpl, GDELT_API_URL);
+    return clusterGdeltArticles(response);
+  },
+};
+
 /** V1 adapter registry. Future PRs append; the handler iterates. */
 export const DEFAULT_ADAPTERS: ReadonlyArray<NewsIngestAdapter> = [
   congressAdapter,
   blsAdapter,
   secEdgarAdapter,
+  gdeltAdapter,
 ];
 
 // ---------------------------------------------------------------------------
@@ -329,9 +642,24 @@ interface IngestSummary {
 const STALE_FRESH_WARN_MS = 24 * 60 * 60 * 1000;
 
 /** Build the news_ingest handler. Factory pattern so tests can inject
- *  an alternate adapter list (e.g. a single fake adapter). */
+ *  an alternate adapter list AND a hand-crafted `Env` stub without
+ *  needing every workers-env var (DATABASE_URL, SUPABASE_URL, ...) to
+ *  be present at test time.
+ *
+ *  Prod flow: `buildNewsIngestHandler()` is called at scheduler-build
+ *  time without args → `envProvider` defaults to `loadEnv`. At tick
+ *  time, the returned JobHandler calls `envProvider()` once to get the
+ *  validated Env snapshot, then threads it to every adapter. The
+ *  per-tick load lets us pick up Railway env rotations without a
+ *  process restart but still through the Zod validation.
+ *
+ *  Test flow: tests pass a stub `envProvider: () => fakeEnv as Env`
+ *  that returns a hand-crafted minimal Env. Each gdelt-adapter test
+ *  can toggle `GDELT_ENABLED` on that stub without touching
+ *  `process.env`. */
 export function buildNewsIngestHandler(
   adapters: ReadonlyArray<NewsIngestAdapter> = DEFAULT_ADAPTERS,
+  envProvider: () => Env = loadEnv,
 ): JobHandler {
   return async function newsIngestHandler(row, deps) {
     const fetchImpl = deps.fetch ?? globalThis.fetch;
@@ -339,9 +667,13 @@ export function buildNewsIngestHandler(
       throw new Error('news_ingest: no fetch implementation available');
     }
 
+    // Load + validate env ONCE per tick. Every adapter.fetch call
+    // receives the same validated snapshot — no mid-tick env drift.
+    const env = envProvider();
+
     const summaries: IngestSummary[] = [];
     for (const adapter of adapters) {
-      summaries.push(await ingestOne(adapter, fetchImpl, deps));
+      summaries.push(await ingestOne(adapter, fetchImpl, env, deps));
     }
 
     const totalInserted = summaries.reduce((s, x) => s + x.inserted, 0);
@@ -437,11 +769,12 @@ async function warnStaleAdapters(deps: Parameters<JobHandler>[1]): Promise<void>
 async function ingestOne(
   adapter: NewsIngestAdapter,
   fetchImpl: typeof globalThis.fetch,
+  env: Env,
   deps: Parameters<JobHandler>[1],
 ): Promise<IngestSummary> {
   let candidates: CandidateInput[];
   try {
-    candidates = await adapter.fetch(fetchImpl);
+    candidates = await adapter.fetch(fetchImpl, env);
   } catch (err) {
     const message = scrubMessage(err instanceof Error ? err.message : String(err));
     deps.logger.warn({
@@ -642,6 +975,11 @@ async function insertCandidate(
     source_published_at: c.source_published_at,
     summary: c.summary,
     dedup_url_canon: c.dedup_url_canon,
+    // Nullable column from migration 20261014000000. RSS adapters
+    // leave this null; trending-source adapters (GDELT today) write
+    // the distinct-outlet count. news-dedup-rank reads it in a
+    // follow-up PR to bias rank_score.
+    trend_score: c.trend_score ?? null,
     rejected_reason: rejectedReason,
   })) as { error: { code?: string; message: string } | null };
 
@@ -675,4 +1013,9 @@ async function stampPayload(
   }
 }
 
-export const __testing = { canonicalizeUrl, normalizeRssItem, fetchAndParseRss };
+export const __testing = {
+  canonicalizeUrl,
+  normalizeRssItem,
+  fetchAndParseRss,
+  requireHttpsUrl,
+};

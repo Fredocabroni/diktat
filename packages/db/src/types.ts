@@ -634,6 +634,7 @@ export type Database = {
           source_title: string
           source_url: string
           summary: string | null
+          trend_score: number | null
           updated_at: string
         }
         Insert: {
@@ -651,6 +652,7 @@ export type Database = {
           source_title: string
           source_url: string
           summary?: string | null
+          trend_score?: number | null
           updated_at?: string
         }
         Update: {
@@ -668,6 +670,7 @@ export type Database = {
           source_title?: string
           source_url?: string
           summary?: string | null
+          trend_score?: number | null
           updated_at?: string
         }
         Relationships: []

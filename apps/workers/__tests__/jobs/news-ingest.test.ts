@@ -3,12 +3,42 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   __testing,
   buildNewsIngestHandler,
+  clusterGdeltArticles,
+  gdeltAdapter,
+  gdeltTitleKey,
+  GDELT_MIN_TREND_SCORE,
   type CandidateInput,
   type NewsIngestAdapter,
 } from '../../src/jobs/news-ingest.js';
+import type { Env } from '../../src/env.js';
 import type { ScheduledJobRow } from '../../src/jobs/scheduler.js';
 import type { Logger } from '../../src/logger.js';
 import type { ServiceClient } from '../../src/supabase.js';
+
+/** Hand-crafted minimal Env for tests. Avoids a full `loadEnv()` seed
+ *  (DATABASE_URL / SUPABASE_URL / UPSTASH_* would all be required
+ *  otherwise). Tests that care about GDELT_ENABLED produce a fresh
+ *  stub via `envWith({ GDELT_ENABLED: true })`. */
+const BASE_STUB_ENV: Env = {
+  NODE_ENV: 'test',
+  LOG_LEVEL: 'info',
+  DATABASE_URL: 'postgres://u:p@h:5432/d',
+  SUPABASE_URL: 'https://x.supabase.co',
+  SUPABASE_SERVICE_ROLE_KEY: 'srk',
+  UPSTASH_REDIS_REST_URL: 'https://r.upstash.io',
+  UPSTASH_REDIS_REST_TOKEN: 'tk',
+  PRIVY_ENABLED: false,
+  PRIVY_APP_ID: '',
+  PRIVY_APP_SECRET: '',
+  VAPID_PUBLIC_KEY: '',
+  VAPID_PRIVATE_KEY: '',
+  VAPID_SUBJECT: '',
+  GDELT_ENABLED: false,
+};
+function envWith(overrides: Partial<Env>): Env {
+  return { ...BASE_STUB_ENV, ...overrides };
+}
+const STUB_ENV_PROVIDER = (): Env => BASE_STUB_ENV;
 
 const { canonicalizeUrl, fetchAndParseRss } = __testing;
 
@@ -306,6 +336,385 @@ function freshState(): FakeState {
   };
 }
 
+// ---------------------------------------------------------------------------
+// GDELT trending adapter — fixture-based tests
+// ---------------------------------------------------------------------------
+
+describe('gdeltTitleKey — cluster normalization', () => {
+  it('lowercases + strips punctuation + caps at 60 chars', () => {
+    const key = gdeltTitleKey('BREAKING: Senate Passes HR-1234, 52-48!');
+    expect(key).toBe('breaking senate passes hr 1234 52 48');
+  });
+
+  it('shares a leading substring across outlet-decorated variants of the same story', () => {
+    const a = gdeltTitleKey('Senate Passes HR-1234 — Reuters');
+    const b = gdeltTitleKey('Senate Passes HR-1234, Associated Press');
+    // The event signature `senate passes hr 1234` is stable across
+    // outlet-specific suffixes. Full-key equality requires the SAME
+    // suffix shape; realistic clustering is "same first 22 chars".
+    expect(a.slice(0, 22)).toBe('senate passes hr 1234 ');
+    expect(b.slice(0, 22)).toBe('senate passes hr 1234 ');
+  });
+
+  it('empty title → empty key (caller must drop)', () => {
+    expect(gdeltTitleKey('')).toBe('');
+    expect(gdeltTitleKey('   ')).toBe('');
+  });
+});
+
+describe('clusterGdeltArticles — operator trend-score + primary-source rules', () => {
+  // Build a fixture article. The GDELT API's ArtList response shape per
+  // https://blog.gdeltproject.org/gdelt-doc-2-0-api-debuts/ — fields url,
+  // title, seendate, domain are the four we read; others are tolerated.
+  function art(overrides: Partial<Record<string, unknown>>): Record<string, unknown> {
+    return {
+      url: 'https://www.congress.gov/bill/118hr1234',
+      title: 'Senate passes HR-1234 by vote of 52-48',
+      seendate: '20261010T053000Z',
+      domain: 'congress.gov',
+      language: 'English',
+      sourcecountry: 'United States',
+      ...overrides,
+    };
+  }
+
+  it('drops a cluster whose only outlet is a non-primary host', () => {
+    const resp = {
+      articles: [
+        art({
+          url: 'https://news.example.com/story',
+          domain: 'example.com',
+          title: 'Debate heats up over bill',
+        }),
+      ],
+    };
+    expect(clusterGdeltArticles(resp)).toEqual([]);
+  });
+
+  it('drops a cluster that only reaches 1 outlet (below GDELT_MIN_TREND_SCORE)', () => {
+    expect(GDELT_MIN_TREND_SCORE).toBe(2);
+    const resp = { articles: [art({ domain: 'congress.gov' })] };
+    expect(clusterGdeltArticles(resp)).toEqual([]);
+  });
+
+  it('emits a candidate for a cluster with ≥2 outlets AND a primary host', () => {
+    const resp = {
+      articles: [
+        art({ url: 'https://news.example.com/sen-bill', domain: 'example.com' }),
+        art({ url: 'https://other.example.net/sen-bill', domain: 'example.net' }),
+        art({ url: 'https://www.congress.gov/bill/118hr1234', domain: 'congress.gov' }),
+      ],
+    };
+    const out = clusterGdeltArticles(resp);
+    expect(out).toHaveLength(1);
+    expect(out[0]?.source_url).toBe('https://www.congress.gov/bill/118hr1234');
+    expect(out[0]?.source_provider).toBe('gdelt');
+    expect(out[0]?.source_category).toBe('congress');
+    // trend score = distinct domains = 3
+    expect(out[0]?.summary).toMatch(/^\[trend=3]/);
+  });
+
+  it('rejects a cluster of ≥2 outlets with NO primary host (operator rule)', () => {
+    const resp = {
+      articles: [
+        art({ url: 'https://news.example.com/sen-bill', domain: 'example.com' }),
+        art({ url: 'https://other.example.net/sen-bill', domain: 'example.net' }),
+      ],
+    };
+    expect(clusterGdeltArticles(resp)).toEqual([]);
+  });
+
+  it('sorts output by trend score desc (big viral first — operator rule)', () => {
+    const resp = {
+      articles: [
+        // Cluster A: 2 outlets, 1 primary (sec.gov).
+        {
+          url: 'https://www.sec.gov/litigation/litreleases/2026/lr-small',
+          domain: 'sec.gov',
+          title: 'SEC files complaint against ABC Corp',
+          seendate: '20261010T050000Z',
+        },
+        {
+          url: 'https://news.example.com/sec-abc',
+          domain: 'example.com',
+          title: 'SEC files complaint against ABC Corp',
+          seendate: '20261010T050100Z',
+        },
+        // Cluster B: 4 outlets, 1 primary (congress.gov).
+        ...[1, 2, 3].map((n) => ({
+          url: `https://news-${n}.example.com/sen-bill`,
+          domain: `news-${n}.example.com`,
+          title: 'Senate passes HR-1234 by vote of 52-48',
+          seendate: '20261010T053000Z',
+        })),
+        {
+          url: 'https://www.congress.gov/bill/118hr1234',
+          domain: 'congress.gov',
+          title: 'Senate passes HR-1234 by vote of 52-48',
+          seendate: '20261010T053000Z',
+        },
+      ],
+    };
+    const out = clusterGdeltArticles(resp);
+    expect(out).toHaveLength(2);
+    expect(out[0]?.source_url).toBe('https://www.congress.gov/bill/118hr1234');
+    expect(out[1]?.source_url).toContain('sec.gov');
+    expect(out[0]?.summary).toMatch(/^\[trend=4]/);
+    expect(out[1]?.summary).toMatch(/^\[trend=2]/);
+  });
+
+  it('parses GDELT seendate (YYYYMMDDTHHMMSSZ) to ISO 8601', () => {
+    const resp = {
+      articles: [
+        art({ url: 'https://a.example.com/story', domain: 'a.example.com' }),
+        art({ url: 'https://b.example.com/story', domain: 'b.example.com' }),
+        art({ url: 'https://www.congress.gov/bill/118hr1234', domain: 'congress.gov' }),
+      ],
+    };
+    const out = clusterGdeltArticles(resp);
+    expect(out[0]?.source_published_at).toBe('2026-10-10T05:30:00Z');
+  });
+
+  it('tolerates missing / non-string / malformed GDELT fields (lenient parser)', () => {
+    const resp = {
+      articles: [
+        // malformed: no url
+        { title: 'A', domain: 'congress.gov' },
+        // malformed: no title
+        { url: 'https://www.congress.gov/x', domain: 'congress.gov' },
+        // malformed: numeric url
+        { url: 42, title: 'X', domain: 'congress.gov' },
+        // good: a valid article
+        {
+          url: 'https://www.congress.gov/bill/118hr1234',
+          title: 'Senate passes HR-1234',
+          domain: 'congress.gov',
+          seendate: 'not-a-date',
+        },
+        {
+          url: 'https://news.example.com/sen-bill',
+          title: 'Senate passes HR-1234',
+          domain: 'example.com',
+        },
+      ],
+    };
+    const out = clusterGdeltArticles(resp);
+    expect(out).toHaveLength(1);
+    expect(out[0]?.source_published_at).toBeNull();
+  });
+
+  it('ignores a `articles: null` or non-array shape rather than throwing', () => {
+    expect(clusterGdeltArticles({ articles: null })).toEqual([]);
+    expect(clusterGdeltArticles({ articles: 'oops' })).toEqual([]);
+    expect(clusterGdeltArticles({})).toEqual([]);
+  });
+
+  // Security-reviewer PR #201 round 2 — MEDIUM: cap raw.articles.length.
+  it('caps raw.articles.length at 500 before clustering (DoS guard)', () => {
+    // 10,000 entries all sharing one normalized title; only the first
+    // 500 should be walked. 500 entries × 1 domain each → 500 outlets
+    // → one cluster, trend_score=500 (not 10,000). Hostile upstream
+    // response size is cut off before the per-article regex runs.
+    const DOMAINS = 10_000;
+    const articles = Array.from({ length: DOMAINS }, (_, i) => ({
+      // Use primary-domain subdomains so classifyUrl keeps picking them
+      // (otherwise ClassifyUrl drops them before clustering).
+      url: `https://congress.gov/path-${i}`,
+      domain: `host-${i}.congress.gov`,
+      title: 'Senate passes HR-1234',
+      seendate: '20261010T053000Z',
+    }));
+    const out = clusterGdeltArticles({ articles });
+    expect(out).toHaveLength(1);
+    // trend_score reflects the clipped-at-500 count, not the raw 10,000.
+    expect(out[0]?.trend_score).toBe(500);
+  });
+
+  // Security-reviewer PR #201 round 3 MED 7.2 — explicit scheme assert.
+  // The storage-boundary scheme check lives on the clusterer, not on
+  // classifyUrl, so a future classifyUrl loosening cannot silently
+  // open a stored-XSS path through `source_url`.
+  describe('requireHttpsUrl (scheme-assert helper)', () => {
+    const { requireHttpsUrl } = __testing;
+
+    it.each([
+      ['http://congress.gov/x', 'http'],
+      ['javascript:alert(1)', 'javascript'],
+      ['data:text/html,<script>', 'data'],
+      ['file:///etc/passwd', 'file'],
+      ['ftp://congress.gov/x', 'ftp'],
+      // Protocol-relative URL — `new URL()` throws without a base, so
+      // the helper returns null via the try/catch branch.
+      ['//congress.gov/x', 'protocol-relative'],
+    ])('returns null for %s (%s)', (input, _label) => {
+      expect(requireHttpsUrl(input)).toBeNull();
+    });
+
+    it('returns the parsed URL for a well-formed https URL', () => {
+      const u = requireHttpsUrl('https://www.congress.gov/bill/118hr1234');
+      expect(u).not.toBeNull();
+      expect(u?.protocol).toBe('https:');
+      expect(u?.hostname).toBe('www.congress.gov');
+    });
+
+    it('returns null for a malformed URL that new URL() rejects', () => {
+      expect(requireHttpsUrl('not-a-url')).toBeNull();
+      expect(requireHttpsUrl('')).toBeNull();
+    });
+  });
+
+  // Security-reviewer PR #201 round 2 — stamp dedicated numeric column.
+  it('writes trend_score on each emitted candidate (not only in the summary prefix)', () => {
+    const resp = {
+      articles: [
+        { url: 'https://news.example.com/sen', domain: 'example.com', title: 'X' },
+        { url: 'https://news.example.net/sen', domain: 'example.net', title: 'X' },
+        {
+          url: 'https://www.congress.gov/bill/118hr1234',
+          domain: 'congress.gov',
+          title: 'X',
+        },
+      ],
+    };
+    const out = clusterGdeltArticles(resp);
+    expect(out).toHaveLength(1);
+    expect(out[0]?.trend_score).toBe(3);
+    // Legacy human-readable prefix retained; a follow-up PR drops it
+    // after news-dedup-rank reads the dedicated column.
+    expect(out[0]?.summary).toMatch(/^\[trend=3]/);
+  });
+});
+
+describe('gdeltAdapter — SSRF-hardened fetch + env gate', () => {
+  const SAMPLE_JSON = JSON.stringify({
+    articles: [
+      {
+        url: 'https://www.congress.gov/bill/118hr1234',
+        title: 'Senate passes HR-1234',
+        domain: 'congress.gov',
+        seendate: '20261010T053000Z',
+      },
+      {
+        url: 'https://news.example.com/sen-bill',
+        title: 'Senate passes HR-1234',
+        domain: 'example.com',
+        seendate: '20261010T053100Z',
+      },
+    ],
+  });
+  const ENV_ON = envWith({ GDELT_ENABLED: true });
+  const ENV_OFF = envWith({ GDELT_ENABLED: false });
+  const okResponse = () => vi.fn(async () => new Response(SAMPLE_JSON, { status: 200 }));
+
+  it('returns [] when env.GDELT_ENABLED is false (never hits the network)', async () => {
+    const fetchImpl = vi.fn(async () => new Response('should not be called'));
+    const out = await gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch, ENV_OFF);
+    expect(out).toEqual([]);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('fetches + parses + clusters when env.GDELT_ENABLED is true', async () => {
+    const fetchImpl = okResponse();
+    const out = await gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch, ENV_ON);
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    const [calledUrl] = fetchImpl.mock.calls[0]!;
+    expect(String(calledUrl).startsWith('https://api.gdeltproject.org/')).toBe(true);
+    expect(out).toHaveLength(1);
+    expect(out[0]?.source_url).toBe('https://www.congress.gov/bill/118hr1234');
+  });
+
+  it('rejects a GDELT API redirect (3xx response is a hard fail)', async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response('', {
+          status: 302,
+          headers: { location: 'https://evil.example.com/pwn' },
+        }),
+    );
+    await expect(
+      gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch, ENV_ON),
+    ).rejects.toThrow(/refusing to follow redirect/);
+  });
+
+  it('rejects a non-200 response', async () => {
+    const fetchImpl = vi.fn(async () => new Response('server error', { status: 503 }));
+    await expect(
+      gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch, ENV_ON),
+    ).rejects.toThrow(/HTTP 503/);
+  });
+
+  it('rejects malformed JSON (not-a-JSON body is a hard fail)', async () => {
+    const fetchImpl = vi.fn(async () => new Response('not json {', { status: 200 }));
+    await expect(
+      gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch, ENV_ON),
+    ).rejects.toThrow(/not valid JSON/);
+  });
+
+  // Security-reviewer PR #201 round 3 MED 3.1 — adapter MUST NOT read
+  // process.env; env.GDELT_ENABLED threaded through fetch() is the
+  // single source of truth.
+  it('does NOT read process.env; mutating process.env.GDELT_ENABLED has no effect', async () => {
+    const prev = process.env.GDELT_ENABLED;
+    // Set the raw env to a VALUE that would have enabled the pre-fix
+    // adapter (process.env.GDELT_ENABLED === 'true'). The adapter must
+    // ignore this and gate purely on the passed-in env parameter.
+    process.env.GDELT_ENABLED = 'true';
+    try {
+      const fetchImpl = vi.fn(async () => new Response('should not be called'));
+      const out = await gdeltAdapter.fetch(
+        fetchImpl as unknown as typeof globalThis.fetch,
+        ENV_OFF, // passed env says false → adapter must stay disabled
+      );
+      expect(out).toEqual([]);
+      expect(fetchImpl).not.toHaveBeenCalled();
+    } finally {
+      if (prev === undefined) delete process.env.GDELT_ENABLED;
+      else process.env.GDELT_ENABLED = prev;
+    }
+  });
+
+  // Mirror check — process.env says disabled but env arg says enabled;
+  // the adapter must honor the arg.
+  it('does NOT read process.env; empty raw env still fetches when passed env says enabled', async () => {
+    const prev = process.env.GDELT_ENABLED;
+    delete process.env.GDELT_ENABLED;
+    try {
+      const fetchImpl = okResponse();
+      await gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch, ENV_ON);
+      expect(fetchImpl).toHaveBeenCalledOnce();
+    } finally {
+      if (prev !== undefined) process.env.GDELT_ENABLED = prev;
+    }
+  });
+
+  // Security-reviewer PR #201 round 2 — streaming body size cap.
+  it('aborts a response that streams past the size cap (does not fully buffer)', async () => {
+    const chunk = new Uint8Array(1024 * 1024); // 1 MB zero-filled
+    let pulls = 0;
+    const body = new ReadableStream({
+      pull(controller) {
+        if (pulls >= 3) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(chunk);
+        pulls += 1;
+      },
+    });
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(body, {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+    );
+    await expect(
+      gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch, ENV_ON),
+    ).rejects.toThrow(/exceeds .* cap/);
+    expect(pulls).toBeLessThanOrEqual(3);
+  });
+});
+
 describe('newsIngestHandler — happy path', () => {
   it('iterates all adapters and inserts allowed candidates', async () => {
     const state = freshState();
@@ -323,7 +732,7 @@ describe('newsIngestHandler — happy path', () => {
         }),
       ]),
     ];
-    const handler = buildNewsIngestHandler(adapters);
+    const handler = buildNewsIngestHandler(adapters, STUB_ENV_PROVIDER);
 
     await handler(row(), { supabase, logger, fetch: vi.fn() as never });
 
@@ -351,7 +760,7 @@ describe('newsIngestHandler — happy path', () => {
         }),
       ]),
     ];
-    const handler = buildNewsIngestHandler(adapters);
+    const handler = buildNewsIngestHandler(adapters, STUB_ENV_PROVIDER);
 
     await handler(row(), { supabase, logger, fetch: vi.fn() as never });
 
@@ -375,7 +784,7 @@ describe('newsIngestHandler — happy path', () => {
         }),
       ]),
     ];
-    const handler = buildNewsIngestHandler(adapters);
+    const handler = buildNewsIngestHandler(adapters, STUB_ENV_PROVIDER);
 
     await handler(row(), { supabase, logger, fetch: vi.fn() as never });
 
@@ -402,7 +811,7 @@ describe('newsIngestHandler — happy path', () => {
         dedup_url_canon: 'https://bls.gov/news.release/empsit.htm',
       }),
     ]);
-    const handler = buildNewsIngestHandler([failingAdapter, goodAdapter]);
+    const handler = buildNewsIngestHandler([failingAdapter, goodAdapter], STUB_ENV_PROVIDER);
 
     await handler(row(), { supabase, logger, fetch: vi.fn() as never });
 
@@ -418,7 +827,7 @@ describe('newsIngestHandler — happy path', () => {
     const supabase = buildSupabase(state);
     const logger = buildLogger();
     const adapters = [fakeAdapter('congress', [candidate()])];
-    const handler = buildNewsIngestHandler(adapters);
+    const handler = buildNewsIngestHandler(adapters, STUB_ENV_PROVIDER);
 
     await handler(row(), { supabase, logger, fetch: vi.fn() as never });
 
@@ -443,7 +852,7 @@ describe('newsIngestHandler — happy path', () => {
         }),
       ]),
     ];
-    const handler = buildNewsIngestHandler(adapters);
+    const handler = buildNewsIngestHandler(adapters, STUB_ENV_PROVIDER);
 
     await handler(row(), { supabase, logger, fetch: vi.fn() as never });
 
@@ -462,7 +871,7 @@ describe('news_adapter_health — per-adapter liveness tracking', () => {
     const supabase = buildSupabase(state);
     const logger = buildLogger();
     const adapters = [fakeAdapter('congress', [candidate()])];
-    const handler = buildNewsIngestHandler(adapters);
+    const handler = buildNewsIngestHandler(adapters, STUB_ENV_PROVIDER);
 
     await handler(row(), { supabase, logger, fetch: vi.fn() as never });
 
@@ -492,7 +901,7 @@ describe('news_adapter_health — per-adapter liveness tracking', () => {
     const supabase = buildSupabase(state);
     const logger = buildLogger();
     const adapters = [fakeAdapter('congress', [candidate()])];
-    const handler = buildNewsIngestHandler(adapters);
+    const handler = buildNewsIngestHandler(adapters, STUB_ENV_PROVIDER);
 
     await handler(row(), { supabase, logger, fetch: vi.fn() as never });
 
@@ -521,7 +930,7 @@ describe('news_adapter_health — per-adapter liveness tracking', () => {
       defaultCategory: 'congress',
       fetch: vi.fn().mockRejectedValue(new Error('feed 503')),
     };
-    const handler = buildNewsIngestHandler([broken]);
+    const handler = buildNewsIngestHandler([broken], STUB_ENV_PROVIDER);
 
     await handler(row(), { supabase, logger, fetch: vi.fn() as never });
 
@@ -557,7 +966,10 @@ describe('news_adapter_health — per-adapter liveness tracking', () => {
     ];
     const supabase = buildSupabase(state);
     const logger = buildLogger();
-    const handler = buildNewsIngestHandler([fakeAdapter('congress', [candidate()])]);
+    const handler = buildNewsIngestHandler(
+      [fakeAdapter('congress', [candidate()])],
+      STUB_ENV_PROVIDER,
+    );
 
     await handler(row(), { supabase, logger, fetch: vi.fn() as never });
 
@@ -582,7 +994,10 @@ describe('news_adapter_health — per-adapter liveness tracking', () => {
     ];
     const supabase = buildSupabase(state);
     const logger = buildLogger();
-    const handler = buildNewsIngestHandler([fakeAdapter('brand_new', [candidate()])]);
+    const handler = buildNewsIngestHandler(
+      [fakeAdapter('brand_new', [candidate()])],
+      STUB_ENV_PROVIDER,
+    );
 
     await handler(row(), { supabase, logger, fetch: vi.fn() as never });
 
@@ -602,7 +1017,10 @@ describe('news_adapter_health — per-adapter liveness tracking', () => {
     ];
     const supabase = buildSupabase(state);
     const logger = buildLogger();
-    const handler = buildNewsIngestHandler([fakeAdapter('never_fresh', [candidate()])]);
+    const handler = buildNewsIngestHandler(
+      [fakeAdapter('never_fresh', [candidate()])],
+      STUB_ENV_PROVIDER,
+    );
 
     await handler(row(), { supabase, logger, fetch: vi.fn() as never });
 
