@@ -83,7 +83,19 @@ interface TopicRow {
 
 /** Narrow + validate the fact_explainer JSON shape before returning
  *  to the client. Preserves the fail-tolerant posture — a malformed
- *  stored payload reads as null (UI falls through to raw source link). */
+ *  stored payload reads as null (UI falls through to raw source link).
+ *
+ *  Scheme + length enforcement at read time (security-reviewer PR #198
+ *  HIGH #2 + MEDIUM #2): the write path enforces these via the Zod
+ *  schema in drop-publish.ts and the DB CHECK constraint in migration
+ *  20261012010000, but a direct psql insert or future looser code path
+ *  must not punch through the read-side defenses. source_url MUST be
+ *  empty or begin with https:// — never javascript:, data:, or http:.
+ *  Lengths mirror the write-side caps (1000/1000/2000). */
+const FACT_EXPLAINER_FOR_SUMMARY_MAX = 1000;
+const FACT_EXPLAINER_AGAINST_SUMMARY_MAX = 1000;
+const FACT_EXPLAINER_SOURCE_URL_MAX = 2000;
+
 function parseFactExplainer(raw: unknown): {
   readonly for_summary: string;
   readonly against_summary: string;
@@ -98,6 +110,19 @@ function parseFactExplainer(raw: unknown): {
   const posture = obj.posture;
   if (forSummary.length === 0) return null;
   if (posture !== 'contested' && posture !== 'single_sided' && posture !== 'empirical') {
+    return null;
+  }
+  // Length guards — mirror write-side caps. Reject-on-exceed (not
+  // silent-truncate) surfaces DB-integrity drift early.
+  if (forSummary.length > FACT_EXPLAINER_FOR_SUMMARY_MAX) return null;
+  if (againstSummary.length > FACT_EXPLAINER_AGAINST_SUMMARY_MAX) return null;
+  if (sourceUrl.length > FACT_EXPLAINER_SOURCE_URL_MAX) return null;
+  // Scheme guard — never return a non-https URL that DropCard would
+  // render inside an anchor. Empty source_url is valid (upstream null-
+  // on-failure); any non-empty value must be https:// AND have a host
+  // (min length 11 covers `https://a.b`) — security-reviewer PR #199
+  // round 2 L1: `https://` alone is a scheme-only integrity defect.
+  if (sourceUrl.length > 0 && (!sourceUrl.startsWith('https://') || sourceUrl.length < 11)) {
     return null;
   }
   return {
