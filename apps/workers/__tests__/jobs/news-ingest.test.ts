@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   __testing,
@@ -563,6 +563,57 @@ describe('clusterGdeltArticles — operator trend-score + primary-source rules',
     });
   });
 
+  // PR #205 — length guards on GDELT-sourced strings.
+  describe('length caps on source_title / source_url (PR #205 MED 2.3 + LOW 2.4)', () => {
+    it('truncates source_title to 2000 chars before emit', () => {
+      const longTitle = 'A'.repeat(2001);
+      const resp = {
+        articles: [
+          { url: 'https://a.congress.gov/x', domain: 'a.congress.gov', title: longTitle },
+          { url: 'https://b.congress.gov/x', domain: 'b.congress.gov', title: longTitle },
+          { url: 'https://www.congress.gov/bill/1', domain: 'congress.gov', title: longTitle },
+        ],
+      };
+      const out = clusterGdeltArticles(resp);
+      expect(out).toHaveLength(1);
+      expect(out[0]?.source_title.length).toBe(2000);
+    });
+
+    it('drops a cluster whose primary.url exceeds 2048 chars', () => {
+      // Build a URL that classifyUrl approves (congress.gov host) but is
+      // obscenely long. The clusterer rejects before out.push.
+      const longPath = 'x'.repeat(2100);
+      const resp = {
+        articles: [
+          {
+            url: `https://www.congress.gov/bill/${longPath}`,
+            domain: 'congress.gov',
+            title: 'X',
+          },
+          { url: 'https://b.congress.gov/x', domain: 'b.congress.gov', title: 'X' },
+        ],
+      };
+      expect(clusterGdeltArticles(resp)).toEqual([]);
+    });
+
+    it('accepts a URL at the exact 2048-char boundary', () => {
+      // Primary URL length = 2048 exactly; `.length > 2048` is strict.
+      const basePath = 'https://www.congress.gov/bill/';
+      const padLen = 2048 - basePath.length;
+      const url = basePath + 'x'.repeat(padLen);
+      expect(url.length).toBe(2048);
+      const resp = {
+        articles: [
+          { url, domain: 'congress.gov', title: 'X' },
+          { url: 'https://b.congress.gov/x', domain: 'b.congress.gov', title: 'X' },
+        ],
+      };
+      const out = clusterGdeltArticles(resp);
+      expect(out).toHaveLength(1);
+      expect(out[0]?.source_url.length).toBe(2048);
+    });
+  });
+
   // Security-reviewer PR #201 round 2 — stamp dedicated numeric column.
   it('writes trend_score on each emitted candidate (not only in the summary prefix)', () => {
     const resp = {
@@ -604,7 +655,16 @@ describe('gdeltAdapter — SSRF-hardened fetch + env gate', () => {
   });
   const ENV_ON = envWith({ GDELT_ENABLED: true });
   const ENV_OFF = envWith({ GDELT_ENABLED: false });
-  const okResponse = () => vi.fn(async () => new Response(SAMPLE_JSON, { status: 200 }));
+  const JSON_HEADERS = { 'content-type': 'application/json' };
+  const okResponse = () =>
+    vi.fn(async () => new Response(SAMPLE_JSON, { status: 200, headers: JSON_HEADERS }));
+
+  // Reset the module-local rate-limit cursor before every test so a
+  // test that successfully fetched doesn't block the next test for 5
+  // minutes of wall-clock time (PR #205 fold-in).
+  beforeEach(() => {
+    __testing.resetGdeltRateLimitState();
+  });
 
   it('returns [] when env.GDELT_ENABLED is false (never hits the network)', async () => {
     const fetchImpl = vi.fn(async () => new Response('should not be called'));
@@ -644,10 +704,62 @@ describe('gdeltAdapter — SSRF-hardened fetch + env gate', () => {
   });
 
   it('rejects malformed JSON (not-a-JSON body is a hard fail)', async () => {
-    const fetchImpl = vi.fn(async () => new Response('not json {', { status: 200 }));
+    // Pass application/json content-type so the test exercises
+    // JSON.parse rejection, not the content-type gate added in #205.
+    const fetchImpl = vi.fn(
+      async () => new Response('not json {', { status: 200, headers: JSON_HEADERS }),
+    );
     await expect(
       gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch, ENV_ON),
     ).rejects.toThrow(/not valid JSON/);
+  });
+
+  // Security-reviewer PR #205 content-type gate.
+  // GDELT returns some errors as HTTP 200 with text/plain body
+  // (e.g. "Timespan is too short.").
+  it('rejects a 200-OK response with text/plain body (GDELT error-via-200 pattern)', async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response('Timespan is too short.', {
+          status: 200,
+          headers: { 'content-type': 'text/plain; charset=utf-8' },
+        }),
+    );
+    await expect(
+      gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch, ENV_ON),
+    ).rejects.toThrow(/unexpected content-type .*text\/plain/);
+  });
+
+  it('accepts application/json content-type with charset parameter', async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(SAMPLE_JSON, {
+          status: 200,
+          headers: { 'content-type': 'application/json; charset=utf-8' },
+        }),
+    );
+    const out = await gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch, ENV_ON);
+    expect(out).toHaveLength(1);
+  });
+
+  // PR #205 rate-limit guard.
+  it('rate-limits back-to-back fetches within GDELT_MIN_FETCH_INTERVAL_MS', async () => {
+    const fetchImpl = okResponse();
+    await gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch, ENV_ON);
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    // Second call within the 5-minute cooldown short-circuits to [].
+    const out2 = await gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch, ENV_ON);
+    expect(out2).toEqual([]);
+    expect(fetchImpl).toHaveBeenCalledOnce(); // still only the first call
+  });
+
+  it('rate-limit cursor allows fetch after reset (test seam exercise)', async () => {
+    const fetchImpl = okResponse();
+    await gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch, ENV_ON);
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    __testing.resetGdeltRateLimitState();
+    await gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch, ENV_ON);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
   // Security-reviewer PR #201 round 3 MED 3.1 — adapter MUST NOT read
