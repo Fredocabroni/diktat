@@ -941,6 +941,134 @@ describe('dropPublishHandler — A4 fact explainer', () => {
     ).toBeDefined();
   });
 
+  // The Zod schema's refine on source_url is the enforcement point;
+  // the production adapter runs it via safeParse at invoke time. These
+  // unit tests exercise the schema directly (the fakeInvoke above does
+  // not run safeParse). PR #198 HIGH #2.
+  it('factExplainerSafeParse rejects javascript: source_url', () => {
+    const result = __testing.factExplainerSafeParse({
+      for_summary: 'proponents argue...',
+      against_summary: '',
+      source_url: 'javascript:alert(1)',
+      posture: 'single_sided',
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('factExplainerSafeParse rejects http:// source_url (https-only)', () => {
+    const result = __testing.factExplainerSafeParse({
+      for_summary: 'proponents argue...',
+      against_summary: '',
+      source_url: 'http://example.gov/plain',
+      posture: 'single_sided',
+    });
+    expect(result.success).toBe(false);
+  });
+
+  // L2 coverage (security-reviewer PR #199 round 2) — the write-path
+  // Zod schema must mirror the read-path parseFactExplainer schemes.
+  // These keep the two layers from drifting.
+  it('factExplainerSafeParse rejects data: source_url', () => {
+    const result = __testing.factExplainerSafeParse({
+      for_summary: 'proponents argue...',
+      against_summary: '',
+      source_url: 'data:text/html,<script>alert(1)</script>',
+      posture: 'single_sided',
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('factExplainerSafeParse rejects protocol-relative source_url', () => {
+    const result = __testing.factExplainerSafeParse({
+      for_summary: 'proponents argue...',
+      against_summary: '',
+      source_url: '//example.gov',
+      posture: 'single_sided',
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('factExplainerSafeParse rejects NBSP-prefixed https URL', () => {
+    const result = __testing.factExplainerSafeParse({
+      for_summary: 'proponents argue...',
+      against_summary: '',
+      source_url: ' https://example.gov',
+      posture: 'single_sided',
+    });
+    expect(result.success).toBe(false);
+  });
+
+  // L1 (round 2): scheme-only `https://` has 8 chars, no host.
+  // Satisfies startsWith but fails the min-length-11 guard.
+  it('factExplainerSafeParse rejects scheme-only https:// (no host)', () => {
+    const result = __testing.factExplainerSafeParse({
+      for_summary: 'proponents argue...',
+      against_summary: '',
+      source_url: 'https://',
+      posture: 'single_sided',
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('factExplainerSafeParse accepts empty source_url (empty-escape-hatch path)', () => {
+    const result = __testing.factExplainerSafeParse({
+      for_summary: 'proponents argue...',
+      against_summary: '',
+      source_url: '',
+      posture: 'single_sided',
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('factExplainerSafeParse accepts https source_url', () => {
+    const result = __testing.factExplainerSafeParse({
+      for_summary: 'proponents argue...',
+      against_summary: '',
+      source_url: 'https://www.congress.gov/example',
+      posture: 'single_sided',
+    });
+    expect(result.success).toBe(true);
+  });
+
+  // Round 3 — security-reviewer PR #199 MEDIUM + INFO coverage.
+  // Locks in the `new RegExp(string)` form of sanitizeClaimContextField
+  // + the widened codepoint set (U+200B-U+200F zero-widths, U+2028-U+2029
+  // LS/PS, U+FEFF BOM) that round 1 missed via a literal-char regex.
+  describe('sanitizeClaimContextField — round 3 bidi + widened invisible coverage', () => {
+    const { sanitizeClaimContextField } = __testing;
+
+    it.each([
+      ['bidi override U+202E (RLO)', '‮'],
+      ['bidi isolate U+2066 (LRI)', '⁦'],
+      ['bidi isolate U+2069 (PDI)', '⁩'],
+      ['zero-width space U+200B', '​'],
+      ['zero-width non-joiner U+200C', '‌'],
+      ['LRM U+200E', '‎'],
+      ['line separator U+2028', ' '],
+      ['paragraph separator U+2029', ' '],
+      ['BOM U+FEFF', '﻿'],
+    ])('strips %s and collapses to a single space', (_label, cp) => {
+      const out = sanitizeClaimContextField(`alpha${cp}beta`);
+      expect(out).not.toContain(cp);
+      expect(out).toBe('alpha beta');
+    });
+
+    it('strips Unicode tag block (U+E0040) via surrogate-pair match', () => {
+      const tagChar = String.fromCharCode(0xdb40, 0xdc40);
+      const out = sanitizeClaimContextField(`alpha${tagChar}beta`);
+      expect(out).not.toContain(tagChar);
+    });
+
+    it('still enforces the 2000-char length cap', () => {
+      const out = sanitizeClaimContextField('x'.repeat(5000));
+      expect(out.length).toBe(2000);
+    });
+
+    it('collapses runs of whitespace to a single space + trims', () => {
+      expect(sanitizeClaimContextField('  a  \n  b  ')).toBe('a b');
+    });
+  });
+
   it('contested posture: full both-sides payload persisted', async () => {
     const state = rewriteState();
     const supabase = buildSupabase(state);
