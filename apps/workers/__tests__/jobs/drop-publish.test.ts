@@ -1030,6 +1030,45 @@ describe('dropPublishHandler — A4 fact explainer', () => {
     expect(result.success).toBe(true);
   });
 
+  // Round 3 — security-reviewer PR #199 MEDIUM + INFO coverage.
+  // Locks in the `new RegExp(string)` form of sanitizeClaimContextField
+  // + the widened codepoint set (U+200B-U+200F zero-widths, U+2028-U+2029
+  // LS/PS, U+FEFF BOM) that round 1 missed via a literal-char regex.
+  describe('sanitizeClaimContextField — round 3 bidi + widened invisible coverage', () => {
+    const { sanitizeClaimContextField } = __testing;
+
+    it.each([
+      ['bidi override U+202E (RLO)', '‮'],
+      ['bidi isolate U+2066 (LRI)', '⁦'],
+      ['bidi isolate U+2069 (PDI)', '⁩'],
+      ['zero-width space U+200B', '​'],
+      ['zero-width non-joiner U+200C', '‌'],
+      ['LRM U+200E', '‎'],
+      ['line separator U+2028', ' '],
+      ['paragraph separator U+2029', ' '],
+      ['BOM U+FEFF', '﻿'],
+    ])('strips %s and collapses to a single space', (_label, cp) => {
+      const out = sanitizeClaimContextField(`alpha${cp}beta`);
+      expect(out).not.toContain(cp);
+      expect(out).toBe('alpha beta');
+    });
+
+    it('strips Unicode tag block (U+E0040) via surrogate-pair match', () => {
+      const tagChar = String.fromCharCode(0xdb40, 0xdc40);
+      const out = sanitizeClaimContextField(`alpha${tagChar}beta`);
+      expect(out).not.toContain(tagChar);
+    });
+
+    it('still enforces the 2000-char length cap', () => {
+      const out = sanitizeClaimContextField('x'.repeat(5000));
+      expect(out.length).toBe(2000);
+    });
+
+    it('collapses runs of whitespace to a single space + trims', () => {
+      expect(sanitizeClaimContextField('  a  \n  b  ')).toBe('a b');
+    });
+  });
+
   it('contested posture: full both-sides payload persisted', async () => {
     const state = rewriteState();
     const supabase = buildSupabase(state);

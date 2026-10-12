@@ -192,16 +192,34 @@ function aiErrorDigest(err: unknown): string {
   return scrubMessage(err instanceof Error ? err.message : String(err));
 }
 
-function sanitizeClaimContextField(raw: string): string {
-  // Match the sanitize-field pattern from fact-explainer.ts / drop-
-  // headline.ts: C0/C1 + bidi overrides + Unicode tag block. The
-  // string flows into fact-check-orchestrator's user prompt, so the
-  // same prompt-injection surface applies. Security-reviewer PR #199
-  // MEDIUM #1.
-  // eslint-disable-next-line no-control-regex
-  const stripControl = raw.replace(/[\u0000-\u001F\u007F-\u009F‪-‮⁦-⁩]/g, ' ');
+// Match the sanitize-field pattern from fact-explainer.ts / drop-
+// headline.ts verbatim: the same codepoint coverage AND the same
+// `new RegExp(string)` form so Prettier can't collapse the \uXXXX
+// escapes into literal invisible characters inside the regex
+// literal. See fact-explainer.ts around the STRIP_CONTROL_PATTERN
+// comment for the full breakdown of covered classes:
+//   U+0000-U+001F   C0 control chars
+//   U+007F-U+009F   DEL + C1 control chars
+//   U+200B-U+200F   zero-width space, ZWNJ, ZWJ, LRM, RLM
+//   U+2028-U+2029   line / paragraph separators
+//   U+202A-U+202E   LRE / RLE / PDF / LRO / RLO (bidi overrides)
+//   U+2066-U+2069   LRI / RLI / FSI / PDI (bidi isolates)
+//   U+FEFF          BOM / ZWNBSP
+// Security-reviewer PR #199 MEDIUM #1 (round 1) + round-3 MEDIUM: the
+// prior round-1 fix added bidi coverage but did so with a regex
+// literal that embedded the invisibles as literal chars — the
+// unauditability the reviewer flagged for the sibling prompt files.
+// This round-3 fix mirrors fact-explainer.ts / drop-headline.ts.
 
-  const stripTags = stripControl.replace(/[\uDB40][\uDC00-\uDC7F]/g, ' ');
+const CLAIM_STRIP_CONTROL_PATTERN =
+  '[\\u0000-\\u001F\\u007F-\\u009F\\u200B-\\u200F\\u2028\\u2029\\u202A-\\u202E\\u2066-\\u2069\\uFEFF]';
+const CLAIM_STRIP_CONTROL_RE = new RegExp(CLAIM_STRIP_CONTROL_PATTERN, 'g');
+// Unicode tag block (U+E0000..U+E007F) as surrogate pairs.
+const CLAIM_STRIP_TAG_BLOCK_RE = new RegExp('[\\uDB40][\\uDC00-\\uDC7F]', 'g');
+
+function sanitizeClaimContextField(raw: string): string {
+  const stripControl = raw.replace(CLAIM_STRIP_CONTROL_RE, ' ');
+  const stripTags = stripControl.replace(CLAIM_STRIP_TAG_BLOCK_RE, ' ');
   return stripTags.replace(/\s+/g, ' ').trim().slice(0, 2000);
 }
 
@@ -796,6 +814,13 @@ export const __testing = {
   todayDropAtEt,
   CLUSTER_BLOCK_DAYS,
   DOMINANCE_RATIO,
+  // Expose sanitizeClaimContextField so round-3 unit tests can
+  // observe the bidi + tag-block strip + length cap behaviour
+  // directly rather than through the gated fact-check enqueue path
+  // (FACT_CHECK_ENABLED=false in CI). Security-reviewer PR #199
+  // round 3 INFO (locked in alongside the MEDIUM `new RegExp(string)`
+  // fix to prevent regression on the sanitize contract).
+  sanitizeClaimContextField,
   // Expose a safeParse wrapper rather than the live schema object
   // (security-reviewer PR #199 LOW #3). Tests can observe the
   // refine() behaviour without the schema's full z.ZodObject surface
