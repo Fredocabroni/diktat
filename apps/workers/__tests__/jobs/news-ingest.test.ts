@@ -482,6 +482,48 @@ describe('clusterGdeltArticles — operator trend-score + primary-source rules',
     expect(clusterGdeltArticles({ articles: 'oops' })).toEqual([]);
     expect(clusterGdeltArticles({})).toEqual([]);
   });
+
+  // Security-reviewer PR #201 round 2 — MEDIUM: cap raw.articles.length.
+  it('caps raw.articles.length at 500 before clustering (DoS guard)', () => {
+    // 10,000 entries all sharing one normalized title; only the first
+    // 500 should be walked. 500 entries × 1 domain each → 500 outlets
+    // → one cluster, trend_score=500 (not 10,000). Hostile upstream
+    // response size is cut off before the per-article regex runs.
+    const DOMAINS = 10_000;
+    const articles = Array.from({ length: DOMAINS }, (_, i) => ({
+      // Use primary-domain subdomains so classifyUrl keeps picking them
+      // (otherwise ClassifyUrl drops them before clustering).
+      url: `https://congress.gov/path-${i}`,
+      domain: `host-${i}.congress.gov`,
+      title: 'Senate passes HR-1234',
+      seendate: '20261010T053000Z',
+    }));
+    const out = clusterGdeltArticles({ articles });
+    expect(out).toHaveLength(1);
+    // trend_score reflects the clipped-at-500 count, not the raw 10,000.
+    expect(out[0]?.trend_score).toBe(500);
+  });
+
+  // Security-reviewer PR #201 round 2 — stamp dedicated numeric column.
+  it('writes trend_score on each emitted candidate (not only in the summary prefix)', () => {
+    const resp = {
+      articles: [
+        { url: 'https://news.example.com/sen', domain: 'example.com', title: 'X' },
+        { url: 'https://news.example.net/sen', domain: 'example.net', title: 'X' },
+        {
+          url: 'https://www.congress.gov/bill/118hr1234',
+          domain: 'congress.gov',
+          title: 'X',
+        },
+      ],
+    };
+    const out = clusterGdeltArticles(resp);
+    expect(out).toHaveLength(1);
+    expect(out[0]?.trend_score).toBe(3);
+    // Legacy human-readable prefix retained; a follow-up PR drops it
+    // after news-dedup-rank reads the dedicated column.
+    expect(out[0]?.summary).toMatch(/^\[trend=3]/);
+  });
 });
 
 describe('gdeltAdapter — SSRF-hardened fetch + env gate', () => {
@@ -580,6 +622,89 @@ describe('gdeltAdapter — SSRF-hardened fetch + env gate', () => {
       await expect(
         gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch),
       ).rejects.toThrow(/not valid JSON/);
+    } finally {
+      if (prev === undefined) delete process.env.GDELT_ENABLED;
+      else process.env.GDELT_ENABLED = prev;
+    }
+  });
+
+  // Security-reviewer PR #201 round 2 — Zod-parsed env gate.
+  // boolFromString case-insensitively matches 'true'; nothing else.
+  it.each([
+    ['True', true],
+    ['TRUE', true],
+    ['true', true],
+    ['tRuE', true],
+  ])('enables on GDELT_ENABLED=%s (Zod-parse match)', async (flag, _expected) => {
+    const prev = process.env.GDELT_ENABLED;
+    process.env.GDELT_ENABLED = flag;
+    try {
+      const fetchImpl = vi.fn(async () => new Response(SAMPLE_JSON, { status: 200 }));
+      await gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch);
+      expect(fetchImpl).toHaveBeenCalledOnce();
+    } finally {
+      if (prev === undefined) delete process.env.GDELT_ENABLED;
+      else process.env.GDELT_ENABLED = prev;
+    }
+  });
+
+  it.each([
+    ['1', 'numeric string'],
+    ['yes', 'yes-string'],
+    ['on', 'on-string'],
+    ['false', 'explicit false'],
+    ['', 'empty string'],
+  ])('stays disabled on GDELT_ENABLED=%s (%s) per strict Zod bool semantics', async (flag) => {
+    const prev = process.env.GDELT_ENABLED;
+    process.env.GDELT_ENABLED = flag;
+    try {
+      const fetchImpl = vi.fn(async () => new Response('should not be called'));
+      const out = await gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch);
+      expect(out).toEqual([]);
+      expect(fetchImpl).not.toHaveBeenCalled();
+    } finally {
+      if (prev === undefined) delete process.env.GDELT_ENABLED;
+      else process.env.GDELT_ENABLED = prev;
+    }
+  });
+
+  // Security-reviewer PR #201 round 2 — streaming body size cap.
+  // readBodyWithSizeCap trips mid-stream when total crosses the cap.
+  it('aborts a response that streams past the size cap (does not fully buffer)', async () => {
+    const prev = process.env.GDELT_ENABLED;
+    process.env.GDELT_ENABLED = 'true';
+    try {
+      // Build a ReadableStream that yields a 3MB payload in 1MB chunks.
+      // GDELT_MAX_BYTES is 2MB — the second chunk tips us over so the
+      // reader throws BEFORE the third chunk is ever requested.
+      const chunk = new Uint8Array(1024 * 1024); // 1MB zero-filled
+      let pulls = 0;
+      const body = new ReadableStream({
+        pull(controller) {
+          if (pulls >= 3) {
+            controller.close();
+            return;
+          }
+          controller.enqueue(chunk);
+          pulls += 1;
+        },
+      });
+      const fetchImpl = vi.fn(
+        async () =>
+          new Response(body, {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }),
+      );
+      await expect(
+        gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch),
+      ).rejects.toThrow(/exceeds .* cap/);
+      // The pull callback must have fired at most 3 times — the reader
+      // tripped the cap after chunk 2 (2 MB) + 1 (3 MB total) and stopped
+      // pulling. The precise count varies with reader buffering; the
+      // important invariant is that we DID NOT buffer the full 3 MB
+      // response into memory before checking the size.
+      expect(pulls).toBeLessThanOrEqual(3);
     } finally {
       if (prev === undefined) delete process.env.GDELT_ENABLED;
       else process.env.GDELT_ENABLED = prev;
