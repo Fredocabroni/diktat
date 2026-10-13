@@ -965,6 +965,157 @@ describe('newsIngestHandler — happy path', () => {
     expect(logger.calls.find((c) => c.obj.event === 'news_ingest.adapter_failed')).toBeDefined();
   });
 
+  // PR #211 — Telegram alert on adapter failure + cause-chain capture.
+  it('fires a per-adapter Telegram alert on adapter failure (dedup-keyed)', async () => {
+    const state = freshState();
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+    const alertCalls: Array<{
+      level: string;
+      title: string;
+      body: string;
+      opts?: { dedupKey?: string; dedupTtlMs?: number };
+    }> = [];
+    const alerter = {
+      alert: vi.fn(
+        async (
+          level: string,
+          title: string,
+          body: string,
+          opts?: { dedupKey?: string; dedupTtlMs?: number },
+        ) => {
+          alertCalls.push({ level, title, body, opts });
+        },
+      ),
+    };
+    // Build an Error whose cause chain mirrors undici's wrap of
+    // ECONNRESET. The alerter body should contain the inner `code`.
+    const inner = Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
+    const outer = new TypeError('fetch failed', { cause: inner });
+    const failingAdapter: NewsIngestAdapter = {
+      name: 'gdelt',
+      defaultCategory: 'congress',
+      fetch: vi.fn().mockRejectedValue(outer),
+    };
+    const handler = buildNewsIngestHandler([failingAdapter], STUB_ENV_PROVIDER);
+
+    await handler(row(), {
+      supabase,
+      logger,
+      alerter: alerter as never,
+      fetch: vi.fn() as never,
+    });
+
+    expect(alertCalls).toHaveLength(1);
+    const [call] = alertCalls;
+    expect(call?.level).toBe('error');
+    expect(call?.title).toBe('news_ingest adapter_failed:gdelt');
+    expect(call?.body).toContain('adapter=gdelt');
+    // The inner cause's code is surfaced — this is the whole point.
+    expect(call?.body).toContain('ECONNRESET');
+    expect(call?.opts?.dedupKey).toBe('news_ingest:adapter_failed:gdelt');
+    expect(call?.opts?.dedupTtlMs).toBe(60 * 60_000);
+  });
+
+  it('no alert when deps.alerter is undefined (fire-and-forget)', async () => {
+    const state = freshState();
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+    const failingAdapter: NewsIngestAdapter = {
+      name: 'broken',
+      defaultCategory: 'congress',
+      fetch: vi.fn().mockRejectedValue(new Error('feed 503')),
+    };
+    const handler = buildNewsIngestHandler([failingAdapter], STUB_ENV_PROVIDER);
+    // No alerter in deps.
+    await handler(row(), { supabase, logger, fetch: vi.fn() as never });
+    // Did not throw; adapter_failed was logged.
+    expect(logger.calls.find((c) => c.obj.event === 'news_ingest.adapter_failed')).toBeDefined();
+  });
+
+  it('persists the full cause chain into news_adapter_health.last_error_message', async () => {
+    const state = freshState();
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+    const inner = Object.assign(new Error('getaddrinfo ENOTFOUND api.gdeltproject.org'), {
+      code: 'ENOTFOUND',
+    });
+    const outer = new TypeError('fetch failed', { cause: inner });
+    const failingAdapter: NewsIngestAdapter = {
+      name: 'gdelt',
+      defaultCategory: 'congress',
+      fetch: vi.fn().mockRejectedValue(outer),
+    };
+    const handler = buildNewsIngestHandler([failingAdapter], STUB_ENV_PROVIDER);
+    await handler(row(), { supabase, logger, fetch: vi.fn() as never });
+    const healthRow = state.healthUpserts.get('gdelt');
+    expect(healthRow).toBeDefined();
+    // Full chain lands in last_error_message, not just the outer "fetch failed".
+    expect(healthRow?.last_error_message as string).toContain('fetch failed');
+    expect(healthRow?.last_error_message as string).toContain('ENOTFOUND');
+  });
+
+  it('caps last_error_message at 1024 chars before DB write (#211 reviewer LOW 3)', async () => {
+    const state = freshState();
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+    // 4000-char message; single-layer scrubbed chain blows past the cap.
+    const huge = 'x'.repeat(4000);
+    const failingAdapter: NewsIngestAdapter = {
+      name: 'gdelt',
+      defaultCategory: 'congress',
+      fetch: vi.fn().mockRejectedValue(new Error(huge)),
+    };
+    const handler = buildNewsIngestHandler([failingAdapter], STUB_ENV_PROVIDER);
+    await handler(row(), { supabase, logger, fetch: vi.fn() as never });
+    const healthRow = state.healthUpserts.get('gdelt');
+    expect(healthRow).toBeDefined();
+    expect((healthRow?.last_error_message as string).length).toBeLessThanOrEqual(1024);
+  });
+
+  it('caps error.code at 64 chars inside the chain message (#211 reviewer LOW 1)', () => {
+    const { errorChainMessage } = __testing;
+    const longCode = 'A'.repeat(500);
+    const e = Object.assign(new Error('boom'), { code: longCode });
+    const msg = errorChainMessage(e);
+    // Bracketed suffix contains the truncated code only.
+    expect(msg).toContain('[' + 'A'.repeat(64) + ']');
+    expect(msg).not.toContain('A'.repeat(65));
+  });
+
+  describe('errorChainMessage (test seam)', () => {
+    const { errorChainMessage } = __testing;
+
+    it('surfaces undici-style TypeError(fetch failed, cause: SystemError)', () => {
+      const inner = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' });
+      const outer = new TypeError('fetch failed', { cause: inner });
+      const msg = errorChainMessage(outer);
+      expect(msg).toContain('fetch failed');
+      expect(msg).toContain('read ECONNRESET');
+      expect(msg).toContain('ECONNRESET');
+      expect(msg.split(' <- ').length).toBe(2);
+    });
+
+    it('handles a bare string error', () => {
+      expect(errorChainMessage('something broke')).toBe('something broke');
+    });
+
+    it('caps the chain depth at 5 (defensive against pathological cycles)', () => {
+      // Build a 10-deep chain. Only first 5 layers should appear.
+      let cur: Error = new Error('leaf');
+      for (let i = 0; i < 9; i += 1) {
+        cur = new Error(`layer${i}`, { cause: cur });
+      }
+      const msg = errorChainMessage(cur);
+      expect(msg.split(' <- ').length).toBe(5);
+    });
+
+    it('includes error.code when present as a bracketed suffix', () => {
+      const e = Object.assign(new Error('socket closed'), { code: 'UND_ERR_SOCKET' });
+      expect(errorChainMessage(e)).toContain('[UND_ERR_SOCKET]');
+    });
+  });
+
   it('handles 23505 (unique violation) silently — re-ingest is expected', async () => {
     const state = freshState();
     state.insertError = { code: '23505', message: 'duplicate key value' };

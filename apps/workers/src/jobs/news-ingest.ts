@@ -890,6 +890,40 @@ async function warnStaleAdapters(deps: Parameters<JobHandler>[1]): Promise<void>
   }
 }
 
+/** Walk an Error's `cause` chain and produce a `":"-joined` summary
+ *  of each layer's `message` (or `code`, when present — undici
+ *  attaches `code` on its network-layer errors). Node's `undici`
+ *  wraps the real failure as `TypeError('fetch failed', { cause:
+ *  { code: 'ECONNRESET', ... } })`; the operator-facing bare
+ *  `fetch failed` string is useless without the cause chain surfaced.
+ *
+ *  Caps at 5 levels (defensive against pathological cycles) and
+ *  flattens through scrubMessage per layer. PR #210-sibling fold:
+ *  surface the real reason GDELT fetches are failing on Railway
+ *  (observed on 2026-10-13: adapter-health err_180 was just the
+ *  bare "fetch failed" string with no actionable detail). */
+function errorChainMessage(err: unknown): string {
+  const parts: string[] = [];
+  let cur: unknown = err;
+  for (let depth = 0; depth < 5 && cur != null; depth += 1) {
+    if (cur instanceof Error) {
+      const code = (cur as { code?: unknown }).code;
+      // Cap at 64 chars so a long/attacker-controlled `code` cannot blow
+      // out the Telegram body or the DB column. All Node/undici error
+      // codes seen in the wild are short tokens (ECONNRESET, ENOTFOUND,
+      // UND_ERR_SOCKET, …) — 64 is comfortably past the longest documented.
+      const codeStr = typeof code === 'string' && code.length > 0 ? code.slice(0, 64) : '';
+      const msg = cur.message || cur.name || 'Error';
+      parts.push(scrubMessage(codeStr ? `${msg} [${codeStr}]` : msg));
+      cur = (cur as { cause?: unknown }).cause;
+    } else {
+      parts.push(scrubMessage(String(cur)));
+      break;
+    }
+  }
+  return parts.join(' <- ');
+}
+
 /** Run one adapter, classify each candidate, insert into the staging
  *  table. Returns a summary; errors are caught and stamped (one bad
  *  adapter doesn't kill the whole tick). */
@@ -903,7 +937,9 @@ async function ingestOne(
   try {
     candidates = await adapter.fetch(fetchImpl, env);
   } catch (err) {
-    const message = scrubMessage(err instanceof Error ? err.message : String(err));
+    // Surface the whole cause chain, not just `err.message`. Undici's
+    // `fetch failed` message is useless without the inner cause.
+    const message = errorChainMessage(err);
     deps.logger.warn({
       event: 'news_ingest.adapter_failed',
       adapter: adapter.name,
@@ -915,10 +951,31 @@ async function ingestOne(
     // warn above.
     await upsertAdapterHealth(deps, adapter.name, {
       lastErrorAt: new Date().toISOString(),
-      lastErrorMessage: message,
+      // Cap at 1024 before DB write. The chain is already bounded (5
+      // layers × scrubMessage output), but a pathological cause-chain
+      // payload could still oversize the operator-facing text column.
+      // 1024 leaves generous room past the Telegram body's 400-char cap
+      // so DB retains more context than the alert itself.
+      lastErrorMessage: message.slice(0, 1024),
       lastFetchedCount: 0,
       lastFreshCount: 0,
     });
+    // Telegram alert, per-adapter dedup (1 hour TTL). Catches the
+    // silent-failure class #194 was built for but on the adapter
+    // path rather than drop-publish. Fire-and-forget so a Telegram
+    // outage never kills the ingest tick. Static body stub: the
+    // chain message in the warn log is the full context; the
+    // alerter sees an operator-facing pointer plus the chain so
+    // Telegram alone reveals the real reason.
+    void deps.alerter?.alert(
+      'error',
+      `news_ingest adapter_failed:${adapter.name}`,
+      `adapter=${adapter.name} · ${message.slice(0, 400)}`,
+      {
+        dedupKey: `news_ingest:adapter_failed:${adapter.name}`,
+        dedupTtlMs: 60 * 60_000,
+      },
+    );
     return {
       adapter: adapter.name,
       fetched: 0,
@@ -1153,6 +1210,7 @@ export const __testing = {
   fetchAndParseRss,
   requireHttpsUrl,
   resetGdeltRateLimitState,
+  errorChainMessage,
   INGEST_MAX_TITLE_CHARS,
   INGEST_MAX_URL_CHARS,
   GDELT_MIN_FETCH_INTERVAL_MS,
