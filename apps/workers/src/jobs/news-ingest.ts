@@ -26,6 +26,7 @@
 //     can substitute without hitting the network.
 
 import { scrubMessage } from '@diktat/shared/alerts';
+import { unzipSync } from 'fflate';
 import Parser from 'rss-parser';
 
 import { classifyUrl, normalizeHost, type SourceCategory } from '@diktat/ai-fabric';
@@ -321,58 +322,64 @@ export const secEdgarAdapter: NewsIngestAdapter = {
 };
 
 // ---------------------------------------------------------------------------
-// GDELT trending adapter (PR fix/gdelt-ingestor)
+// GDELT trending adapter — Option B (data.gdeltproject.org raw export files)
 // ---------------------------------------------------------------------------
+//
+// Replaces the api.gdeltproject.org DOC endpoint (104.197.47.124 on GCE
+// us-central1) whose IPv4 TCP SYNs were silently dropped by Railway's
+// egress. Cause confirmed 2026-10-13 via post-#211 cause-chain capture:
+// UND_ERR_CONNECT_TIMEOUT after 10s on every tick from Railway, while
+// the same URL + options from an operator laptop reached GDELT and got
+// an HTTP 429 (rate-limit response — connection established fine).
+// `dig AAAA api.gdeltproject.org` returned no record, so IPv6 was not
+// the cause; this is a Railway→GCE peering issue specific to api's
+// single-VM endpoint.
+//
+// data.gdeltproject.org is Google Cloud Storage (anycast / load-
+// balanced front-ends; headers show `x-goog-*`, `UploadServer`), not a
+// single GCE VM. GCS has much broader peering than individual Compute
+// Engine VMs.
+//
+// Trade-off: raw export files don't carry article titles. We derive a
+// best-effort title from the URL slug via humanizeUrlSlug(); Phase 2
+// can enrich via secondary fetch or an AllSides/GDELT GKG join.
 
-/** Hard-pinned GDELT API host. The adapter refuses to fetch any other host.
- *  Defense-in-depth: a future config bug can't accidentally point this
- *  adapter at an attacker-controlled URL. */
-const GDELT_API_HOST = 'api.gdeltproject.org';
-/** Three empirically-verified GDELT API gotchas (PR #205 round 1 after
- *  the post-deploy verification turned up zero candidates):
- *   1. `timespan=15min` returns HTTP 200 with the text body
- *      `"Timespan is too short."`. GDELT's smallest supported window
- *      is `1h`. The 15-min cadence of our scheduler means consecutive
- *      ticks see overlapping windows; the clusterer's `dedup_url_canon`
- *      unique insert absorbs the overlap.
- *   2. `maxrecords=250` is above GDELT's default (75) and seems to
- *      count as a "larger query" per the 429 response body
- *      ("contact kalev.leetaru5@gmail.com for larger queries"). Backed
- *      off to 75.
- *   3. GDELT's 429 is slow — ~9-10s before the 429 lands. See
- *      FETCH_TIMEOUT_MS below. */
-const GDELT_API_URL =
-  'https://api.gdeltproject.org/api/v2/doc/doc?query=sourcecountry%3AUS%20sourcelang%3Aeng%20(domain%3Agov%20OR%20theme%3AUSCOURTS%20OR%20theme%3ATRIAL)&mode=ArtList&format=json&sort=HybridRel&maxrecords=75&timespan=1h';
+/** Hard-pinned GDELT data host. The adapter refuses to fetch any other
+ *  host. Defense-in-depth: a future config bug can't accidentally point
+ *  this adapter at an attacker-controlled URL. */
+const GDELT_DATA_HOST = 'data.gdeltproject.org';
 
-/** GDELT-specific timeout. The RSS adapters use FETCH_TIMEOUT_MS (10s)
- *  which is tight. GDELT responses — even the 200-OK happy path — land
- *  in the 8-11s range in practice, and the 429 rate-limit response
- *  takes ~9s to arrive. 30s gives both the happy path AND the
- *  rate-limited retry room to complete. Still bounded well under the
- *  15-minute scheduler cadence. */
+/** Pointer file published every 15 minutes. Body is a three-line
+ *  text/plain response of the form:
+ *      <size> <md5> http://data.gdeltproject.org/gdeltv2/<ts>.export.CSV.zip
+ *      <size> <md5> http://data.gdeltproject.org/gdeltv2/<ts>.mentions.CSV.zip
+ *      <size> <md5> http://data.gdeltproject.org/gdeltv2/<ts>.gkg.csv.zip
+ *  Line 2 (mentions) is what we fetch next — one row per article
+ *  mention of an event, with the source URL + domain. */
+const GDELT_LASTUPDATE_URL = 'https://data.gdeltproject.org/gdeltv2/lastupdate.txt';
+
+/** Per-fetch wall-clock timeout. 30 s is generous for a GCS fetch of a
+ *  ~150 KB zip but tolerates a slow TLS handshake or TCP retransmit. */
 const GDELT_FETCH_TIMEOUT_MS = 30_000;
 
-/** Max response body size from the GDELT API. Legitimate ArtList JSON for
- *  75 records tops out around 150 KB; the 2MB cap is far above that while
- *  still bounding OOM risk. */
-const GDELT_MAX_BYTES = 2 * 1024 * 1024;
+/** Pointer file is ~320 B. Cap at 4 KiB to absorb any future format
+ *  extension (new columns, pre-release markers) without being generous. */
+const GDELT_LASTUPDATE_MAX_BYTES = 4 * 1024;
 
-/** Hard cap on `response.articles.length` the clusterer will process in
- *  one tick. GDELT_API_URL hardcodes `maxrecords=75`, so a well-behaved
- *  response fits inside this cap. Guards against a hostile or
- *  misconfigured upstream response that ships thousands of entries:
- *  without this cap, the O(N) grouping + per-article regex in
- *  gdeltTitleKey would run on every entry before the 60-char slice.
- *  Security-reviewer PR #201 MEDIUM. */
-const GDELT_MAX_ARTICLES = 500;
+/** Compressed mentions.CSV.zip is typically 100-200 KB. 2 MiB cap is
+ *  10× observed; above that is almost certainly a format change or a
+ *  bomb payload. */
+const GDELT_MENTIONS_ZIP_MAX_BYTES = 2 * 1024 * 1024;
 
-/** GDELT returns some error responses as HTTP 200 with a text/plain
- *  body (e.g. `"Timespan is too short."` or the "larger queries" text
- *  on a 429 occasionally served as 200). We assert content-type on
- *  the response before attempting JSON.parse so an operator sees a
- *  clean "unexpected content-type" error instead of a confusing JSON
- *  parse-failure message that embeds the error prose. */
-const GDELT_EXPECTED_CONTENT_TYPE_PREFIX = 'application/json';
+/** Decompressed mentions.CSV typically 500 KB - 1 MB. 20 MiB cap bounds
+ *  zip-bomb impact given the 2 MiB compressed input: worst-case
+ *  decompression ratio before abort is 10×, well under memory. */
+const GDELT_MENTIONS_CSV_MAX_BYTES = 20 * 1024 * 1024;
+
+/** Hard cap on `mentions.length` the clusterer will process in one
+ *  tick. A healthy 15-min window ships 2k-5k mentions; this cap guards
+ *  against a schema change that bloats row count. */
+const GDELT_MAX_MENTIONS = 50_000;
 
 /** Minimum distinct-domain count below which the adapter will not surface
  *  a candidate. The operator's trend-score rule is "number of distinct
@@ -380,43 +387,61 @@ const GDELT_EXPECTED_CONTENT_TYPE_PREFIX = 'application/json';
  *  has no trending signal, so we require ≥ 2. */
 export const GDELT_MIN_TREND_SCORE = 2;
 
-/** Shape of the GDELT ArtList article we care about. Extra fields are
- *  ignored — the parser stays lenient so a future field addition doesn't
- *  break ingestion. */
-interface GdeltArticle {
-  readonly url?: unknown;
-  readonly title?: unknown;
-  readonly seendate?: unknown;
-  readonly domain?: unknown;
-  readonly language?: unknown;
-  readonly sourcecountry?: unknown;
+/** One parsed row of the GDELT 2.0 Mentions CSV (TSV, no header).
+ *  Columns per https://www.gdeltproject.org/data.html#documentation :
+ *   0: GLOBALEVENTID
+ *   1: EventTimeDate (yyyyMMddHHmmss UTC)
+ *   2: MentionTimeDate (yyyyMMddHHmmss UTC)
+ *   3: MentionType
+ *   4: MentionSourceName (domain)
+ *   5: MentionIdentifier (URL)
+ *   ...Confidence, DocLen, DocTone, ...
+ *  We retain only the four fields we use. */
+interface GdeltMention {
+  readonly globalEventId: string;
+  readonly eventTimeDate: string;
+  readonly sourceName: string;
+  readonly url: string;
 }
 
-interface GdeltResponse {
-  readonly articles?: unknown;
+/** Parse the second line of lastupdate.txt (the mentions pointer) and
+ *  return a validated HTTPS URL on GDELT_DATA_HOST. Format tolerance:
+ *  GDELT ships the URL as `http://...` in the pointer; we rewrite the
+ *  scheme to https:// and refuse anything whose hostname is not
+ *  GDELT_DATA_HOST (SSRF defense-in-depth). The path must match the
+ *  canonical `/gdeltv2/<14-digit-ts>.mentions.CSV.zip` shape — anything
+ *  else is a format drift. Returns null on any parse failure. */
+export function extractMentionsUrl(lastupdate: string): string | null {
+  const lines = lastupdate.split(/\r?\n/).filter((l) => l.length > 0);
+  if (lines.length < 2) return null;
+  // Format: "<size> <md5> <url>" — three whitespace-separated columns.
+  // The URL may contain no whitespace per GDELT's naming convention.
+  const parts = lines[1]!.trim().split(/\s+/);
+  if (parts.length < 3) return null;
+  const rawUrl = parts[parts.length - 1]!;
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return null;
+  }
+  if (parsed.hostname !== GDELT_DATA_HOST) return null;
+  if (!/^\/gdeltv2\/\d{14}\.mentions\.CSV\.zip$/.test(parsed.pathname)) return null;
+  // Rewrite http -> https. GDELT ships the pointer URLs as http but
+  // GCS accepts https directly and redirects http->https anyway; dodging
+  // the redirect saves one RTT and keeps the request on TLS from byte 1.
+  parsed.protocol = 'https:';
+  return parsed.toString();
 }
 
-/** SSRF-hardened GDELT API fetch. Scoped tighter than fetchWithSafeRedirects:
- *   - only https://api.gdeltproject.org/… is allowed
- *   - redirect='manual' + any 3xx is rejected (GDELT API does not redirect)
- *   - 30s per-hop timeout (GDELT API latency is 8-11s even on happy
- *     path; see GDELT_FETCH_TIMEOUT_MS comment).
- *   - response body hard-capped at GDELT_MAX_BYTES
- *   - Content-Type must start with application/json; GDELT returns
- *     some errors as 200 OK with a text/plain body (observed:
- *     "Timespan is too short.", rate-limit prose). PR #205.
- *  Error strings use `parsed.hostname` (not `parsed.host`) for
- *  consistency with the hostname guard (security-reviewer PR #201
- *  round-4 LOW).
- *  The three-layer SSRF guard requested in the overnight-run brief
- *  (scheme allowlist https, no private IPs/localhost, no redirects to
- *  them) is enforced at the host-string level — this adapter never
- *  resolves user-supplied URLs so an IP-literal / RFC1918 target cannot
- *  reach the fetch call. */
-async function fetchGdeltArtList(
+/** SSRF-hardened fetch of a GDELT_DATA_HOST URL. Scheme/hostname pinned,
+ *  `redirect='manual'` + any 3xx rejected, 30 s wall-clock timeout, body
+ *  capped at `maxBytes` and returned as a Uint8Array. */
+async function fetchGdeltBytes(
   fetchImpl: typeof globalThis.fetch,
   url: string,
-): Promise<GdeltResponse> {
+  maxBytes: number,
+): Promise<Uint8Array> {
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -426,7 +451,7 @@ async function fetchGdeltArtList(
   if (parsed.protocol !== 'https:') {
     throw new Error(`gdelt: refusing non-https URL (scheme=${parsed.protocol})`);
   }
-  if (parsed.hostname !== GDELT_API_HOST) {
+  if (parsed.hostname !== GDELT_DATA_HOST) {
     throw new Error(`gdelt: refusing non-GDELT host (${parsed.hostname})`);
   }
 
@@ -442,46 +467,22 @@ async function fetchGdeltArtList(
   if (!response.ok) {
     throw new Error(`gdelt: HTTP ${response.status} from ${parsed.hostname}`);
   }
-
-  // Content-Type assertion (PR #205). GDELT returns some errors as
-  // HTTP 200 with a text/plain body. Example: `timespan=15min` returns
-  // "Timespan is too short." with 200 OK. JSON.parse would throw a
-  // confusing error that embeds the error prose; a clean Content-Type
-  // check surfaces the real problem.
-  const contentType = (response.headers.get('content-type') ?? '').toLowerCase();
-  if (!contentType.startsWith(GDELT_EXPECTED_CONTENT_TYPE_PREFIX)) {
-    throw new Error(
-      `gdelt: unexpected content-type "${contentType}" from ${parsed.hostname} ` +
-        `(expected ${GDELT_EXPECTED_CONTENT_TYPE_PREFIX})`,
-    );
-  }
-
-  // Stream-read with early size cap (security-reviewer PR #201 LOW):
-  // `await response.text()` buffers the full body before any size check,
-  // so a slow upstream shipping 100 MB would OOM the workers process
-  // before the 2 MB gate below ever fired. Reading via the ReadableStream
-  // reader lets us trip the cap mid-stream and cancel the body.
-  const body = await readBodyWithSizeCap(response, GDELT_MAX_BYTES);
-  try {
-    return JSON.parse(body) as GdeltResponse;
-  } catch {
-    throw new Error(`gdelt: response body is not valid JSON`);
-  }
+  return readBodyAsBytesWithSizeCap(response, maxBytes);
 }
 
-/** Read a Response body as text with an incremental size cap. Trips on
- *  the FIRST chunk that would exceed `maxBytes`, cancels the reader so
- *  the connection is released, and throws. Falls back to
- *  `response.text()` only when `response.body` is unavailable (which
- *  shouldn't happen in Node 20+ but is defensive against polyfilled
- *  fetch impls in test shims). Security-reviewer PR #201 LOW. */
-async function readBodyWithSizeCap(response: Response, maxBytes: number): Promise<string> {
+/** Read a Response body as a Uint8Array with an incremental size cap.
+ *  Trips on the first chunk that would exceed `maxBytes`, cancels the
+ *  reader, and throws. Security-reviewer PR #201 LOW. */
+async function readBodyAsBytesWithSizeCap(
+  response: Response,
+  maxBytes: number,
+): Promise<Uint8Array> {
   if (!response.body) {
-    const buffered = await response.text();
-    if (buffered.length > maxBytes) {
-      throw new Error(`gdelt: response body ${buffered.length} exceeds ${maxBytes}B cap`);
+    const ab = await response.arrayBuffer();
+    if (ab.byteLength > maxBytes) {
+      throw new Error(`gdelt: response body ${ab.byteLength} exceeds ${maxBytes}B cap`);
     }
-    return buffered;
+    return new Uint8Array(ab);
   }
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -497,27 +498,167 @@ async function readBodyWithSizeCap(response: Response, maxBytes: number): Promis
     }
     chunks.push(value);
   }
-  // Concat Uint8Array chunks into one, then decode UTF-8.
   const merged = new Uint8Array(total);
   let offset = 0;
   for (const chunk of chunks) {
     merged.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  return new TextDecoder('utf-8').decode(merged);
+  return merged;
 }
 
-/** Normalize a GDELT article title for similarity-based clustering.
- *  Lowercase + drop non-alphanumeric + take the first 60 chars. Two
- *  articles about the same event tend to share the first 60 chars of
- *  their title after this normalization even when outlets re-caption
- *  (e.g. prepending "Breaking:" or appending " – Reuters"). */
-export function gdeltTitleKey(title: string): string {
-  return title
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim()
-    .slice(0, 60);
+/** Scan the archive's EOCD (End Of Central Directory) record and return
+ *  the entry count. Returns null if the EOCD is not found (malformed
+ *  zip). The EOCD is 22 bytes at the end of a well-formed archive plus
+ *  an optional 0–65535-byte trailing comment; we scan the trailing
+ *  1 KiB only — a zip with a kilobyte+ trailing comment is suspicious
+ *  on its own and worth rejecting. Round-2 reviewer MED 3: lets us
+ *  enforce entry-count = 1 BEFORE `unzipSync` allocates per-entry
+ *  decompressed buffers, closing the multi-entry memory-exhaustion
+ *  path through the compressed-cap. */
+function parseZipEntryCount(bytes: Uint8Array): number | null {
+  const EOCD_SIG = 0x06054b50;
+  if (bytes.length < 22) return null;
+  const scanEnd = bytes.length - 22;
+  const scanStart = Math.max(0, scanEnd - 1024);
+  for (let i = scanEnd; i >= scanStart; i -= 1) {
+    const sig =
+      (bytes[i]! | (bytes[i + 1]! << 8) | (bytes[i + 2]! << 16) | (bytes[i + 3]! << 24)) >>> 0;
+    if (sig === EOCD_SIG) {
+      // Offset 10-12 from EOCD start: total number of entries in the
+      // central directory, uint16 little-endian.
+      return bytes[i + 10]! | (bytes[i + 11]! << 8);
+    }
+  }
+  return null;
+}
+
+/** Sanitize a zip entry filename before any use in error strings or
+ *  log fields. Round-2 reviewer MED 4: an unsanitized name can carry
+ *  path separators, null bytes, newlines, or ANSI escape sequences
+ *  that corrupt log output or seed a path-traversal vector if the
+ *  bytes are ever written to disk. We keep word chars, dots and
+ *  dashes only; cap at 64 chars. */
+function sanitizeZipEntryName(name: string): string {
+  return name.replace(/[^\w.-]/g, '_').slice(0, 64);
+}
+
+/** Fetch the GDELT pointer file, parse out the mentions URL, fetch the
+ *  mentions.CSV.zip, unzip, parse the TSV, return the mentions.
+ *
+ *  Zip-bomb bound: the compressed input is capped at
+ *  GDELT_MENTIONS_ZIP_MAX_BYTES (2 MiB); the archive is pre-flighted
+ *  via `parseZipEntryCount` to reject anything that is not a
+ *  single-entry zip (closes the multi-entry memory-exhaustion path);
+ *  after `unzipSync` the decompressed CSV is asserted ≤
+ *  GDELT_MENTIONS_CSV_MAX_BYTES (20 MiB). Worst-case memory before
+ *  abort: 22 MiB (single entry, 2 MiB compressed + 20 MiB decompressed).
+ *
+ *  The row cap (GDELT_MAX_MENTIONS = 50 000) is a second-layer defense
+ *  against a well-formed-but-pathological CSV. */
+async function fetchGdeltMentionsLatest(
+  fetchImpl: typeof globalThis.fetch,
+): Promise<GdeltMention[]> {
+  // Step 1 — fetch pointer file. Routed through `fetchGdeltBytes` so
+  // the scheme / host / redirect / timeout / size-cap guards all apply
+  // to BOTH endpoints we hit (round-2 reviewer MED 1 — collapse the
+  // abstraction gap so a future constant swap can't bypass the pin).
+  const pointerBytes = await fetchGdeltBytes(
+    fetchImpl,
+    GDELT_LASTUPDATE_URL,
+    GDELT_LASTUPDATE_MAX_BYTES,
+  );
+  const pointer = new TextDecoder('utf-8').decode(pointerBytes);
+
+  // Step 2 — parse mentions URL out of the pointer.
+  const mentionsUrl = extractMentionsUrl(pointer);
+  if (mentionsUrl === null) {
+    throw new Error(`gdelt: lastupdate.txt did not yield a valid mentions URL`);
+  }
+
+  // Step 3 — fetch the compressed CSV.
+  const zipBytes = await fetchGdeltBytes(fetchImpl, mentionsUrl, GDELT_MENTIONS_ZIP_MAX_BYTES);
+
+  // Step 4a — pre-flight the archive's entry count via EOCD without
+  // allocating any decompressed buffer. GDELT's documented format is
+  // exactly ONE entry per zip; anything else is a format drift or a
+  // bomb payload. Round-2 reviewer MED 3.
+  const entryCount = parseZipEntryCount(zipBytes);
+  if (entryCount === null) {
+    throw new Error(`gdelt: zip EOCD not found (malformed archive)`);
+  }
+  if (entryCount !== 1) {
+    throw new Error(`gdelt: expected single-entry zip, got ${entryCount}`);
+  }
+
+  // Step 4b — unzip in-memory. With entry-count = 1 enforced above,
+  // `unzipSync` allocates at most GDELT_MENTIONS_CSV_MAX_BYTES of
+  // decompressed data in one buffer before the post-cap check fires.
+  let unzipped: Record<string, Uint8Array>;
+  try {
+    unzipped = unzipSync(zipBytes);
+  } catch (err) {
+    throw new Error(`gdelt: unzip failed (${(err as Error).message ?? 'unknown'})`);
+  }
+  const entries = Object.entries(unzipped);
+  if (entries.length !== 1) {
+    throw new Error(`gdelt: post-unzip entry count mismatch (got ${entries.length})`);
+  }
+  const [rawEntryName, csvBytes] = entries[0]!;
+  const safeEntryName = sanitizeZipEntryName(rawEntryName);
+  if (!/\.CSV$/i.test(safeEntryName)) {
+    throw new Error(`gdelt: zip entry is not a .CSV (name=${safeEntryName})`);
+  }
+  if (csvBytes.byteLength > GDELT_MENTIONS_CSV_MAX_BYTES) {
+    throw new Error(
+      `gdelt: decompressed CSV ${csvBytes.byteLength} exceeds ${GDELT_MENTIONS_CSV_MAX_BYTES}B cap`,
+    );
+  }
+  const csv = new TextDecoder('utf-8').decode(csvBytes);
+  return parseGdeltMentionsCsv(csv);
+}
+
+/** Max hostname length (RFC 1035 — the per-label 63-byte cap times
+ *  four labels is a comfortable upper bound on any real domain name). */
+const INGEST_MAX_SOURCE_HOST_CHARS = 253;
+
+/** Parse the GDELT Mentions TSV (no header). Each row is \t-separated;
+ *  we read columns 0 (GLOBALEVENTID), 1 (EventTimeDate), 4
+ *  (MentionSourceName), 5 (MentionIdentifier). Rows missing any
+ *  required column are dropped. Rows with an oversized URL or source
+ *  name are also dropped at parse time — this bounds per-row memory
+ *  before the clusterer walks the array (round-2 reviewer LOW 2).
+ *
+ *  Row cap applies to ACCEPTED rows, not line index: a hostile CSV
+ *  cannot push its true parse depth to zero by padding with blank
+ *  lines (round-2 reviewer LOW 1). */
+export function parseGdeltMentionsCsv(csv: string): GdeltMention[] {
+  const out: GdeltMention[] = [];
+  for (const line of csv.split(/\r?\n/)) {
+    if (out.length >= GDELT_MAX_MENTIONS) break;
+    if (!line) continue;
+    const cols = line.split('\t');
+    if (cols.length < 6) continue;
+    const globalEventId = cols[0]!;
+    const eventTimeDate = cols[1]!;
+    const sourceName = cols[4]!;
+    const url = cols[5]!;
+    if (
+      globalEventId.length === 0 ||
+      eventTimeDate.length === 0 ||
+      sourceName.length === 0 ||
+      url.length === 0
+    ) {
+      continue;
+    }
+    // Parse-time length guards (round-2 reviewer LOW 2). A hostile CSV
+    // row with an unbounded URL would otherwise sit in the clusterer's
+    // input array until clusterGdeltMentions re-checks the cap.
+    if (url.length > INGEST_MAX_URL_CHARS) continue;
+    if (sourceName.length > INGEST_MAX_SOURCE_HOST_CHARS) continue;
+    out.push({ globalEventId, eventTimeDate, sourceName, url });
+  }
+  return out;
 }
 
 /** Per-field length caps on ingest-adapter strings before DB insert
@@ -531,102 +672,108 @@ const INGEST_MAX_TITLE_CHARS = 2000;
 const INGEST_MAX_URL_CHARS = 2048;
 const INGEST_MAX_SUMMARY_CHARS = 1000;
 
-/** From a GDELT ArtList response, cluster articles by title similarity
- *  and produce one CandidateInput per cluster whose primary URL passes
- *  classifyUrl().
+/** Humanize the final meaningful path segment of a URL into a readable
+ *  title. GDELT Mentions CSV does not carry article titles; the old
+ *  ArtList endpoint did. For launch, derive a best-effort title from
+ *  the URL slug. Phase 2 can enrich via secondary HEAD fetch or GKG
+ *  join.
  *
- *  Trend score is "distinct outlets covering the same story in the
- *  window" per the operator's design doc
- *  (docs/phase-5/trending-sources-2026-10-11.md). Security-reviewer
- *  round-3 LOW 5.3 flagged that this counts raw GDELT `a.domain`
- *  values — a hostile GDELT supplier could inflate a cluster's score
- *  by posting many fake non-primary domains under one title. The
- *  reviewer offered two remediations: (a) scope the count to primary-
- *  source domains, OR (b) document the current behavior as an
- *  intentional trust-of-GDELT decision. (a) would diverge from the
- *  operator's design doc semantics; (b) is the chosen path. The
- *  trust assumption is: GDELT's own corpus-ingestion pipeline + the
- *  `sourcecountry:US sourcelang:eng` filter make the domain field
- *  reliable enough as a trending signal. If this ever changes,
- *  revisit by switching to a primary-only count AND lowering
- *  `GDELT_MIN_TREND_SCORE` to 1 so the Drop pool doesn't shrink.
+ *  Behavior:
+ *   - take the last non-empty path segment ('/x/y/' → 'y')
+ *   - strip a leading `<digits>.` or `<digits>-` prefix (article IDs)
+ *   - strip a trailing extension (.html, .pdf, …)
+ *   - split on dashes/underscores/dots, trim each token
+ *   - uppercase first letter of each token
+ *   - join with single spaces, cap at INGEST_MAX_TITLE_CHARS
+ *   - fall back to `<host> event <GLOBALEVENTID-shortened>` when the
+ *     slug produces nothing readable (<3 chars) — never emit empty. */
+export function humanizeUrlSlug(url: string, fallbackHost: string, fallbackId: string): string {
+  let path: string;
+  try {
+    path = new URL(url).pathname;
+  } catch {
+    return `${fallbackHost} event ${fallbackId.slice(0, 10)}`;
+  }
+  const segments = path.split('/').filter((s) => s.length > 0);
+  const last = segments[segments.length - 1] ?? '';
+  const stripped = last.replace(/^\d+\./, '').replace(/\.(html?|pdf|aspx?|php|md)$/i, '');
+  const tokens = stripped
+    .split(/[-_.]+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0)
+    .map((t) => t.charAt(0).toUpperCase() + t.slice(1));
+  const title = tokens.join(' ').trim();
+  if (title.length < 3) {
+    return `${fallbackHost} event ${fallbackId.slice(0, 10)}`;
+  }
+  return title.slice(0, INGEST_MAX_TITLE_CHARS);
+}
+
+/** Group mentions by GLOBALEVENTID and produce one CandidateInput per
+ *  event whose first primary-source URL passes classifyUrl().
+ *
+ *  Trend score is "distinct outlets covering the same event in the
+ *  window". A group of mentions sharing a GLOBALEVENTID is the same
+ *  semantic cluster the old title-based clustering approximated —
+ *  GDELT has already linked these mentions to one underlying event.
  *
  *  Clusters whose outlet count is below GDELT_MIN_TREND_SCORE are
  *  dropped.
  *
- *  The `[trend=N]` prefix in `summary` is a legacy pre-column-add
- *  carrier; TODO(gdelt-cleanup): remove once news-dedup-rank reads the
- *  dedicated `trend_score` column directly (security-reviewer round-3
- *  LOW round-4). */
-export function clusterGdeltArticles(response: GdeltResponse): CandidateInput[] {
-  // Hard cap on how many entries the clusterer will walk in one tick
-  // (security-reviewer PR #201 MEDIUM). The GDELT API URL already asks
-  // for maxrecords=75, so a well-behaved response fits inside the cap;
-  // a misconfigured or hostile upstream shipping thousands of entries
-  // is clipped before gdeltTitleKey's per-article regex ever runs.
-  const rawFull = Array.isArray(response.articles) ? response.articles : [];
-  const raw = rawFull.slice(0, GDELT_MAX_ARTICLES);
-  // group articles by titleKey → { domains: Set, articles: GdeltArticle[] }
-  type Group = { readonly domains: Set<string>; readonly articles: GdeltArticle[] };
+ *  Security-reviewer PR #201 round-3 LOW 5.3 trust-of-GDELT note still
+ *  applies: a hostile upstream could inflate a cluster's score by
+ *  posting many fake non-primary domains under one event id. The
+ *  trust assumption is: GDELT's own corpus-ingestion pipeline makes
+ *  the domain field reliable enough as a trending signal. If this
+ *  ever changes, revisit by switching to a primary-only count AND
+ *  lowering GDELT_MIN_TREND_SCORE to 1 so the Drop pool doesn't shrink. */
+export function clusterGdeltMentions(mentions: GdeltMention[]): CandidateInput[] {
+  type Group = { readonly domains: Set<string>; readonly rows: GdeltMention[] };
   const groups = new Map<string, Group>();
-  for (const a of raw as GdeltArticle[]) {
-    if (typeof a?.title !== 'string' || typeof a?.url !== 'string') continue;
-    const key = gdeltTitleKey(a.title);
-    if (key.length === 0) continue;
-    const existing = groups.get(key);
+  for (const m of mentions) {
+    const existing = groups.get(m.globalEventId);
     if (existing) {
-      if (typeof a.domain === 'string') existing.domains.add(a.domain.toLowerCase());
-      existing.articles.push(a);
+      existing.domains.add(m.sourceName.toLowerCase());
+      existing.rows.push(m);
     } else {
       const domains = new Set<string>();
-      if (typeof a.domain === 'string') domains.add(a.domain.toLowerCase());
-      groups.set(key, { domains, articles: [a] });
+      domains.add(m.sourceName.toLowerCase());
+      groups.set(m.globalEventId, { domains, rows: [m] });
     }
   }
 
   const out: CandidateInput[] = [];
-  for (const [, group] of groups) {
+  for (const [eventId, group] of groups) {
     const trendScore = group.domains.size;
     if (trendScore < GDELT_MIN_TREND_SCORE) continue;
 
-    // Find the first article in the cluster whose URL passes classifyUrl()
-    // as a primary source. Articles are returned by GDELT in HybridRel
-    // order (most trending first), so the first primary we find is the
-    // best-signal primary for the cluster. Capture the classification
-    // from this single call and reuse below (security-reviewer round-4
-    // LOW: previously a redundant second classifyUrl call looked like
-    // a post-scheme-check re-validation).
-    let primary: GdeltArticle | null = null;
+    let primary: GdeltMention | null = null;
     let primaryClassification: ReturnType<typeof classifyUrl> | null = null;
-    for (const a of group.articles) {
-      if (typeof a.url !== 'string') continue;
-      const classification = classifyUrl(a.url);
+    for (const m of group.rows) {
+      const classification = classifyUrl(m.url);
       if (classification.allowed && classification.role === 'primary') {
-        primary = a;
+        primary = m;
         primaryClassification = classification;
         break;
       }
     }
-    if (!primary || typeof primary.url !== 'string' || typeof primary.title !== 'string') continue;
-    if (primaryClassification === null) continue; // narrower for TS
+    if (!primary || primaryClassification === null) continue;
     if (!primaryClassification.allowed || primaryClassification.role !== 'primary') continue;
 
     // Length caps BEFORE the scheme-assert URL parse — a hostile upstream
     // could ship a 100 KB URL string that passes classifyUrl's hostname
     // suffix match but inflates index + TOAST storage.
     if (primary.url.length > INGEST_MAX_URL_CHARS) continue;
-    const title = primary.title.slice(0, INGEST_MAX_TITLE_CHARS);
 
     // Scheme assertion (security-reviewer PR #201 round 3 MED 7.2):
     // `classifyUrl` currently rejects non-https schemes at its own
     // first gate, but relying on that single layer couples a storage-
-    // boundary invariant to the host-classifier's internals. Assert
-    // the scheme explicitly here so a future `classifyUrl` change
-    // that loosens scheme-strictness cannot silently open a stored-
-    // XSS path through `source_url`.
+    // boundary invariant to the host-classifier's internals.
     const parsedUrl = requireHttpsUrl(primary.url);
     if (parsedUrl === null) continue;
     const host = normalizeHost(parsedUrl.hostname);
+
+    const title = humanizeUrlSlug(primary.url, host, eventId);
 
     out.push({
       source_provider: 'gdelt',
@@ -634,17 +781,11 @@ export function clusterGdeltArticles(response: GdeltResponse): CandidateInput[] 
       source_title: title,
       source_url: primary.url,
       source_host: host,
-      source_published_at:
-        typeof primary.seendate === 'string' ? parseGdeltSeenDate(primary.seendate) : null,
-      // TODO(gdelt-cleanup): remove the `[trend=N]` prefix once
-      // news-dedup-rank reads the dedicated `trend_score` column
-      // directly. Kept now so a future consumer that renders `summary`
-      // doesn't see a bare "N article(s)…" line without the trend
-      // context, and so the ranker's current prefix-regex still works.
-      summary: `[trend=${trendScore}] ${group.articles.length} article(s) across ${trendScore} outlet(s).`,
+      source_published_at: parseGdeltMentionsDate(primary.eventTimeDate),
+      // Legacy prefix kept so a downstream renderer reading `summary`
+      // sees the trend context (same shape as the pre-rewrite output).
+      summary: `[trend=${trendScore}] ${group.rows.length} mention(s) across ${trendScore} outlet(s).`,
       dedup_url_canon: canonicalizeUrl(primary.url),
-      // Dedicated numeric column added by migration 20261014000000.
-      // Written on every GDELT-emitted candidate.
       trend_score: trendScore,
     });
   }
@@ -660,10 +801,9 @@ export function clusterGdeltArticles(response: GdeltResponse): CandidateInput[] 
  *  null. Caller treats null as "drop this candidate".
  *
  *  Security-reviewer PR #201 round 3 MED 7.2: the storage-boundary
- *  scheme assertion in `clusterGdeltArticles` was coupled to
- *  `classifyUrl`'s internal scheme-strictness. This helper decouples
- *  it so the invariant lives at the clusterer and can be tested in
- *  isolation. */
+ *  scheme assertion in the clusterer was coupled to `classifyUrl`'s
+ *  internal scheme-strictness. This helper decouples it so the
+ *  invariant lives at the clusterer and can be tested in isolation. */
 function requireHttpsUrl(raw: string): URL | null {
   let u: URL;
   try {
@@ -674,48 +814,25 @@ function requireHttpsUrl(raw: string): URL | null {
   return u.protocol === 'https:' ? u : null;
 }
 
-/** Parse GDELT's YYYYMMDDTHHMMSSZ format back to an ISO 8601 string.
- *  Returns null on any parse failure. */
-function parseGdeltSeenDate(s: string): string | null {
-  // Format: 20261010T053000Z
-  const m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/.exec(s);
+/** Parse the GDELT Mentions 14-digit date format back to an ISO 8601
+ *  string. Format: `yyyyMMddHHmmss` (UTC). Returns null on failure. */
+function parseGdeltMentionsDate(s: string): string | null {
+  const m = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$/.exec(s);
   if (!m) return null;
   return `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}Z`;
 }
 
-/** GDELT trending adapter. Only runs when `env.GDELT_ENABLED` is true —
- *  same gated-shadow-ship pattern as PRIVY_ENABLED / FACT_CHECK_ENABLED.
- *  The adapter is wired into DEFAULT_ADAPTERS so its health row appears
- *  in news_adapter_health immediately; a flag-off tick records a
- *  success with 0 fetched.
- *
- *  Env flows in through the `NewsIngestAdapter.fetch` signature from
- *  the handler closure — the adapter NEVER reads `process.env`
- *  directly. The validated Zod `Env` object is the single source of
- *  truth for feature-flag state (security-reviewer PR #201 round 3
- *  MED 3.1). boolFromString in `envSchema` normalises 'true'/'True'/
- *  'TRUE' to boolean `true` and everything else to `false`, so a
- *  Railway env hot-reload cannot bypass validation. */
-/** Minimum interval between successive GDELT fetches, in milliseconds
- *  (PR #205 fold-in of security-reviewer round-3 LOW 6.2). GDELT's
- *  public API documents a 1-request-per-5-second rate limit and
- *  additionally serves "larger queries" with a slow 429. The
- *  scheduler's 15-min cadence is well above this bar; the module-
+/** Minimum interval between successive GDELT fetches, in milliseconds.
+ *  The 15-min scheduler cadence is well above this bar; the module-
  *  local gate catches a misconfigured tick cadence (e.g. a future PR
- *  shortening the scheduler to 1-minute ticks) before it hammers the
- *  upstream. Reset to 0 on process start — the first tick after
- *  deploy always runs.
- *
- *  NOTE for future consumers: any downstream job that fetches
- *  `news_topics_candidates.source_url` from GDELT-sourced rows MUST
- *  independently re-validate the host allowlist AND the https scheme
- *  — do not trust the stored value. The storage-boundary guards
- *  (classifyUrl + requireHttpsUrl) run at ingest time; a URL that
- *  later becomes unreachable or is swapped at the destination is NOT
- *  re-verified on read. Security-reviewer round-3 LOW 1.2. */
+ *  shortening ticks to 1-minute cadence) before it hammers GCS. Reset
+ *  to 0 on process start — the first tick after deploy always runs. */
 const GDELT_MIN_FETCH_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 let gdeltLastFetchAt = 0;
 
+/** GDELT trending adapter — Option B. Only runs when `env.GDELT_ENABLED`
+ *  is true. Env flows in through `NewsIngestAdapter.fetch` from the
+ *  handler closure — the adapter never reads `process.env` directly. */
 export const gdeltAdapter: NewsIngestAdapter = {
   name: 'gdelt',
   defaultCategory: 'congress', // overridden per-article by classifyUrl.
@@ -723,14 +840,11 @@ export const gdeltAdapter: NewsIngestAdapter = {
     if (!env.GDELT_ENABLED) return [];
     const now = Date.now();
     if (now - gdeltLastFetchAt < GDELT_MIN_FETCH_INTERVAL_MS) {
-      // Short-circuit without touching the network. Returning [] is
-      // operationally indistinguishable from "no new candidates this
-      // tick" — adapter health still records a successful tick.
       return [];
     }
     gdeltLastFetchAt = now;
-    const response = await fetchGdeltArtList(fetchImpl, GDELT_API_URL);
-    return clusterGdeltArticles(response);
+    const mentions = await fetchGdeltMentionsLatest(fetchImpl);
+    return clusterGdeltMentions(mentions);
   },
 };
 

@@ -1,12 +1,15 @@
+import { zipSync, strToU8 } from 'fflate';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   __testing,
   buildNewsIngestHandler,
-  clusterGdeltArticles,
+  clusterGdeltMentions,
+  extractMentionsUrl,
   gdeltAdapter,
-  gdeltTitleKey,
   GDELT_MIN_TREND_SCORE,
+  humanizeUrlSlug,
+  parseGdeltMentionsCsv,
   type CandidateInput,
   type NewsIngestAdapter,
 } from '../../src/jobs/news-ingest.js';
@@ -340,200 +343,267 @@ function freshState(): FakeState {
 // GDELT trending adapter — fixture-based tests
 // ---------------------------------------------------------------------------
 
-describe('gdeltTitleKey — cluster normalization', () => {
-  it('lowercases + strips punctuation + caps at 60 chars', () => {
-    const key = gdeltTitleKey('BREAKING: Senate Passes HR-1234, 52-48!');
-    expect(key).toBe('breaking senate passes hr 1234 52 48');
+describe('humanizeUrlSlug — title derivation from URL path', () => {
+  it('humanizes a dash-separated slug', () => {
+    const t = humanizeUrlSlug(
+      'https://www.whitehouse.gov/briefing-room/presidential-actions/executive-order-on-ai/',
+      'whitehouse.gov',
+      '123456789',
+    );
+    expect(t).toBe('Executive Order On Ai');
   });
 
-  it('shares a leading substring across outlet-decorated variants of the same story', () => {
-    const a = gdeltTitleKey('Senate Passes HR-1234 — Reuters');
-    const b = gdeltTitleKey('Senate Passes HR-1234, Associated Press');
-    // The event signature `senate passes hr 1234` is stable across
-    // outlet-specific suffixes. Full-key equality requires the SAME
-    // suffix shape; realistic clustering is "same first 22 chars".
-    expect(a.slice(0, 22)).toBe('senate passes hr 1234 ');
-    expect(b.slice(0, 22)).toBe('senate passes hr 1234 ');
+  it('strips a leading <digits>. prefix', () => {
+    const t = humanizeUrlSlug(
+      'https://www.congress.gov/bill/118hr1234-senate-passes-tax-reform',
+      'congress.gov',
+      '123456789',
+    );
+    expect(t.toLowerCase()).toContain('senate');
+    expect(t.toLowerCase()).toContain('tax');
   });
 
-  it('empty title → empty key (caller must drop)', () => {
-    expect(gdeltTitleKey('')).toBe('');
-    expect(gdeltTitleKey('   ')).toBe('');
+  it('strips a trailing .html / .pdf extension', () => {
+    expect(
+      humanizeUrlSlug('https://fbi.gov/news/press-releases/announcement.html', 'fbi.gov', '1'),
+    ).toBe('Announcement');
+    expect(
+      humanizeUrlSlug(
+        'https://supremecourt.gov/opinions/23pdf/22-1234.pdf',
+        'supremecourt.gov',
+        '1',
+      ),
+    ).toBe('22 1234');
+  });
+
+  it('falls back to host+event when the slug is unreadable', () => {
+    expect(humanizeUrlSlug('https://congress.gov/', 'congress.gov', 'abc123xyz')).toBe(
+      'congress.gov event abc123xyz',
+    );
+    expect(humanizeUrlSlug('not a url', 'bls.gov', 'id9999999999999')).toBe(
+      'bls.gov event id99999999',
+    );
+  });
+
+  it('caps overlong slugs at INGEST_MAX_TITLE_CHARS', () => {
+    const long = 'x-'.repeat(1500); // 3000 chars
+    const url = `https://congress.gov/bill/${long}`;
+    const t = humanizeUrlSlug(url, 'congress.gov', '1');
+    expect(t.length).toBeLessThanOrEqual(2000);
   });
 });
 
-describe('clusterGdeltArticles — operator trend-score + primary-source rules', () => {
-  // Build a fixture article. The GDELT API's ArtList response shape per
-  // https://blog.gdeltproject.org/gdelt-doc-2-0-api-debuts/ — fields url,
-  // title, seendate, domain are the four we read; others are tolerated.
-  function art(overrides: Partial<Record<string, unknown>>): Record<string, unknown> {
-    return {
+describe('extractMentionsUrl — pointer-file 2nd-line parser', () => {
+  it('extracts the mentions URL from a 3-line lastupdate.txt and rewrites to https', () => {
+    const body =
+      '87478 abc http://data.gdeltproject.org/gdeltv2/20261013170000.export.CSV.zip\n' +
+      '131731 def http://data.gdeltproject.org/gdeltv2/20261013170000.mentions.CSV.zip\n' +
+      '6571620 ghi http://data.gdeltproject.org/gdeltv2/20261013170000.gkg.csv.zip';
+    const url = extractMentionsUrl(body);
+    expect(url).toBe('https://data.gdeltproject.org/gdeltv2/20261013170000.mentions.CSV.zip');
+  });
+
+  it('tolerates CRLF line endings', () => {
+    const body =
+      '87478 abc http://data.gdeltproject.org/gdeltv2/20261013170000.export.CSV.zip\r\n' +
+      '131731 def http://data.gdeltproject.org/gdeltv2/20261013170000.mentions.CSV.zip\r\n';
+    expect(extractMentionsUrl(body)).toContain('mentions.CSV.zip');
+  });
+
+  it('rejects a mentions URL on a non-GDELT host (SSRF defense)', () => {
+    const body =
+      '87478 abc http://data.gdeltproject.org/gdeltv2/20261013170000.export.CSV.zip\n' +
+      '131731 def http://evil.example.com/gdeltv2/20261013170000.mentions.CSV.zip\n';
+    expect(extractMentionsUrl(body)).toBeNull();
+  });
+
+  it('rejects a mentions URL whose path does not match the canonical shape', () => {
+    const body =
+      '87478 abc http://data.gdeltproject.org/gdeltv2/20261013170000.export.CSV.zip\n' +
+      '131731 def http://data.gdeltproject.org/elsewhere/20261013170000.mentions.CSV.zip\n';
+    expect(extractMentionsUrl(body)).toBeNull();
+  });
+
+  it('returns null on a <2-line pointer', () => {
+    expect(extractMentionsUrl('')).toBeNull();
+    expect(extractMentionsUrl('one line only')).toBeNull();
+  });
+
+  it('returns null when the 2nd line has <3 whitespace-separated fields', () => {
+    expect(extractMentionsUrl('a b c\nd e')).toBeNull();
+  });
+});
+
+describe('parseGdeltMentionsCsv — TSV row parser', () => {
+  it('parses a single well-formed row (6+ cols)', () => {
+    const row = [
+      '1327702546', // 0 GLOBALEVENTID
+      '20261013123000', // 1 EventTimeDate
+      '20261013170000', // 2 MentionTimeDate
+      '1', // 3 MentionType
+      'congress.gov', // 4 MentionSourceName
+      'https://www.congress.gov/bill/118hr1234', // 5 MentionIdentifier
+      '4',
+      '395',
+      '482',
+    ].join('\t');
+    const out = parseGdeltMentionsCsv(row);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({
+      globalEventId: '1327702546',
+      eventTimeDate: '20261013123000',
+      sourceName: 'congress.gov',
       url: 'https://www.congress.gov/bill/118hr1234',
-      title: 'Senate passes HR-1234 by vote of 52-48',
-      seendate: '20261010T053000Z',
-      domain: 'congress.gov',
-      language: 'English',
-      sourcecountry: 'United States',
-      ...overrides,
+    });
+  });
+
+  it('drops rows with <6 columns', () => {
+    expect(parseGdeltMentionsCsv('1\t2\t3\t4\t5')).toEqual([]);
+  });
+
+  it('drops rows with an empty required column', () => {
+    const row = ['1', '20260101000000', '20260101000000', '1', '', 'https://x.gov/a'].join('\t');
+    expect(parseGdeltMentionsCsv(row)).toEqual([]);
+  });
+
+  it('tolerates CRLF + skips blank lines', () => {
+    const r = (dom: string, url: string): string =>
+      ['1', '20260101000000', '20260101000000', '1', dom, url].join('\t');
+    const csv = r('a.gov', 'https://a.gov/1') + '\r\n\r\n' + r('b.gov', 'https://b.gov/2');
+    expect(parseGdeltMentionsCsv(csv)).toHaveLength(2);
+  });
+
+  // Round-2 reviewer LOW 2 — parse-time length bound on url/host.
+  it('drops rows whose URL exceeds INGEST_MAX_URL_CHARS at parse time', () => {
+    const longUrl = 'https://a.gov/' + 'x'.repeat(2048);
+    const row = ['1', '20260101000000', '20260101000000', '1', 'a.gov', longUrl].join('\t');
+    expect(parseGdeltMentionsCsv(row)).toEqual([]);
+  });
+
+  it('drops rows whose sourceName exceeds 253 chars at parse time', () => {
+    const longHost = 'x'.repeat(254) + '.gov';
+    const row = ['1', '20260101000000', '20260101000000', '1', longHost, 'https://a.gov/x'].join(
+      '\t',
+    );
+    expect(parseGdeltMentionsCsv(row)).toEqual([]);
+  });
+
+  // Round-2 reviewer LOW 1 — cap counts accepted rows (not line index),
+  // so a padded CSV cannot push effective parse depth to zero.
+  it('row cap counts ACCEPTED rows, not line index (padding-resistant)', () => {
+    // 100 blank lines, then 3 valid rows. All 3 must be returned.
+    const valid = (eid: string): string =>
+      ['e-' + eid, '20260101000000', '20260101000000', '1', 'a.gov', `https://a.gov/${eid}`].join(
+        '\t',
+      );
+    const csv = '\n'.repeat(100) + [valid('1'), valid('2'), valid('3')].join('\n');
+    expect(parseGdeltMentionsCsv(csv)).toHaveLength(3);
+  });
+});
+
+describe('clusterGdeltMentions — operator trend-score + primary-source rules', () => {
+  // Build a Mentions-shaped row. GDELT 2.0 Mentions columns:
+  //   0: GLOBALEVENTID, 1: EventTimeDate, 4: MentionSourceName, 5: MentionIdentifier.
+  function m(overrides: { eventId?: string; time?: string; domain?: string; url?: string }): {
+    globalEventId: string;
+    eventTimeDate: string;
+    sourceName: string;
+    url: string;
+  } {
+    return {
+      globalEventId: overrides.eventId ?? '1000',
+      eventTimeDate: overrides.time ?? '20261013120000',
+      sourceName: overrides.domain ?? 'congress.gov',
+      url: overrides.url ?? 'https://www.congress.gov/bill/118hr1234',
     };
   }
 
-  it('drops a cluster whose only outlet is a non-primary host', () => {
-    const resp = {
-      articles: [
-        art({
-          url: 'https://news.example.com/story',
-          domain: 'example.com',
-          title: 'Debate heats up over bill',
-        }),
-      ],
-    };
-    expect(clusterGdeltArticles(resp)).toEqual([]);
+  it('drops an event whose only outlet is a non-primary host', () => {
+    const out = clusterGdeltMentions([
+      m({ domain: 'example.com', url: 'https://news.example.com/x' }),
+    ]);
+    expect(out).toEqual([]);
   });
 
-  it('drops a cluster that only reaches 1 outlet (below GDELT_MIN_TREND_SCORE)', () => {
+  it('drops an event that only reaches 1 outlet (below GDELT_MIN_TREND_SCORE)', () => {
     expect(GDELT_MIN_TREND_SCORE).toBe(2);
-    const resp = { articles: [art({ domain: 'congress.gov' })] };
-    expect(clusterGdeltArticles(resp)).toEqual([]);
+    expect(clusterGdeltMentions([m({ domain: 'congress.gov' })])).toEqual([]);
   });
 
-  it('emits a candidate for a cluster with ≥2 outlets AND a primary host', () => {
-    const resp = {
-      articles: [
-        art({ url: 'https://news.example.com/sen-bill', domain: 'example.com' }),
-        art({ url: 'https://other.example.net/sen-bill', domain: 'example.net' }),
-        art({ url: 'https://www.congress.gov/bill/118hr1234', domain: 'congress.gov' }),
-      ],
-    };
-    const out = clusterGdeltArticles(resp);
+  it('emits a candidate for an event with ≥2 outlets AND a primary host', () => {
+    const out = clusterGdeltMentions([
+      m({ eventId: '42', domain: 'example.com', url: 'https://news.example.com/sen-bill' }),
+      m({ eventId: '42', domain: 'example.net', url: 'https://other.example.net/sen-bill' }),
+      m({ eventId: '42', domain: 'congress.gov', url: 'https://www.congress.gov/bill/118hr1234' }),
+    ]);
     expect(out).toHaveLength(1);
     expect(out[0]?.source_url).toBe('https://www.congress.gov/bill/118hr1234');
     expect(out[0]?.source_provider).toBe('gdelt');
     expect(out[0]?.source_category).toBe('congress');
-    // trend score = distinct domains = 3
     expect(out[0]?.summary).toMatch(/^\[trend=3]/);
   });
 
-  it('rejects a cluster of ≥2 outlets with NO primary host (operator rule)', () => {
-    const resp = {
-      articles: [
-        art({ url: 'https://news.example.com/sen-bill', domain: 'example.com' }),
-        art({ url: 'https://other.example.net/sen-bill', domain: 'example.net' }),
-      ],
-    };
-    expect(clusterGdeltArticles(resp)).toEqual([]);
+  it('rejects an event of ≥2 outlets with NO primary host (operator rule)', () => {
+    const out = clusterGdeltMentions([
+      m({ eventId: '7', domain: 'example.com', url: 'https://news.example.com/x' }),
+      m({ eventId: '7', domain: 'example.net', url: 'https://other.example.net/x' }),
+    ]);
+    expect(out).toEqual([]);
   });
 
   it('sorts output by trend score desc (big viral first — operator rule)', () => {
-    const resp = {
-      articles: [
-        // Cluster A: 2 outlets, 1 primary (sec.gov).
-        {
-          url: 'https://www.sec.gov/litigation/litreleases/2026/lr-small',
-          domain: 'sec.gov',
-          title: 'SEC files complaint against ABC Corp',
-          seendate: '20261010T050000Z',
-        },
-        {
-          url: 'https://news.example.com/sec-abc',
-          domain: 'example.com',
-          title: 'SEC files complaint against ABC Corp',
-          seendate: '20261010T050100Z',
-        },
-        // Cluster B: 4 outlets, 1 primary (congress.gov).
-        ...[1, 2, 3].map((n) => ({
-          url: `https://news-${n}.example.com/sen-bill`,
-          domain: `news-${n}.example.com`,
-          title: 'Senate passes HR-1234 by vote of 52-48',
-          seendate: '20261010T053000Z',
-        })),
-        {
-          url: 'https://www.congress.gov/bill/118hr1234',
-          domain: 'congress.gov',
-          title: 'Senate passes HR-1234 by vote of 52-48',
-          seendate: '20261010T053000Z',
-        },
-      ],
-    };
-    const out = clusterGdeltArticles(resp);
+    const rows = [
+      // Event A: 2 outlets, 1 primary (sec.gov).
+      m({
+        eventId: '1',
+        domain: 'sec.gov',
+        time: '20261013050000',
+        url: 'https://www.sec.gov/litigation/litreleases/2026/lr-small',
+      }),
+      m({ eventId: '1', domain: 'example.com', url: 'https://news.example.com/sec-abc' }),
+      // Event B: 4 outlets, 1 primary (congress.gov).
+      m({ eventId: '2', domain: 'news-1.example.com', url: 'https://news-1.example.com/sen' }),
+      m({ eventId: '2', domain: 'news-2.example.com', url: 'https://news-2.example.com/sen' }),
+      m({ eventId: '2', domain: 'news-3.example.com', url: 'https://news-3.example.com/sen' }),
+      m({ eventId: '2', domain: 'congress.gov', url: 'https://www.congress.gov/bill/118hr1234' }),
+    ];
+    const out = clusterGdeltMentions(rows);
     expect(out).toHaveLength(2);
-    expect(out[0]?.source_url).toBe('https://www.congress.gov/bill/118hr1234');
+    expect(out[0]?.source_url).toContain('congress.gov');
     expect(out[1]?.source_url).toContain('sec.gov');
     expect(out[0]?.summary).toMatch(/^\[trend=4]/);
     expect(out[1]?.summary).toMatch(/^\[trend=2]/);
   });
 
-  it('parses GDELT seendate (YYYYMMDDTHHMMSSZ) to ISO 8601', () => {
-    const resp = {
-      articles: [
-        art({ url: 'https://a.example.com/story', domain: 'a.example.com' }),
-        art({ url: 'https://b.example.com/story', domain: 'b.example.com' }),
-        art({ url: 'https://www.congress.gov/bill/118hr1234', domain: 'congress.gov' }),
-      ],
-    };
-    const out = clusterGdeltArticles(resp);
-    expect(out[0]?.source_published_at).toBe('2026-10-10T05:30:00Z');
+  it('parses GDELT eventTimeDate (yyyyMMddHHmmss) to ISO 8601', () => {
+    const out = clusterGdeltMentions([
+      m({
+        eventId: 'A',
+        time: '20261013053000',
+        domain: 'a.example.com',
+        url: 'https://a.example.com/x',
+      }),
+      m({
+        eventId: 'A',
+        time: '20261013053100',
+        domain: 'b.example.com',
+        url: 'https://b.example.com/x',
+      }),
+      m({
+        eventId: 'A',
+        time: '20261013053200',
+        domain: 'congress.gov',
+        url: 'https://www.congress.gov/bill/1',
+      }),
+    ]);
+    expect(out[0]?.source_published_at).toBe('2026-10-13T05:32:00Z');
   });
 
-  it('tolerates missing / non-string / malformed GDELT fields (lenient parser)', () => {
-    const resp = {
-      articles: [
-        // malformed: no url
-        { title: 'A', domain: 'congress.gov' },
-        // malformed: no title
-        { url: 'https://www.congress.gov/x', domain: 'congress.gov' },
-        // malformed: numeric url
-        { url: 42, title: 'X', domain: 'congress.gov' },
-        // good: a valid article
-        {
-          url: 'https://www.congress.gov/bill/118hr1234',
-          title: 'Senate passes HR-1234',
-          domain: 'congress.gov',
-          seendate: 'not-a-date',
-        },
-        {
-          url: 'https://news.example.com/sen-bill',
-          title: 'Senate passes HR-1234',
-          domain: 'example.com',
-        },
-      ],
-    };
-    const out = clusterGdeltArticles(resp);
-    expect(out).toHaveLength(1);
-    expect(out[0]?.source_published_at).toBeNull();
-  });
-
-  it('ignores a `articles: null` or non-array shape rather than throwing', () => {
-    expect(clusterGdeltArticles({ articles: null })).toEqual([]);
-    expect(clusterGdeltArticles({ articles: 'oops' })).toEqual([]);
-    expect(clusterGdeltArticles({})).toEqual([]);
-  });
-
-  // Security-reviewer PR #201 round 2 — MEDIUM: cap raw.articles.length.
-  it('caps raw.articles.length at 500 before clustering (DoS guard)', () => {
-    // 10,000 entries all sharing one normalized title; only the first
-    // 500 should be walked. 500 entries × 1 domain each → 500 outlets
-    // → one cluster, trend_score=500 (not 10,000). Hostile upstream
-    // response size is cut off before the per-article regex runs.
-    const DOMAINS = 10_000;
-    const articles = Array.from({ length: DOMAINS }, (_, i) => ({
-      // Use primary-domain subdomains so classifyUrl keeps picking them
-      // (otherwise ClassifyUrl drops them before clustering).
-      url: `https://congress.gov/path-${i}`,
-      domain: `host-${i}.congress.gov`,
-      title: 'Senate passes HR-1234',
-      seendate: '20261010T053000Z',
-    }));
-    const out = clusterGdeltArticles({ articles });
-    expect(out).toHaveLength(1);
-    // trend_score reflects the clipped-at-500 count, not the raw 10,000.
-    expect(out[0]?.trend_score).toBe(500);
+  it('returns [] for an empty mentions array', () => {
+    expect(clusterGdeltMentions([])).toEqual([]);
   });
 
   // Security-reviewer PR #201 round 3 MED 7.2 — explicit scheme assert.
-  // The storage-boundary scheme check lives on the clusterer, not on
-  // classifyUrl, so a future classifyUrl loosening cannot silently
-  // open a stored-XSS path through `source_url`.
   describe('requireHttpsUrl (scheme-assert helper)', () => {
     const { requireHttpsUrl } = __testing;
 
@@ -543,8 +613,6 @@ describe('clusterGdeltArticles — operator trend-score + primary-source rules',
       ['data:text/html,<script>', 'data'],
       ['file:///etc/passwd', 'file'],
       ['ftp://congress.gov/x', 'ftp'],
-      // Protocol-relative URL — `new URL()` throws without a base, so
-      // the helper returns null via the try/catch branch.
       ['//congress.gov/x', 'protocol-relative'],
     ])('returns null for %s (%s)', (input, _label) => {
       expect(requireHttpsUrl(input)).toBeNull();
@@ -563,52 +631,28 @@ describe('clusterGdeltArticles — operator trend-score + primary-source rules',
     });
   });
 
-  // PR #205 — length guards on GDELT-sourced strings.
-  describe('length caps on source_title / source_url (PR #205 MED 2.3 + LOW 2.4)', () => {
-    it('truncates source_title to 2000 chars before emit', () => {
-      const longTitle = 'A'.repeat(2001);
-      const resp = {
-        articles: [
-          { url: 'https://a.congress.gov/x', domain: 'a.congress.gov', title: longTitle },
-          { url: 'https://b.congress.gov/x', domain: 'b.congress.gov', title: longTitle },
-          { url: 'https://www.congress.gov/bill/1', domain: 'congress.gov', title: longTitle },
-        ],
-      };
-      const out = clusterGdeltArticles(resp);
-      expect(out).toHaveLength(1);
-      expect(out[0]?.source_title.length).toBe(2000);
-    });
-
-    it('drops a cluster whose primary.url exceeds 2048 chars', () => {
-      // Build a URL that classifyUrl approves (congress.gov host) but is
-      // obscenely long. The clusterer rejects before out.push.
+  describe('length caps on source_url (PR #205 LOW 2.4)', () => {
+    it('drops an event whose primary.url exceeds 2048 chars', () => {
       const longPath = 'x'.repeat(2100);
-      const resp = {
-        articles: [
-          {
-            url: `https://www.congress.gov/bill/${longPath}`,
-            domain: 'congress.gov',
-            title: 'X',
-          },
-          { url: 'https://b.congress.gov/x', domain: 'b.congress.gov', title: 'X' },
-        ],
-      };
-      expect(clusterGdeltArticles(resp)).toEqual([]);
+      const out = clusterGdeltMentions([
+        m({
+          eventId: '9',
+          domain: 'congress.gov',
+          url: `https://www.congress.gov/bill/${longPath}`,
+        }),
+        m({ eventId: '9', domain: 'b.congress.gov', url: 'https://b.congress.gov/x' }),
+      ]);
+      expect(out).toEqual([]);
     });
 
     it('accepts a URL at the exact 2048-char boundary', () => {
-      // Primary URL length = 2048 exactly; `.length > 2048` is strict.
       const basePath = 'https://www.congress.gov/bill/';
-      const padLen = 2048 - basePath.length;
-      const url = basePath + 'x'.repeat(padLen);
+      const url = basePath + 'x'.repeat(2048 - basePath.length);
       expect(url.length).toBe(2048);
-      const resp = {
-        articles: [
-          { url, domain: 'congress.gov', title: 'X' },
-          { url: 'https://b.congress.gov/x', domain: 'b.congress.gov', title: 'X' },
-        ],
-      };
-      const out = clusterGdeltArticles(resp);
+      const out = clusterGdeltMentions([
+        m({ eventId: '10', domain: 'congress.gov', url }),
+        m({ eventId: '10', domain: 'b.congress.gov', url: 'https://b.congress.gov/x' }),
+      ]);
       expect(out).toHaveLength(1);
       expect(out[0]?.source_url.length).toBe(2048);
     });
@@ -617,7 +661,6 @@ describe('clusterGdeltArticles — operator trend-score + primary-source rules',
     it('normalizeRssItem truncates title + rejects oversized URL (parity with GDELT)', () => {
       const { normalizeRssItem, INGEST_MAX_TITLE_CHARS, INGEST_MAX_URL_CHARS } = __testing;
 
-      // Oversized URL → null
       const ok = normalizeRssItem({
         provider: 'test',
         defaultCategory: 'congress',
@@ -630,7 +673,6 @@ describe('clusterGdeltArticles — operator trend-score + primary-source rules',
       });
       expect(ok).toBeNull();
 
-      // Oversized title → truncated
       const trunc = normalizeRssItem({
         provider: 'test',
         defaultCategory: 'congress',
@@ -648,52 +690,71 @@ describe('clusterGdeltArticles — operator trend-score + primary-source rules',
 
   // Security-reviewer PR #201 round 2 — stamp dedicated numeric column.
   it('writes trend_score on each emitted candidate (not only in the summary prefix)', () => {
-    const resp = {
-      articles: [
-        { url: 'https://news.example.com/sen', domain: 'example.com', title: 'X' },
-        { url: 'https://news.example.net/sen', domain: 'example.net', title: 'X' },
-        {
-          url: 'https://www.congress.gov/bill/118hr1234',
-          domain: 'congress.gov',
-          title: 'X',
-        },
-      ],
-    };
-    const out = clusterGdeltArticles(resp);
+    const out = clusterGdeltMentions([
+      m({ eventId: 'T', domain: 'example.com', url: 'https://news.example.com/sen' }),
+      m({ eventId: 'T', domain: 'example.net', url: 'https://news.example.net/sen' }),
+      m({ eventId: 'T', domain: 'congress.gov', url: 'https://www.congress.gov/bill/118hr1234' }),
+    ]);
     expect(out).toHaveLength(1);
     expect(out[0]?.trend_score).toBe(3);
-    // Legacy human-readable prefix retained; a follow-up PR drops it
-    // after news-dedup-rank reads the dedicated column.
     expect(out[0]?.summary).toMatch(/^\[trend=3]/);
   });
 });
 
-describe('gdeltAdapter — SSRF-hardened fetch + env gate', () => {
-  const SAMPLE_JSON = JSON.stringify({
-    articles: [
-      {
-        url: 'https://www.congress.gov/bill/118hr1234',
-        title: 'Senate passes HR-1234',
-        domain: 'congress.gov',
-        seendate: '20261010T053000Z',
-      },
-      {
-        url: 'https://news.example.com/sen-bill',
-        title: 'Senate passes HR-1234',
-        domain: 'example.com',
-        seendate: '20261010T053100Z',
-      },
-    ],
-  });
+describe('gdeltAdapter — Option B (data.gdeltproject.org raw export files)', () => {
   const ENV_ON = envWith({ GDELT_ENABLED: true });
   const ENV_OFF = envWith({ GDELT_ENABLED: false });
-  const JSON_HEADERS = { 'content-type': 'application/json' };
-  const okResponse = () =>
-    vi.fn(async () => new Response(SAMPLE_JSON, { status: 200, headers: JSON_HEADERS }));
 
-  // Reset the module-local rate-limit cursor before every test so a
-  // test that successfully fetched doesn't block the next test for 5
-  // minutes of wall-clock time (PR #205 fold-in).
+  const POINTER_TS = '20261013170000';
+  const MENTIONS_URL_HTTPS = `https://data.gdeltproject.org/gdeltv2/${POINTER_TS}.mentions.CSV.zip`;
+  const POINTER_BODY =
+    `87478 abc http://data.gdeltproject.org/gdeltv2/${POINTER_TS}.export.CSV.zip\n` +
+    `131731 def http://data.gdeltproject.org/gdeltv2/${POINTER_TS}.mentions.CSV.zip\n` +
+    `6571620 ghi http://data.gdeltproject.org/gdeltv2/${POINTER_TS}.gkg.csv.zip`;
+
+  /** Build a Mentions-CSV TSV body with two rows per event id (so trend
+   *  score ≥ 2) and one primary-source domain among them. */
+  function buildCsv(rows: Array<[string, string, string, string]>): string {
+    // columns: 0 eventId, 1 time, 2 time, 3 type, 4 domain, 5 url
+    return rows
+      .map(([eventId, time, dom, url]) =>
+        [eventId, time, time, '1', dom, url, '4', '395', '482'].join('\t'),
+      )
+      .join('\n');
+  }
+
+  function zipCsv(csv: string): Uint8Array {
+    return zipSync({ [`${POINTER_TS}.mentions.CSV`]: strToU8(csv) });
+  }
+
+  const HAPPY_CSV = buildCsv([
+    ['1', '20261013170000', 'example.com', 'https://news.example.com/sen'],
+    ['1', '20261013170000', 'congress.gov', 'https://www.congress.gov/bill/118hr1234'],
+  ]);
+
+  /** fetchImpl that returns the pointer for /lastupdate.txt and the zip
+   *  for the mentions URL. */
+  function happyFetch(csv: string = HAPPY_CSV): ReturnType<typeof vi.fn> {
+    return vi.fn(async (input: string | URL) => {
+      const url = String(input);
+      if (url.endsWith('/lastupdate.txt')) {
+        return new Response(POINTER_BODY, {
+          status: 200,
+          headers: { 'content-type': 'text/plain; charset=utf-8' },
+        });
+      }
+      if (url === MENTIONS_URL_HTTPS) {
+        const bytes = zipCsv(csv);
+        return new Response(bytes, {
+          status: 200,
+          headers: { 'content-type': 'application/zip' },
+        });
+      }
+      throw new Error(`unexpected fetch to ${url}`);
+    });
+  }
+
+  // Reset the module-local rate-limit cursor before every test (PR #205).
   beforeEach(() => {
     __testing.resetGdeltRateLimitState();
   });
@@ -705,17 +766,19 @@ describe('gdeltAdapter — SSRF-hardened fetch + env gate', () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
-  it('fetches + parses + clusters when env.GDELT_ENABLED is true', async () => {
-    const fetchImpl = okResponse();
+  it('fetches + unzips + parses + clusters when env.GDELT_ENABLED is true', async () => {
+    const fetchImpl = happyFetch();
     const out = await gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch, ENV_ON);
-    expect(fetchImpl).toHaveBeenCalledOnce();
-    const [calledUrl] = fetchImpl.mock.calls[0]!;
-    expect(String(calledUrl).startsWith('https://api.gdeltproject.org/')).toBe(true);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(String(fetchImpl.mock.calls[0]![0])).toContain('/lastupdate.txt');
+    expect(String(fetchImpl.mock.calls[1]![0])).toBe(MENTIONS_URL_HTTPS);
     expect(out).toHaveLength(1);
     expect(out[0]?.source_url).toBe('https://www.congress.gov/bill/118hr1234');
+    expect(out[0]?.source_provider).toBe('gdelt');
+    expect(out[0]?.trend_score).toBe(2);
   });
 
-  it('rejects a GDELT API redirect (3xx response is a hard fail)', async () => {
+  it('rejects a redirect on the pointer file (3xx is a hard fail)', async () => {
     const fetchImpl = vi.fn(
       async () =>
         new Response('', {
@@ -728,70 +791,102 @@ describe('gdeltAdapter — SSRF-hardened fetch + env gate', () => {
     ).rejects.toThrow(/refusing to follow redirect/);
   });
 
-  it('rejects a non-200 response', async () => {
-    const fetchImpl = vi.fn(async () => new Response('server error', { status: 503 }));
+  it('rejects a non-200 pointer response', async () => {
+    const fetchImpl = vi.fn(async () => new Response('bad', { status: 503 }));
     await expect(
       gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch, ENV_ON),
     ).rejects.toThrow(/HTTP 503/);
   });
 
-  it('rejects malformed JSON (not-a-JSON body is a hard fail)', async () => {
-    // Pass application/json content-type so the test exercises
-    // JSON.parse rejection, not the content-type gate added in #205.
-    const fetchImpl = vi.fn(
-      async () => new Response('not json {', { status: 200, headers: JSON_HEADERS }),
-    );
-    await expect(
-      gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch, ENV_ON),
-    ).rejects.toThrow(/not valid JSON/);
-  });
-
-  // Security-reviewer PR #205 content-type gate.
-  // GDELT returns some errors as HTTP 200 with text/plain body
-  // (e.g. "Timespan is too short.").
-  it('rejects a 200-OK response with text/plain body (GDELT error-via-200 pattern)', async () => {
+  it('rejects a pointer whose mentions URL points to a non-GDELT host', async () => {
+    const BAD = POINTER_BODY.replaceAll('data.gdeltproject.org', 'evil.example.com');
     const fetchImpl = vi.fn(
       async () =>
-        new Response('Timespan is too short.', {
+        new Response(BAD, {
           status: 200,
-          headers: { 'content-type': 'text/plain; charset=utf-8' },
+          headers: { 'content-type': 'text/plain' },
         }),
     );
     await expect(
       gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch, ENV_ON),
-    ).rejects.toThrow(/unexpected content-type .*text\/plain/);
+    ).rejects.toThrow(/lastupdate.txt did not yield/);
   });
 
-  it('accepts application/json content-type with charset parameter', async () => {
-    const fetchImpl = vi.fn(
-      async () =>
-        new Response(SAMPLE_JSON, {
-          status: 200,
-          headers: { 'content-type': 'application/json; charset=utf-8' },
-        }),
-    );
-    const out = await gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch, ENV_ON);
-    expect(out).toHaveLength(1);
+  it('rejects a single-entry zip whose entry is not a .CSV', async () => {
+    const otherZip = zipSync({ 'readme.txt': strToU8('nothing to see') });
+    const fetchImpl = vi.fn(async (input: string | URL) => {
+      const url = String(input);
+      if (url.endsWith('/lastupdate.txt')) {
+        return new Response(POINTER_BODY, { status: 200 });
+      }
+      return new Response(otherZip, { status: 200 });
+    });
+    await expect(
+      gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch, ENV_ON),
+    ).rejects.toThrow(/zip entry is not a .CSV/);
   });
 
-  // PR #205 rate-limit guard.
+  // Round-2 reviewer MED 3 — reject multi-entry archives at the EOCD
+  // pre-flight stage, before any `unzipSync` allocation. GDELT's
+  // documented format is exactly one entry per zip.
+  it('rejects a multi-entry zip at EOCD pre-flight (no decompression attempted)', async () => {
+    const multiZip = zipSync({
+      [`${POINTER_TS}.mentions.CSV`]: strToU8('a\tb\tc\td\te\tf'),
+      'extra.CSV': strToU8('x\ty\tz\td\te\tf'),
+    });
+    const fetchImpl = vi.fn(async (input: string | URL) => {
+      const url = String(input);
+      if (url.endsWith('/lastupdate.txt')) {
+        return new Response(POINTER_BODY, { status: 200 });
+      }
+      return new Response(multiZip, { status: 200 });
+    });
+    await expect(
+      gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch, ENV_ON),
+    ).rejects.toThrow(/expected single-entry zip, got 2/);
+  });
+
+  // Round-2 reviewer MED 4 — zip entry filenames are sanitized before
+  // reaching any error message or log field. A crafted name with path
+  // separators / newlines / ANSI escapes must not leak into the error.
+  it('sanitizes zip-entry filenames in error strings (MED 4)', async () => {
+    const nastyZip = zipSync({ '../../etc/passwd.txt\n\x1b[31mred': strToU8('x') });
+    const fetchImpl = vi.fn(async (input: string | URL) => {
+      const url = String(input);
+      if (url.endsWith('/lastupdate.txt')) {
+        return new Response(POINTER_BODY, { status: 200 });
+      }
+      return new Response(nastyZip, { status: 200 });
+    });
+    const err = await gdeltAdapter
+      .fetch(fetchImpl as unknown as typeof globalThis.fetch, ENV_ON)
+      .catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    const msg = (err as Error).message;
+    // Must not contain path separators, newlines, or escape sequences.
+    expect(msg).not.toContain('/');
+    expect(msg).not.toContain('\n');
+    expect(msg).not.toMatch(/\x1b/);
+    // Sanitizer replaces disallowed chars with `_` and caps at 64 chars.
+    expect(msg).toContain('name=');
+  });
+
   it('rate-limits back-to-back fetches within GDELT_MIN_FETCH_INTERVAL_MS', async () => {
-    const fetchImpl = okResponse();
+    const fetchImpl = happyFetch();
     await gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch, ENV_ON);
-    expect(fetchImpl).toHaveBeenCalledOnce();
-    // Second call within the 5-minute cooldown short-circuits to [].
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
     const out2 = await gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch, ENV_ON);
     expect(out2).toEqual([]);
-    expect(fetchImpl).toHaveBeenCalledOnce(); // still only the first call
+    expect(fetchImpl).toHaveBeenCalledTimes(2); // still only the first run's 2 calls
   });
 
   it('rate-limit cursor allows fetch after reset (test seam exercise)', async () => {
-    const fetchImpl = okResponse();
-    await gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch, ENV_ON);
-    expect(fetchImpl).toHaveBeenCalledOnce();
-    __testing.resetGdeltRateLimitState();
+    const fetchImpl = happyFetch();
     await gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch, ENV_ON);
     expect(fetchImpl).toHaveBeenCalledTimes(2);
+    __testing.resetGdeltRateLimitState();
+    await gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch, ENV_ON);
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
   });
 
   // Security-reviewer PR #201 round 3 MED 3.1 — adapter MUST NOT read
@@ -799,15 +894,12 @@ describe('gdeltAdapter — SSRF-hardened fetch + env gate', () => {
   // single source of truth.
   it('does NOT read process.env; mutating process.env.GDELT_ENABLED has no effect', async () => {
     const prev = process.env.GDELT_ENABLED;
-    // Set the raw env to a VALUE that would have enabled the pre-fix
-    // adapter (process.env.GDELT_ENABLED === 'true'). The adapter must
-    // ignore this and gate purely on the passed-in env parameter.
     process.env.GDELT_ENABLED = 'true';
     try {
       const fetchImpl = vi.fn(async () => new Response('should not be called'));
       const out = await gdeltAdapter.fetch(
         fetchImpl as unknown as typeof globalThis.fetch,
-        ENV_OFF, // passed env says false → adapter must stay disabled
+        ENV_OFF,
       );
       expect(out).toEqual([]);
       expect(fetchImpl).not.toHaveBeenCalled();
@@ -817,22 +909,21 @@ describe('gdeltAdapter — SSRF-hardened fetch + env gate', () => {
     }
   });
 
-  // Mirror check — process.env says disabled but env arg says enabled;
-  // the adapter must honor the arg.
   it('does NOT read process.env; empty raw env still fetches when passed env says enabled', async () => {
     const prev = process.env.GDELT_ENABLED;
     delete process.env.GDELT_ENABLED;
     try {
-      const fetchImpl = okResponse();
+      const fetchImpl = happyFetch();
       await gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch, ENV_ON);
-      expect(fetchImpl).toHaveBeenCalledOnce();
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
     } finally {
       if (prev !== undefined) process.env.GDELT_ENABLED = prev;
     }
   });
 
-  // Security-reviewer PR #201 round 2 — streaming body size cap.
-  it('aborts a response that streams past the size cap (does not fully buffer)', async () => {
+  // Security-reviewer PR #201 round 2 — streaming body size cap on the
+  // compressed-zip fetch.
+  it('aborts a mentions.zip response that streams past the compressed size cap', async () => {
     const chunk = new Uint8Array(1024 * 1024); // 1 MB zero-filled
     let pulls = 0;
     const body = new ReadableStream({
@@ -845,17 +936,41 @@ describe('gdeltAdapter — SSRF-hardened fetch + env gate', () => {
         pulls += 1;
       },
     });
-    const fetchImpl = vi.fn(
-      async () =>
-        new Response(body, {
-          status: 200,
-          headers: { 'content-type': 'application/json' },
-        }),
-    );
+    const fetchImpl = vi.fn(async (input: string | URL) => {
+      const url = String(input);
+      if (url.endsWith('/lastupdate.txt')) {
+        return new Response(POINTER_BODY, { status: 200 });
+      }
+      return new Response(body, {
+        status: 200,
+        headers: { 'content-type': 'application/zip' },
+      });
+    });
     await expect(
       gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch, ENV_ON),
     ).rejects.toThrow(/exceeds .* cap/);
     expect(pulls).toBeLessThanOrEqual(3);
+  });
+
+  // Zip-bomb defense: compressed input is capped at 2 MiB upstream; this
+  // asserts the decompressed-CSV cap also fires. We fabricate a zip
+  // whose uncompressed payload exceeds the 20 MiB cap by repeating a
+  // highly-compressible value.
+  it('rejects a decompressed CSV that exceeds the 20 MiB cap', async () => {
+    // 25 MB of a single highly-compressible char — zip compresses to
+    // tens of KB, well under the 2 MiB compressed cap.
+    const bigCsv = 'a'.repeat(25 * 1024 * 1024);
+    const bigZip = zipSync({ [`${POINTER_TS}.mentions.CSV`]: strToU8(bigCsv) });
+    const fetchImpl = vi.fn(async (input: string | URL) => {
+      const url = String(input);
+      if (url.endsWith('/lastupdate.txt')) {
+        return new Response(POINTER_BODY, { status: 200 });
+      }
+      return new Response(bigZip, { status: 200 });
+    });
+    await expect(
+      gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch, ENV_ON),
+    ).rejects.toThrow(/decompressed CSV .* exceeds .* cap/);
   });
 });
 
