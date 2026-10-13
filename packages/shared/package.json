@@ -17,6 +17,10 @@
     "./deploy-sha": {
       "types": "./dist/deploy-sha.d.ts",
       "import": "./dist/deploy-sha.js"
+    },
+    "./news-outlets": {
+      "types": "./dist/news-outlets.d.ts",
+      "import": "./dist/news-outlets.js"
     }
   },
   "scripts": {

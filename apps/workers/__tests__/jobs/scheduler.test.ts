@@ -164,6 +164,7 @@ describe('runSchedulerTick', () => {
           'news_ingest',
           'news_dedup_rank',
           'drop_publish',
+          'gdelt_event_retention',
         ],
         p_worker_id: 'w1',
       },

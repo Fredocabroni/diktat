@@ -518,20 +518,20 @@ describe('clusterGdeltMentions — operator trend-score + primary-source rules',
     };
   }
 
-  it('drops an event whose only outlet is a non-primary host', () => {
-    const out = clusterGdeltMentions([
+  it('drops an event whose only outlet is a non-primary host', async () => {
+    const out = await clusterGdeltMentions([
       m({ domain: 'example.com', url: 'https://news.example.com/x' }),
     ]);
     expect(out).toEqual([]);
   });
 
-  it('drops an event that only reaches 1 outlet (below GDELT_MIN_TREND_SCORE)', () => {
+  it('drops an event that only reaches 1 outlet (below GDELT_MIN_TREND_SCORE)', async () => {
     expect(GDELT_MIN_TREND_SCORE).toBe(2);
-    expect(clusterGdeltMentions([m({ domain: 'congress.gov' })])).toEqual([]);
+    expect(await clusterGdeltMentions([m({ domain: 'congress.gov' })])).toEqual([]);
   });
 
-  it('emits a candidate for an event with ≥2 outlets AND a primary host', () => {
-    const out = clusterGdeltMentions([
+  it('emits a candidate for an event with ≥2 outlets AND a primary host', async () => {
+    const out = await clusterGdeltMentions([
       m({ eventId: '42', domain: 'example.com', url: 'https://news.example.com/sen-bill' }),
       m({ eventId: '42', domain: 'example.net', url: 'https://other.example.net/sen-bill' }),
       m({ eventId: '42', domain: 'congress.gov', url: 'https://www.congress.gov/bill/118hr1234' }),
@@ -540,18 +540,45 @@ describe('clusterGdeltMentions — operator trend-score + primary-source rules',
     expect(out[0]?.source_url).toBe('https://www.congress.gov/bill/118hr1234');
     expect(out[0]?.source_provider).toBe('gdelt');
     expect(out[0]?.source_category).toBe('congress');
+    expect(out[0]?.evidence_tier).toBe('primary');
     expect(out[0]?.summary).toMatch(/^\[trend=3]/);
   });
 
-  it('rejects an event of ≥2 outlets with NO primary host (operator rule)', () => {
-    const out = clusterGdeltMentions([
+  it('rejects an event of ≥2 outlets with NO allowed URLs (no primary, no reputable)', async () => {
+    const out = await clusterGdeltMentions([
       m({ eventId: '7', domain: 'example.com', url: 'https://news.example.com/x' }),
       m({ eventId: '7', domain: 'example.net', url: 'https://other.example.net/x' }),
     ]);
     expect(out).toEqual([]);
   });
 
-  it('sorts output by trend score desc (big viral first — operator rule)', () => {
+  // S1+S3 extension — events with no primary doc fall back to reputable.
+  it('emits a reputable-tier candidate when no primary URL exists but a reputable outlet does', async () => {
+    const out = await clusterGdeltMentions([
+      m({ eventId: '77', domain: 'example.com', url: 'https://news.example.com/x' }),
+      m({ eventId: '77', domain: 'reuters.com', url: 'https://www.reuters.com/world/story' }),
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0]?.evidence_tier).toBe('reputable');
+    expect(out[0]?.outlet_lean).toBe('center');
+    expect(out[0]?.outlet_group).toBe('center');
+    expect(out[0]?.outlet_type).toBe('news');
+    expect(out[0]?.global_event_id).toBe('77');
+    expect(out[0]?.source_url).toBe('https://www.reuters.com/world/story');
+  });
+
+  // S1+S3 — primary wins over reputable even when both present in a cluster.
+  it('prefers primary URL over reputable when both are present in the cluster', async () => {
+    const out = await clusterGdeltMentions([
+      m({ eventId: '88', domain: 'reuters.com', url: 'https://www.reuters.com/story' }),
+      m({ eventId: '88', domain: 'congress.gov', url: 'https://www.congress.gov/bill/118hr99' }),
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0]?.evidence_tier).toBe('primary');
+    expect(out[0]?.source_url).toContain('congress.gov');
+  });
+
+  it('sorts output by trend score desc (big viral first — operator rule)', async () => {
     const rows = [
       // Event A: 2 outlets, 1 primary (sec.gov).
       m({
@@ -567,7 +594,7 @@ describe('clusterGdeltMentions — operator trend-score + primary-source rules',
       m({ eventId: '2', domain: 'news-3.example.com', url: 'https://news-3.example.com/sen' }),
       m({ eventId: '2', domain: 'congress.gov', url: 'https://www.congress.gov/bill/118hr1234' }),
     ];
-    const out = clusterGdeltMentions(rows);
+    const out = await clusterGdeltMentions(rows);
     expect(out).toHaveLength(2);
     expect(out[0]?.source_url).toContain('congress.gov');
     expect(out[1]?.source_url).toContain('sec.gov');
@@ -575,8 +602,8 @@ describe('clusterGdeltMentions — operator trend-score + primary-source rules',
     expect(out[1]?.summary).toMatch(/^\[trend=2]/);
   });
 
-  it('parses GDELT eventTimeDate (yyyyMMddHHmmss) to ISO 8601', () => {
-    const out = clusterGdeltMentions([
+  it('parses GDELT eventTimeDate (yyyyMMddHHmmss) to ISO 8601', async () => {
+    const out = await clusterGdeltMentions([
       m({
         eventId: 'A',
         time: '20261013053000',
@@ -599,8 +626,44 @@ describe('clusterGdeltMentions — operator trend-score + primary-source rules',
     expect(out[0]?.source_published_at).toBe('2026-10-13T05:32:00Z');
   });
 
-  it('returns [] for an empty mentions array', () => {
-    expect(clusterGdeltMentions([])).toEqual([]);
+  it('returns [] for an empty mentions array', async () => {
+    expect(await clusterGdeltMentions([])).toEqual([]);
+  });
+
+  // S1+S3 — the sink fires per allowed mention (primary + reputable).
+  it('invokes gdeltMentionSink for every allowed mention (not disallowed)', async () => {
+    const sinkCalls: unknown[] = [];
+    const sinks = {
+      gdeltMentionSink: async (m: unknown) => {
+        sinkCalls.push(m);
+      },
+    };
+    await clusterGdeltMentions(
+      [
+        m({ eventId: 'S', domain: 'reuters.com', url: 'https://www.reuters.com/world/x' }),
+        m({ eventId: 'S', domain: 'congress.gov', url: 'https://www.congress.gov/bill/1' }),
+        m({ eventId: 'S', domain: 'random.co', url: 'https://news.random.co/x' }), // not allowed
+      ],
+      sinks,
+    );
+    expect(sinkCalls).toHaveLength(2);
+    const hosts = sinkCalls.map((c) => (c as { host: string }).host);
+    expect(hosts).toContain('reuters.com');
+    expect(hosts).toContain('congress.gov');
+    expect(hosts).not.toContain('random.co');
+    // AP/Reuters are PAYWALL_FREE_PREFERRED; congress.gov is not.
+    const reuters = sinkCalls.find((c) => (c as { host: string }).host === 'reuters.com') as {
+      isPaywallFreePreferred: boolean;
+      evidenceTier: string;
+    };
+    expect(reuters.isPaywallFreePreferred).toBe(true);
+    expect(reuters.evidenceTier).toBe('reputable');
+    const congress = sinkCalls.find((c) => (c as { host: string }).host === 'congress.gov') as {
+      isPaywallFreePreferred: boolean;
+      evidenceTier: string;
+    };
+    expect(congress.isPaywallFreePreferred).toBe(false);
+    expect(congress.evidenceTier).toBe('primary');
   });
 
   // Security-reviewer PR #201 round 3 MED 7.2 — explicit scheme assert.
@@ -632,9 +695,9 @@ describe('clusterGdeltMentions — operator trend-score + primary-source rules',
   });
 
   describe('length caps on source_url (PR #205 LOW 2.4)', () => {
-    it('drops an event whose primary.url exceeds 2048 chars', () => {
+    it('drops an event whose primary.url exceeds 2048 chars', async () => {
       const longPath = 'x'.repeat(2100);
-      const out = clusterGdeltMentions([
+      const out = await clusterGdeltMentions([
         m({
           eventId: '9',
           domain: 'congress.gov',
@@ -645,11 +708,11 @@ describe('clusterGdeltMentions — operator trend-score + primary-source rules',
       expect(out).toEqual([]);
     });
 
-    it('accepts a URL at the exact 2048-char boundary', () => {
+    it('accepts a URL at the exact 2048-char boundary', async () => {
       const basePath = 'https://www.congress.gov/bill/';
       const url = basePath + 'x'.repeat(2048 - basePath.length);
       expect(url.length).toBe(2048);
-      const out = clusterGdeltMentions([
+      const out = await clusterGdeltMentions([
         m({ eventId: '10', domain: 'congress.gov', url }),
         m({ eventId: '10', domain: 'b.congress.gov', url: 'https://b.congress.gov/x' }),
       ]);
@@ -689,8 +752,8 @@ describe('clusterGdeltMentions — operator trend-score + primary-source rules',
   });
 
   // Security-reviewer PR #201 round 2 — stamp dedicated numeric column.
-  it('writes trend_score on each emitted candidate (not only in the summary prefix)', () => {
-    const out = clusterGdeltMentions([
+  it('writes trend_score on each emitted candidate (not only in the summary prefix)', async () => {
+    const out = await clusterGdeltMentions([
       m({ eventId: 'T', domain: 'example.com', url: 'https://news.example.com/sen' }),
       m({ eventId: 'T', domain: 'example.net', url: 'https://news.example.net/sen' }),
       m({ eventId: 'T', domain: 'congress.gov', url: 'https://www.congress.gov/bill/118hr1234' }),
@@ -1033,13 +1096,15 @@ describe('newsIngestHandler — happy path', () => {
     const supabase = buildSupabase(state);
     const logger = buildLogger();
     // A primary-source feed should never return a ban-list URL — this
-    // test is defense in depth.
+    // test is defense in depth. Uses foxnews.com (still MSM-banned
+    // after S1+S3 — operator didn't approve it for the reputable
+    // allowlist; MBFC rates it 'Mixed').
     const adapters = [
       fakeAdapter('congress', [
         candidate({
-          source_url: 'https://www.cnn.com/politics/article/1',
-          source_host: 'cnn.com',
-          dedup_url_canon: 'https://cnn.com/politics/article/1',
+          source_url: 'https://www.foxnews.com/politics/article/1',
+          source_host: 'foxnews.com',
+          dedup_url_canon: 'https://foxnews.com/politics/article/1',
         }),
       ]),
     ];
