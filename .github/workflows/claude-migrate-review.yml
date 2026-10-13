@@ -113,8 +113,14 @@ jobs:
       # key-bearing review step; the gate should not track npm's
       # default-pull velocity. Bump deliberately via the stable
       # promotion cadence. PR #71 round-2 MED.
+      # Install when the PR touches code (which, given the workflow's
+      # `paths:` filter, means supabase/migrations/**). Prior condition
+      # also installed on `docs == 'false'`, which for a no-files PR
+      # (both outputs empty strings) evaluated to true and triggered
+      # an install-plus-agent-call against no changed migrations. See
+      # security-reviewer #205 round-1 LOW 4.
       - name: Install Claude Code
-        if: ${{ needs.changes.outputs.code == 'true' || needs.changes.outputs.docs == 'false' }}
+        if: ${{ needs.changes.outputs.code == 'true' }}
         run: npm i -g @anthropic-ai/claude-code@2.1.176
 
       # Capture-then-post pattern, harmonized with claude-review.yml.
@@ -130,7 +136,7 @@ jobs:
       # code, and posts via gh pr comment from a step that does have
       # GH_TOKEN. Same gate-integrity script as claude-review.yml.
       - name: Run schema-reviewer
-        if: ${{ needs.changes.outputs.code == 'true' || needs.changes.outputs.docs == 'false' }}
+        if: ${{ needs.changes.outputs.code == 'true' }}
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
@@ -142,7 +148,7 @@ jobs:
           set -e
 
       - name: Post review
-        if: ${{ needs.changes.outputs.code == 'true' || needs.changes.outputs.docs == 'false' }}
+        if: ${{ needs.changes.outputs.code == 'true' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
