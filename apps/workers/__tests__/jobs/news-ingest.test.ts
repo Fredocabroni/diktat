@@ -612,6 +612,38 @@ describe('clusterGdeltArticles — operator trend-score + primary-source rules',
       expect(out).toHaveLength(1);
       expect(out[0]?.source_url.length).toBe(2048);
     });
+
+    // #207 round-1 reviewer LOW 3 — RSS path shares the same caps.
+    it('normalizeRssItem truncates title + rejects oversized URL (parity with GDELT)', () => {
+      const { normalizeRssItem, INGEST_MAX_TITLE_CHARS, INGEST_MAX_URL_CHARS } = __testing;
+
+      // Oversized URL → null
+      const ok = normalizeRssItem({
+        provider: 'test',
+        defaultCategory: 'congress',
+        item: {
+          title: 'ok title',
+          link: 'https://www.congress.gov/' + 'x'.repeat(INGEST_MAX_URL_CHARS + 10),
+          isoDate: null,
+          contentSnippet: null,
+        },
+      });
+      expect(ok).toBeNull();
+
+      // Oversized title → truncated
+      const trunc = normalizeRssItem({
+        provider: 'test',
+        defaultCategory: 'congress',
+        item: {
+          title: 'A'.repeat(INGEST_MAX_TITLE_CHARS + 100),
+          link: 'https://www.congress.gov/x',
+          isoDate: null,
+          contentSnippet: null,
+        },
+      });
+      expect(trunc).not.toBeNull();
+      expect(trunc!.source_title.length).toBe(INGEST_MAX_TITLE_CHARS);
+    });
   });
 
   // Security-reviewer PR #201 round 2 — stamp dedicated numeric column.
