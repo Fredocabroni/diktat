@@ -472,6 +472,33 @@ describe('parseGdeltMentionsCsv — TSV row parser', () => {
     const csv = r('a.gov', 'https://a.gov/1') + '\r\n\r\n' + r('b.gov', 'https://b.gov/2');
     expect(parseGdeltMentionsCsv(csv)).toHaveLength(2);
   });
+
+  // Round-2 reviewer LOW 2 — parse-time length bound on url/host.
+  it('drops rows whose URL exceeds INGEST_MAX_URL_CHARS at parse time', () => {
+    const longUrl = 'https://a.gov/' + 'x'.repeat(2048);
+    const row = ['1', '20260101000000', '20260101000000', '1', 'a.gov', longUrl].join('\t');
+    expect(parseGdeltMentionsCsv(row)).toEqual([]);
+  });
+
+  it('drops rows whose sourceName exceeds 253 chars at parse time', () => {
+    const longHost = 'x'.repeat(254) + '.gov';
+    const row = ['1', '20260101000000', '20260101000000', '1', longHost, 'https://a.gov/x'].join(
+      '\t',
+    );
+    expect(parseGdeltMentionsCsv(row)).toEqual([]);
+  });
+
+  // Round-2 reviewer LOW 1 — cap counts accepted rows (not line index),
+  // so a padded CSV cannot push effective parse depth to zero.
+  it('row cap counts ACCEPTED rows, not line index (padding-resistant)', () => {
+    // 100 blank lines, then 3 valid rows. All 3 must be returned.
+    const valid = (eid: string): string =>
+      ['e-' + eid, '20260101000000', '20260101000000', '1', 'a.gov', `https://a.gov/${eid}`].join(
+        '\t',
+      );
+    const csv = '\n'.repeat(100) + [valid('1'), valid('2'), valid('3')].join('\n');
+    expect(parseGdeltMentionsCsv(csv)).toHaveLength(3);
+  });
 });
 
 describe('clusterGdeltMentions — operator trend-score + primary-source rules', () => {
@@ -785,18 +812,63 @@ describe('gdeltAdapter — Option B (data.gdeltproject.org raw export files)', (
     ).rejects.toThrow(/lastupdate.txt did not yield/);
   });
 
-  it('rejects a zip that does not contain a .CSV entry', async () => {
-    const emptyZip = zipSync({ 'readme.txt': strToU8('nothing to see') });
+  it('rejects a single-entry zip whose entry is not a .CSV', async () => {
+    const otherZip = zipSync({ 'readme.txt': strToU8('nothing to see') });
     const fetchImpl = vi.fn(async (input: string | URL) => {
       const url = String(input);
       if (url.endsWith('/lastupdate.txt')) {
         return new Response(POINTER_BODY, { status: 200 });
       }
-      return new Response(emptyZip, { status: 200 });
+      return new Response(otherZip, { status: 200 });
     });
     await expect(
       gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch, ENV_ON),
-    ).rejects.toThrow(/zip did not contain a .CSV entry/);
+    ).rejects.toThrow(/zip entry is not a .CSV/);
+  });
+
+  // Round-2 reviewer MED 3 — reject multi-entry archives at the EOCD
+  // pre-flight stage, before any `unzipSync` allocation. GDELT's
+  // documented format is exactly one entry per zip.
+  it('rejects a multi-entry zip at EOCD pre-flight (no decompression attempted)', async () => {
+    const multiZip = zipSync({
+      [`${POINTER_TS}.mentions.CSV`]: strToU8('a\tb\tc\td\te\tf'),
+      'extra.CSV': strToU8('x\ty\tz\td\te\tf'),
+    });
+    const fetchImpl = vi.fn(async (input: string | URL) => {
+      const url = String(input);
+      if (url.endsWith('/lastupdate.txt')) {
+        return new Response(POINTER_BODY, { status: 200 });
+      }
+      return new Response(multiZip, { status: 200 });
+    });
+    await expect(
+      gdeltAdapter.fetch(fetchImpl as unknown as typeof globalThis.fetch, ENV_ON),
+    ).rejects.toThrow(/expected single-entry zip, got 2/);
+  });
+
+  // Round-2 reviewer MED 4 — zip entry filenames are sanitized before
+  // reaching any error message or log field. A crafted name with path
+  // separators / newlines / ANSI escapes must not leak into the error.
+  it('sanitizes zip-entry filenames in error strings (MED 4)', async () => {
+    const nastyZip = zipSync({ '../../etc/passwd.txt\n\x1b[31mred': strToU8('x') });
+    const fetchImpl = vi.fn(async (input: string | URL) => {
+      const url = String(input);
+      if (url.endsWith('/lastupdate.txt')) {
+        return new Response(POINTER_BODY, { status: 200 });
+      }
+      return new Response(nastyZip, { status: 200 });
+    });
+    const err = await gdeltAdapter
+      .fetch(fetchImpl as unknown as typeof globalThis.fetch, ENV_ON)
+      .catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    const msg = (err as Error).message;
+    // Must not contain path separators, newlines, or escape sequences.
+    expect(msg).not.toContain('/');
+    expect(msg).not.toContain('\n');
+    expect(msg).not.toMatch(/\x1b/);
+    // Sanitizer replaces disallowed chars with `_` and caps at 64 chars.
+    expect(msg).toContain('name=');
   });
 
   it('rate-limits back-to-back fetches within GDELT_MIN_FETCH_INTERVAL_MS', async () => {

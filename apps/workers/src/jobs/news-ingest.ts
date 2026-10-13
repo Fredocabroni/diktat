@@ -507,40 +507,68 @@ async function readBodyAsBytesWithSizeCap(
   return merged;
 }
 
-/** Legacy text wrapper kept for the lastupdate.txt path and any future
- *  text consumer. Decodes bytes-with-cap as UTF-8. */
-async function readBodyWithSizeCap(response: Response, maxBytes: number): Promise<string> {
-  const bytes = await readBodyAsBytesWithSizeCap(response, maxBytes);
-  return new TextDecoder('utf-8').decode(bytes);
+/** Scan the archive's EOCD (End Of Central Directory) record and return
+ *  the entry count. Returns null if the EOCD is not found (malformed
+ *  zip). The EOCD is 22 bytes at the end of a well-formed archive plus
+ *  an optional 0–65535-byte trailing comment; we scan the trailing
+ *  1 KiB only — a zip with a kilobyte+ trailing comment is suspicious
+ *  on its own and worth rejecting. Round-2 reviewer MED 3: lets us
+ *  enforce entry-count = 1 BEFORE `unzipSync` allocates per-entry
+ *  decompressed buffers, closing the multi-entry memory-exhaustion
+ *  path through the compressed-cap. */
+function parseZipEntryCount(bytes: Uint8Array): number | null {
+  const EOCD_SIG = 0x06054b50;
+  if (bytes.length < 22) return null;
+  const scanEnd = bytes.length - 22;
+  const scanStart = Math.max(0, scanEnd - 1024);
+  for (let i = scanEnd; i >= scanStart; i -= 1) {
+    const sig =
+      (bytes[i]! | (bytes[i + 1]! << 8) | (bytes[i + 2]! << 16) | (bytes[i + 3]! << 24)) >>> 0;
+    if (sig === EOCD_SIG) {
+      // Offset 10-12 from EOCD start: total number of entries in the
+      // central directory, uint16 little-endian.
+      return bytes[i + 10]! | (bytes[i + 11]! << 8);
+    }
+  }
+  return null;
+}
+
+/** Sanitize a zip entry filename before any use in error strings or
+ *  log fields. Round-2 reviewer MED 4: an unsanitized name can carry
+ *  path separators, null bytes, newlines, or ANSI escape sequences
+ *  that corrupt log output or seed a path-traversal vector if the
+ *  bytes are ever written to disk. We keep word chars, dots and
+ *  dashes only; cap at 64 chars. */
+function sanitizeZipEntryName(name: string): string {
+  return name.replace(/[^\w.-]/g, '_').slice(0, 64);
 }
 
 /** Fetch the GDELT pointer file, parse out the mentions URL, fetch the
  *  mentions.CSV.zip, unzip, parse the TSV, return the mentions.
  *
- *  Zip-bomb bound: the compressed input is already capped at
- *  GDELT_MENTIONS_ZIP_MAX_BYTES (2 MiB); after `unzipSync` the
- *  decompressed CSV is asserted ≤ GDELT_MENTIONS_CSV_MAX_BYTES (20 MiB),
- *  so worst-case memory before abort is bounded at 22 MiB.
+ *  Zip-bomb bound: the compressed input is capped at
+ *  GDELT_MENTIONS_ZIP_MAX_BYTES (2 MiB); the archive is pre-flighted
+ *  via `parseZipEntryCount` to reject anything that is not a
+ *  single-entry zip (closes the multi-entry memory-exhaustion path);
+ *  after `unzipSync` the decompressed CSV is asserted ≤
+ *  GDELT_MENTIONS_CSV_MAX_BYTES (20 MiB). Worst-case memory before
+ *  abort: 22 MiB (single entry, 2 MiB compressed + 20 MiB decompressed).
  *
  *  The row cap (GDELT_MAX_MENTIONS = 50 000) is a second-layer defense
  *  against a well-formed-but-pathological CSV. */
 async function fetchGdeltMentionsLatest(
   fetchImpl: typeof globalThis.fetch,
 ): Promise<GdeltMention[]> {
-  // Step 1 — fetch pointer file (320 B expected).
-  const pointerResp = await fetchImpl(GDELT_LASTUPDATE_URL, {
-    redirect: 'manual',
-    signal: AbortSignal.timeout(GDELT_FETCH_TIMEOUT_MS),
-  });
-  if (pointerResp.status >= 300 && pointerResp.status < 400) {
-    throw new Error(
-      `gdelt: refusing to follow redirect (${pointerResp.status}) from ${GDELT_DATA_HOST}`,
-    );
-  }
-  if (!pointerResp.ok) {
-    throw new Error(`gdelt: HTTP ${pointerResp.status} from ${GDELT_DATA_HOST}`);
-  }
-  const pointer = await readBodyWithSizeCap(pointerResp, GDELT_LASTUPDATE_MAX_BYTES);
+  // Step 1 — fetch pointer file. Routed through `fetchGdeltBytes` so
+  // the scheme / host / redirect / timeout / size-cap guards all apply
+  // to BOTH endpoints we hit (round-2 reviewer MED 1 — collapse the
+  // abstraction gap so a future constant swap can't bypass the pin).
+  const pointerBytes = await fetchGdeltBytes(
+    fetchImpl,
+    GDELT_LASTUPDATE_URL,
+    GDELT_LASTUPDATE_MAX_BYTES,
+  );
+  const pointer = new TextDecoder('utf-8').decode(pointerBytes);
 
   // Step 2 — parse mentions URL out of the pointer.
   const mentionsUrl = extractMentionsUrl(pointer);
@@ -551,19 +579,36 @@ async function fetchGdeltMentionsLatest(
   // Step 3 — fetch the compressed CSV.
   const zipBytes = await fetchGdeltBytes(fetchImpl, mentionsUrl, GDELT_MENTIONS_ZIP_MAX_BYTES);
 
-  // Step 4 — unzip in-memory. GDELT's zip contains exactly one entry
-  // (the CSV); pick the first entry whose name ends with .CSV.
+  // Step 4a — pre-flight the archive's entry count via EOCD without
+  // allocating any decompressed buffer. GDELT's documented format is
+  // exactly ONE entry per zip; anything else is a format drift or a
+  // bomb payload. Round-2 reviewer MED 3.
+  const entryCount = parseZipEntryCount(zipBytes);
+  if (entryCount === null) {
+    throw new Error(`gdelt: zip EOCD not found (malformed archive)`);
+  }
+  if (entryCount !== 1) {
+    throw new Error(`gdelt: expected single-entry zip, got ${entryCount}`);
+  }
+
+  // Step 4b — unzip in-memory. With entry-count = 1 enforced above,
+  // `unzipSync` allocates at most GDELT_MENTIONS_CSV_MAX_BYTES of
+  // decompressed data in one buffer before the post-cap check fires.
   let unzipped: Record<string, Uint8Array>;
   try {
     unzipped = unzipSync(zipBytes);
   } catch (err) {
     throw new Error(`gdelt: unzip failed (${(err as Error).message ?? 'unknown'})`);
   }
-  const entry = Object.entries(unzipped).find(([name]) => /\.CSV$/i.test(name));
-  if (!entry) {
-    throw new Error(`gdelt: zip did not contain a .CSV entry`);
+  const entries = Object.entries(unzipped);
+  if (entries.length !== 1) {
+    throw new Error(`gdelt: post-unzip entry count mismatch (got ${entries.length})`);
   }
-  const csvBytes = entry[1]!;
+  const [rawEntryName, csvBytes] = entries[0]!;
+  const safeEntryName = sanitizeZipEntryName(rawEntryName);
+  if (!/\.CSV$/i.test(safeEntryName)) {
+    throw new Error(`gdelt: zip entry is not a .CSV (name=${safeEntryName})`);
+  }
   if (csvBytes.byteLength > GDELT_MENTIONS_CSV_MAX_BYTES) {
     throw new Error(
       `gdelt: decompressed CSV ${csvBytes.byteLength} exceeds ${GDELT_MENTIONS_CSV_MAX_BYTES}B cap`,
@@ -573,16 +618,24 @@ async function fetchGdeltMentionsLatest(
   return parseGdeltMentionsCsv(csv);
 }
 
+/** Max hostname length (RFC 1035 — the per-label 63-byte cap times
+ *  four labels is a comfortable upper bound on any real domain name). */
+const INGEST_MAX_SOURCE_HOST_CHARS = 253;
+
 /** Parse the GDELT Mentions TSV (no header). Each row is \t-separated;
  *  we read columns 0 (GLOBALEVENTID), 1 (EventTimeDate), 4
- *  (MentionSourceName), 5 (MentionIdentifier). Rows missing any of
- *  these are dropped. Row count is capped at GDELT_MAX_MENTIONS. */
+ *  (MentionSourceName), 5 (MentionIdentifier). Rows missing any
+ *  required column are dropped. Rows with an oversized URL or source
+ *  name are also dropped at parse time — this bounds per-row memory
+ *  before the clusterer walks the array (round-2 reviewer LOW 2).
+ *
+ *  Row cap applies to ACCEPTED rows, not line index: a hostile CSV
+ *  cannot push its true parse depth to zero by padding with blank
+ *  lines (round-2 reviewer LOW 1). */
 export function parseGdeltMentionsCsv(csv: string): GdeltMention[] {
   const out: GdeltMention[] = [];
-  const lines = csv.split(/\r?\n/);
-  const cap = Math.min(lines.length, GDELT_MAX_MENTIONS);
-  for (let i = 0; i < cap; i += 1) {
-    const line = lines[i];
+  for (const line of csv.split(/\r?\n/)) {
+    if (out.length >= GDELT_MAX_MENTIONS) break;
     if (!line) continue;
     const cols = line.split('\t');
     if (cols.length < 6) continue;
@@ -598,6 +651,11 @@ export function parseGdeltMentionsCsv(csv: string): GdeltMention[] {
     ) {
       continue;
     }
+    // Parse-time length guards (round-2 reviewer LOW 2). A hostile CSV
+    // row with an unbounded URL would otherwise sit in the clusterer's
+    // input array until clusterGdeltMentions re-checks the cap.
+    if (url.length > INGEST_MAX_URL_CHARS) continue;
+    if (sourceName.length > INGEST_MAX_SOURCE_HOST_CHARS) continue;
     out.push({ globalEventId, eventTimeDate, sourceName, url });
   }
   return out;
