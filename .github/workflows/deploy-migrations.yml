@@ -82,6 +82,16 @@ jobs:
           echo "::error::supabase start failed after 3 attempts"
           exit 1
 
+      # Full teardown between `db reset` retries (PR #208 reviewer
+      # round-1 LOW 2). A failed `supabase db reset` can leave the
+      # local Postgres container in a partially-migrated or locked
+      # state — without the teardown, a successive attempt runs
+      # against that dirty state and may succeed where a from-empty
+      # apply would fail. That masks genuine migration errors behind
+      # the gate. `supabase stop --no-backup || true` + `supabase
+      # start` between attempts re-establishes the from-empty
+      # precondition the gate's name claims. The sibling start-loop
+      # above already applies the same teardown pattern.
       - name: Apply all migrations from empty
         run: |
           set -eo pipefail
@@ -90,7 +100,11 @@ jobs:
               echo "::notice::supabase db reset succeeded on attempt $attempt"
               exit 0
             fi
-            echo "::warning::supabase db reset failed on attempt $attempt; retrying"
+            echo "::warning::supabase db reset failed on attempt $attempt; tearing down + retrying"
+            supabase stop --no-backup || true
+            if ! supabase start; then
+              echo "::warning::supabase start after teardown failed on attempt $attempt; sleeping before retry"
+            fi
             sleep 5
           done
           echo "::error::supabase db reset failed after 3 attempts"
