@@ -122,6 +122,12 @@ jobs:
       # migration SQL error would surface in a subsequent attempt the
       # same way, and three attempts bound the retry cost at ~45 s even
       # in the worst case.
+      # Full teardown between `db reset` retries. See the matching
+      # comment in deploy-migrations.yml for the rationale (PR #208
+      # reviewer round-1 LOW 2 — a failed `db reset` can leave the
+      # local Postgres container in a partially-migrated state, and
+      # without the teardown a successive attempt may silently succeed
+      # against that dirty state, masking a genuine migration error).
       - name: Apply all migrations from empty
         run: |
           set -eo pipefail
@@ -130,7 +136,11 @@ jobs:
               echo "::notice::supabase db reset succeeded on attempt $attempt"
               exit 0
             fi
-            echo "::warning::supabase db reset failed on attempt $attempt; retrying"
+            echo "::warning::supabase db reset failed on attempt $attempt; tearing down + retrying"
+            supabase stop --no-backup || true
+            if ! supabase start; then
+              echo "::warning::supabase start after teardown failed on attempt $attempt; sleeping before retry"
+            fi
             sleep 5
           done
           echo "::error::supabase db reset failed after 3 attempts"
