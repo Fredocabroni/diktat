@@ -908,7 +908,11 @@ function errorChainMessage(err: unknown): string {
   for (let depth = 0; depth < 5 && cur != null; depth += 1) {
     if (cur instanceof Error) {
       const code = (cur as { code?: unknown }).code;
-      const codeStr = typeof code === 'string' && code.length > 0 ? code : '';
+      // Cap at 64 chars so a long/attacker-controlled `code` cannot blow
+      // out the Telegram body or the DB column. All Node/undici error
+      // codes seen in the wild are short tokens (ECONNRESET, ENOTFOUND,
+      // UND_ERR_SOCKET, …) — 64 is comfortably past the longest documented.
+      const codeStr = typeof code === 'string' && code.length > 0 ? code.slice(0, 64) : '';
       const msg = cur.message || cur.name || 'Error';
       parts.push(scrubMessage(codeStr ? `${msg} [${codeStr}]` : msg));
       cur = (cur as { cause?: unknown }).cause;
@@ -947,7 +951,12 @@ async function ingestOne(
     // warn above.
     await upsertAdapterHealth(deps, adapter.name, {
       lastErrorAt: new Date().toISOString(),
-      lastErrorMessage: message,
+      // Cap at 1024 before DB write. The chain is already bounded (5
+      // layers × scrubMessage output), but a pathological cause-chain
+      // payload could still oversize the operator-facing text column.
+      // 1024 leaves generous room past the Telegram body's 400-char cap
+      // so DB retains more context than the alert itself.
+      lastErrorMessage: message.slice(0, 1024),
       lastFetchedCount: 0,
       lastFreshCount: 0,
     });

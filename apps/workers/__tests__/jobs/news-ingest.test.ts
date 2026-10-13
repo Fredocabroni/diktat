@@ -1055,6 +1055,34 @@ describe('newsIngestHandler — happy path', () => {
     expect(healthRow?.last_error_message as string).toContain('ENOTFOUND');
   });
 
+  it('caps last_error_message at 1024 chars before DB write (#211 reviewer LOW 3)', async () => {
+    const state = freshState();
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+    // 4000-char message; single-layer scrubbed chain blows past the cap.
+    const huge = 'x'.repeat(4000);
+    const failingAdapter: NewsIngestAdapter = {
+      name: 'gdelt',
+      defaultCategory: 'congress',
+      fetch: vi.fn().mockRejectedValue(new Error(huge)),
+    };
+    const handler = buildNewsIngestHandler([failingAdapter], STUB_ENV_PROVIDER);
+    await handler(row(), { supabase, logger, fetch: vi.fn() as never });
+    const healthRow = state.healthUpserts.get('gdelt');
+    expect(healthRow).toBeDefined();
+    expect((healthRow?.last_error_message as string).length).toBeLessThanOrEqual(1024);
+  });
+
+  it('caps error.code at 64 chars inside the chain message (#211 reviewer LOW 1)', () => {
+    const { errorChainMessage } = __testing;
+    const longCode = 'A'.repeat(500);
+    const e = Object.assign(new Error('boom'), { code: longCode });
+    const msg = errorChainMessage(e);
+    // Bracketed suffix contains the truncated code only.
+    expect(msg).toContain('[' + 'A'.repeat(64) + ']');
+    expect(msg).not.toContain('A'.repeat(65));
+  });
+
   describe('errorChainMessage (test seam)', () => {
     const { errorChainMessage } = __testing;
 
