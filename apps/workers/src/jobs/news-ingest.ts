@@ -1381,113 +1381,39 @@ async function upsertAdapterHealth(
 }
 
 /** Upsert one GDELT mention into the rolling-24h cluster state
- *  (public.gdelt_event_cluster + public.gdelt_event_cluster_outlet).
- *  Called per allowed mention by the GDELT adapter via the sinks.
- *  Each call:
- *    - UPSERT cluster row: touches last_seen_at on every call. On
- *      first-insert, sets first_seen_at + created_at. If the mention
- *      is primary/direct AND cluster.primary_url is null, stamps
- *      primary_url/host/tier. If the mention is from a paywall-free
- *      preferred host AND cluster.best_news_url is null, stamps
- *      best_news_url/host.
- *    - INSERT outlet row ON CONFLICT (global_event_id, host) DO
- *      NOTHING — cross-tick dedup is free via the composite PK.
+ *  (public.gdelt_event_cluster + public.gdelt_event_cluster_outlet)
+ *  via the atomic SECURITY DEFINER RPC `upsert_gdelt_event_mention`.
+ *
+ *  The RPC does BOTH writes in a single SQL statement set with
+ *  ON CONFLICT DO UPDATE and COALESCE on `primary_url` /
+ *  `best_news_url` so the first-seen value wins under concurrent
+ *  ticks. Closes PR #214 round-1 reviewer MED 3 (TOCTOU race
+ *  between a two-step upsert+update pattern).
  *
  *  Fire-and-forget on error. The cluster state is observability +
- *  Drop-pool enrichment, not the critical path. A failed upsert
- *  logs but never breaks the ingest tick. */
+ *  Drop-pool enrichment, not the critical path. A failed call logs
+ *  but never breaks the ingest tick. */
 async function upsertGdeltEventMention(
   deps: Parameters<JobHandler>[1],
   m: GdeltMentionUpsert,
 ): Promise<void> {
-  const nowIso = new Date().toISOString();
-  const isPrimary = m.evidenceTier === 'primary' || m.evidenceTier === 'direct';
   try {
-    // Step 1 — Cluster row upsert. The primary_url + best_news_url
-    // fields use a two-step pattern: insert with the value if we have
-    // it; on conflict, only update when the current value is null (so
-    // the FIRST qualifying mention wins — stable URL preserved).
-    //
-    // Supabase JS doesn't ship a native "upsert with conditional
-    // column update" in one call for complex coalescing, so we do:
-    // (a) upsert last_seen_at (+ initial first-seen fields), then
-    // (b) update primary_* / best_news_* if currently null.
-    const clusterRow = {
-      global_event_id: m.globalEventId,
-      first_seen_at: nowIso,
-      last_seen_at: nowIso,
-      updated_at: nowIso,
-      ...(isPrimary && {
-        primary_url: m.url,
-        primary_host: m.host,
-        primary_tier: m.evidenceTier,
-      }),
-      ...(m.isPaywallFreePreferred && {
-        best_news_url: m.url,
-        best_news_host: m.host,
-      }),
-    };
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const { error: upsertErr } = await (deps.supabase as any)
-      .from('gdelt_event_cluster')
-      .upsert(clusterRow, {
-        onConflict: 'global_event_id',
-        // On conflict, DO NOT overwrite primary_* / best_news_* — the
-        // conflict handler at the DB layer still runs the DEFAULT
-        // behavior (overwrite). We follow with a coalesce UPDATE
-        // below to protect the "first-seen wins" rule.
-        ignoreDuplicates: false,
-      });
-    if (upsertErr) {
+    const { error } = await (deps.supabase as any).rpc('upsert_gdelt_event_mention', {
+      p_global_event_id: m.globalEventId,
+      p_url: m.url,
+      p_host: m.host,
+      p_evidence_tier: m.evidenceTier,
+      p_outlet_lean: m.outletLean ?? null,
+      p_outlet_group: m.outletGroup ?? null,
+      p_outlet_type: m.outletType ?? null,
+      p_is_paywall_free_preferred: m.isPaywallFreePreferred,
+    });
+    if (error) {
       deps.logger.warn({
         event: 'news_ingest.gdelt_cluster_upsert_failed',
         global_event_id: m.globalEventId,
-        message: scrubMessage((upsertErr as { message?: string }).message ?? 'unknown'),
-      });
-      return;
-    }
-
-    // Step 1b — "first-seen wins" coalesce for primary_* and best_news_*.
-    // Only overwrites columns that are currently null. (SQL update with
-    // a WHERE on the row's current value is the simplest approach;
-    // Supabase's filter chain supports is.null for this.)
-    if (isPrimary) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await (deps.supabase as any)
-        .from('gdelt_event_cluster')
-        .update({ primary_url: m.url, primary_host: m.host, primary_tier: m.evidenceTier })
-        .eq('global_event_id', m.globalEventId)
-        .is('primary_url', null);
-    }
-    if (m.isPaywallFreePreferred) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await (deps.supabase as any)
-        .from('gdelt_event_cluster')
-        .update({ best_news_url: m.url, best_news_host: m.host })
-        .eq('global_event_id', m.globalEventId)
-        .is('best_news_url', null);
-    }
-
-    // Step 2 — Outlet row insert, dedup via composite PK.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const { error: insertErr } = await (deps.supabase as any)
-      .from('gdelt_event_cluster_outlet')
-      .insert({
-        global_event_id: m.globalEventId,
-        host: m.host,
-        outlet_lean: m.outletLean ?? null,
-        outlet_group: m.outletGroup ?? null,
-        outlet_type: m.outletType ?? null,
-        url: m.url,
-      });
-    if (insertErr && (insertErr as { code?: string }).code !== '23505') {
-      // 23505 = unique_violation on (global_event_id, host) — expected
-      // cross-tick dedup, not an error.
-      deps.logger.warn({
-        event: 'news_ingest.gdelt_outlet_insert_failed',
-        global_event_id: m.globalEventId,
-        host: m.host,
-        message: scrubMessage((insertErr as { message?: string }).message ?? 'unknown'),
+        message: scrubMessage((error as { message?: string }).message ?? 'unknown'),
       });
     }
   } catch (err) {
@@ -1578,6 +1504,7 @@ export const __testing = {
   requireHttpsUrl,
   resetGdeltRateLimitState,
   errorChainMessage,
+  upsertGdeltEventMention,
   INGEST_MAX_TITLE_CHARS,
   INGEST_MAX_URL_CHARS,
   GDELT_MIN_FETCH_INTERVAL_MS,

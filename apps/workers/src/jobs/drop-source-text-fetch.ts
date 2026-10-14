@@ -17,7 +17,11 @@
 // Not integrated into drop-publish in this PR; the function + types
 // land first so the integration follow-up is pure wiring.
 
-import { PAYWALL_FREE_PREFERRED_HOSTS, lookupOutlet } from '@diktat/shared/news-outlets';
+import {
+  PAYWALL_FREE_PREFERRED_HOSTS,
+  isExcludedPath,
+  lookupOutlet,
+} from '@diktat/shared/news-outlets';
 
 /** Fetch per-URL timeout. News outlets usually respond within 2 s on
  *  the happy path; 10 s tolerates slow TLS handshake / server mood. */
@@ -129,10 +133,17 @@ export async function fetchOgText(
       return null;
     }
     if (parsed.protocol !== 'https:') return null;
-    // Allowlist check — must resolve to one of the 30 outlets.
+    // Allowlist check — must resolve to one of the 30 outlets AND
+    // the URL path must NOT match any opinion / editorial / contributor
+    // prefix on that outlet. The second check closes PR #214 round-1
+    // reviewer MED 2 — a DB-sourced URL (`gdelt_event_cluster_outlet`)
+    // whose path begins with e.g. `/opinion/` would otherwise slip
+    // through the host-only allowlist and return og:title from a
+    // column rather than a news article.
     const outlet = lookupOutlet(parsed.hostname);
     if (outlet === null) return null;
     if (outlet.type !== 'news') return null;
+    if (isExcludedPath(outlet, parsed.toString())) return null;
 
     let response: Response;
     try {
@@ -194,13 +205,20 @@ export async function fetchFirstReadable(
   return null;
 }
 
-/** Read response body as text with an incremental size cap. */
+/** Read response body as text with an incremental BYTE-count cap.
+ *  Closes PR #214 round-1 reviewer MED 1 — the earlier fallback-
+ *  branch used `.length` (UTF-16 code units) which lets a CJK /
+ *  emoji-heavy body pass a 2 MiB cap with ~6 MiB of actual bytes.
+ *  Both branches now count bytes. */
 async function readBodyText(response: Response, maxBytes: number): Promise<string | null> {
   try {
     if (!response.body) {
-      const buffered = await response.text();
-      if (buffered.length > maxBytes) return null;
-      return buffered;
+      // Fallback: no streamable body (polyfill / test shim). Pull as
+      // ArrayBuffer so we can check byte length BEFORE decoding to
+      // string.
+      const ab = await response.arrayBuffer();
+      if (ab.byteLength > maxBytes) return null;
+      return new TextDecoder('utf-8').decode(ab);
     }
     const reader = response.body.getReader();
     const chunks: Uint8Array[] = [];

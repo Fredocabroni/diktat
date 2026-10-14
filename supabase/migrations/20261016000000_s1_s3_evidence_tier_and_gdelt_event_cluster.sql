@@ -317,3 +317,109 @@ create policy gdelt_event_cluster_outlet_select_all
 -- grant-audit regime from migration 20260617160000).
 grant select on public.gdelt_event_cluster to authenticated;
 grant select on public.gdelt_event_cluster_outlet to authenticated;
+
+-- =========================================================================
+-- 7. Atomic cluster upsert RPC — closes PR #214 round-1 reviewer MED 3
+-- =========================================================================
+--
+-- The naive two-step pattern (upsert + conditional UPDATE WHERE
+-- primary_url IS NULL) is non-atomic. Two concurrent news-ingest
+-- ticks on the same GLOBALEVENTID can both read primary_url=NULL
+-- and both set it; the later write wins and overwrites the earlier
+-- (operator contract: "first-seen wins" for URL stability).
+--
+-- This function does ALL writes for one mention in a single SQL
+-- statement set, using COALESCE on ON CONFLICT DO UPDATE so an
+-- already-set primary_url / best_news_url is NEVER overwritten.
+-- The outlet-row INSERT runs in the same function body; ON CONFLICT
+-- (global_event_id, host) DO NOTHING already handles cross-tick dedup
+-- atomically at the DB layer.
+--
+-- SECURITY DEFINER so the workers service_role runs with the
+-- function's owner's privileges — no RLS to traverse. `set
+-- search_path = ''` closes the search-path hijack vector. Executes
+-- on authenticated + service_role so a future client-side caller
+-- can only produce rows the function allows (and even then only
+-- when granted explicitly).
+create or replace function public.upsert_gdelt_event_mention(
+  p_global_event_id text,
+  p_url text,
+  p_host text,
+  p_evidence_tier public.news_evidence_tier,
+  p_outlet_lean text,
+  p_outlet_group public.news_outlet_group,
+  p_outlet_type public.news_outlet_type,
+  p_is_paywall_free_preferred boolean
+)
+returns void
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_is_primary boolean := p_evidence_tier in ('primary', 'direct');
+  v_is_paywall_free_news boolean := p_is_paywall_free_preferred and p_outlet_type = 'news';
+begin
+  -- Step 1 — cluster row upsert with first-seen-wins coalesce.
+  insert into public.gdelt_event_cluster as c (
+    global_event_id,
+    first_seen_at,
+    last_seen_at,
+    updated_at,
+    primary_url,
+    primary_host,
+    primary_tier,
+    best_news_url,
+    best_news_host
+  ) values (
+    p_global_event_id,
+    now(),
+    now(),
+    now(),
+    case when v_is_primary then p_url else null end,
+    case when v_is_primary then p_host else null end,
+    case when v_is_primary then p_evidence_tier else null end,
+    case when v_is_paywall_free_news then p_url else null end,
+    case when v_is_paywall_free_news then p_host else null end
+  )
+  on conflict (global_event_id) do update set
+    last_seen_at = excluded.last_seen_at,
+    updated_at = excluded.updated_at,
+    primary_url = coalesce(c.primary_url, excluded.primary_url),
+    primary_host = coalesce(c.primary_host, excluded.primary_host),
+    primary_tier = coalesce(c.primary_tier, excluded.primary_tier),
+    best_news_url = coalesce(c.best_news_url, excluded.best_news_url),
+    best_news_host = coalesce(c.best_news_host, excluded.best_news_host);
+
+  -- Step 2 — outlet row insert, cross-tick dedup via composite PK.
+  insert into public.gdelt_event_cluster_outlet (
+    global_event_id,
+    host,
+    outlet_lean,
+    outlet_group,
+    outlet_type,
+    url
+  ) values (
+    p_global_event_id,
+    p_host,
+    p_outlet_lean,
+    p_outlet_group,
+    p_outlet_type,
+    p_url
+  )
+  on conflict (global_event_id, host) do nothing;
+end;
+$$;
+
+revoke all on function public.upsert_gdelt_event_mention(
+  text, text, text, public.news_evidence_tier, text,
+  public.news_outlet_group, public.news_outlet_type, boolean
+) from public;
+
+grant execute on function public.upsert_gdelt_event_mention(
+  text, text, text, public.news_evidence_tier, text,
+  public.news_outlet_group, public.news_outlet_type, boolean
+) to service_role;
+
+comment on function public.upsert_gdelt_event_mention is
+  'Atomic cross-tick upsert for one GDELT mention. Called per allowed mention from the news-ingest workers process. COALESCE on primary_url / best_news_url preserves first-seen-wins URL stability under concurrent ticks (closes PR #214 round-1 MED 3). Outlet row insert uses ON CONFLICT DO NOTHING on the composite PK for cross-tick dedup.';

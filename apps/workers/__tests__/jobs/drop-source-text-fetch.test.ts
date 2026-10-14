@@ -173,6 +173,77 @@ describe('fetchOgText — SSRF-safe single-URL fetch', () => {
     );
     expect(await fetchOgText(fetchImpl as never, 'https://apnews.com/x')).toBeNull();
   });
+
+  // Round-1 reviewer MED 2 — opinion-path URLs on reputable hosts
+  // must be rejected inside fetchOgText too, not just at classifyUrl
+  // time. A DB-sourced URL (gdelt_event_cluster_outlet) can bypass
+  // the classify-time check.
+  it('rejects a reputable-host URL whose path is in exclude_prefixes', async () => {
+    const fetchImpl = vi.fn();
+    // NYT /opinion/ excluded.
+    const nytOpinion = await fetchOgText(
+      fetchImpl as never,
+      'https://www.nytimes.com/opinion/column.html',
+    );
+    expect(nytOpinion).toBeNull();
+    expect(fetchImpl).not.toHaveBeenCalled();
+    // Reuters /commentary/ excluded.
+    const reutersCommentary = await fetchOgText(
+      fetchImpl as never,
+      'https://www.reuters.com/commentary/column',
+    );
+    expect(reutersCommentary).toBeNull();
+    expect(fetchImpl).not.toHaveBeenCalled();
+    // Guardian /commentisfree/ excluded.
+    const guardianCommentisfree = await fetchOgText(
+      fetchImpl as never,
+      'https://www.theguardian.com/commentisfree/column',
+    );
+    expect(guardianCommentisfree).toBeNull();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('rejects a redirect from a news URL to an opinion-path URL on the same outlet', async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response('', {
+          status: 302,
+          headers: { location: 'https://www.nytimes.com/opinion/column.html' },
+        }),
+    );
+    const result = await fetchOgText(
+      fetchImpl as never,
+      'https://www.nytimes.com/2026/us/politics/story',
+    );
+    expect(result).toBeNull();
+  });
+
+  // Round-1 reviewer MED 1 — readBodyText fallback branch must count
+  // BYTES, not UTF-16 code units. A CJK/emoji-heavy body can exceed
+  // the byte cap while its String .length is under.
+  it('readBodyText fallback branch rejects a body whose BYTE size exceeds the cap even if .length does not', async () => {
+    // Build a body that is < 2 MiB in UTF-16 code units but > 2 MiB in UTF-8 bytes.
+    // Each "🎯" is 1 code unit pair (surrogate) = 2 .length units but 4 UTF-8 bytes.
+    // 600_000 of them: .length = 1_200_000; bytes = 2_400_000 (> 2 MiB).
+    const emojiBody = '🎯'.repeat(600_000) + '<title>should-not-matter</title>';
+    // Response with no body property (triggers the fallback branch).
+    const noBodyResp = {
+      status: 200,
+      ok: true,
+      headers: new Headers(),
+      body: null,
+      async arrayBuffer() {
+        return new TextEncoder().encode(emojiBody).buffer;
+      },
+      async text() {
+        return emojiBody;
+      },
+    } as unknown as Response;
+    const fetchImpl = vi.fn(async () => noBodyResp);
+    const result = await fetchOgText(fetchImpl as never, 'https://apnews.com/x');
+    // The oversized body is rejected despite having a <title>.
+    expect(result).toBeNull();
+  });
 });
 
 describe('fetchFirstReadable — walks candidates until one succeeds', () => {

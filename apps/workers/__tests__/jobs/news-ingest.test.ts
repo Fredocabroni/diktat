@@ -1263,6 +1263,110 @@ describe('newsIngestHandler — happy path', () => {
     expect(msg).not.toContain('A'.repeat(65));
   });
 
+  // Round-1 reviewer MED 3 — the cross-tick cluster upsert must be
+  // atomic. Previously two Supabase calls (upsert then update) raced;
+  // now a single SECURITY DEFINER RPC does both with COALESCE on
+  // primary_url + best_news_url.
+  describe('upsertGdeltEventMention (round-1 MED 3 atomic RPC)', () => {
+    const { upsertGdeltEventMention } = __testing;
+
+    it('calls the upsert_gdelt_event_mention RPC with the mention payload', async () => {
+      const rpcCalls: Array<{ fn: string; args: Record<string, unknown> }> = [];
+      const supabase = {
+        rpc(fn: string, args: Record<string, unknown>) {
+          rpcCalls.push({ fn, args });
+          return Promise.resolve({ error: null });
+        },
+      };
+      const logger = buildLogger();
+      await upsertGdeltEventMention(
+        { supabase, logger, fetch: vi.fn() as never },
+        {
+          globalEventId: '1234',
+          eventTimeDate: '20261013170000',
+          url: 'https://apnews.com/story',
+          host: 'apnews.com',
+          evidenceTier: 'reputable',
+          outletLean: 'center',
+          outletGroup: 'center',
+          outletType: 'news',
+          isPaywallFreePreferred: true,
+        },
+      );
+      expect(rpcCalls).toHaveLength(1);
+      expect(rpcCalls[0]).toMatchObject({
+        fn: 'upsert_gdelt_event_mention',
+        args: {
+          p_global_event_id: '1234',
+          p_url: 'https://apnews.com/story',
+          p_host: 'apnews.com',
+          p_evidence_tier: 'reputable',
+          p_outlet_lean: 'center',
+          p_outlet_group: 'center',
+          p_outlet_type: 'news',
+          p_is_paywall_free_preferred: true,
+        },
+      });
+    });
+
+    it('nulls the outlet-triple when the mention is primary tier (no lean/group/type)', async () => {
+      const rpcCalls: Array<{ args: Record<string, unknown> }> = [];
+      const supabase = {
+        rpc(_fn: string, args: Record<string, unknown>) {
+          rpcCalls.push({ args });
+          return Promise.resolve({ error: null });
+        },
+      };
+      const logger = buildLogger();
+      await upsertGdeltEventMention(
+        { supabase, logger, fetch: vi.fn() as never },
+        {
+          globalEventId: '9',
+          eventTimeDate: '20261013170000',
+          url: 'https://www.congress.gov/bill/1',
+          host: 'congress.gov',
+          evidenceTier: 'primary',
+          isPaywallFreePreferred: false,
+        },
+      );
+      expect(rpcCalls[0]?.args).toMatchObject({
+        p_evidence_tier: 'primary',
+        p_outlet_lean: null,
+        p_outlet_group: null,
+        p_outlet_type: null,
+        p_is_paywall_free_preferred: false,
+      });
+    });
+
+    it('fire-and-forget: an RPC error is logged, not thrown', async () => {
+      const supabase = {
+        rpc() {
+          return Promise.resolve({ error: { message: 'db down' } });
+        },
+      };
+      const logger = buildLogger();
+      await expect(
+        upsertGdeltEventMention(
+          { supabase, logger, fetch: vi.fn() as never },
+          {
+            globalEventId: '7',
+            eventTimeDate: '20261013170000',
+            url: 'https://apnews.com/x',
+            host: 'apnews.com',
+            evidenceTier: 'reputable',
+            outletLean: 'center',
+            outletGroup: 'center',
+            outletType: 'news',
+            isPaywallFreePreferred: true,
+          },
+        ),
+      ).resolves.toBeUndefined();
+      expect(
+        logger.calls.find((c) => c.obj.event === 'news_ingest.gdelt_cluster_upsert_failed'),
+      ).toBeDefined();
+    });
+  });
+
   describe('errorChainMessage (test seam)', () => {
     const { errorChainMessage } = __testing;
 
