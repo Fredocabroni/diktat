@@ -7,7 +7,7 @@ A Gen Z political news + debate PWA. "TikTok meets Duolingo meets Reuters raised
 - Mobile-first PWA, Next.js 15 App Router, TypeScript strict everywhere.
 - Custodial wallets hide crypto. Users see USD.
 - AP-only prediction markets (Polymarket odds as data feed only).
-- Community + AI fact-checks. **Primary sources only — no MSM as truth source.**
+- Community + AI fact-checks. **Primary documents preferred. When no official primary document exists, a Drop may cite outlets on the reputable-tier allowlist (`packages/shared/src/news-outlets.ts`), subject to the S3 outlet-balance invariant (≥2 allowlisted outlets from ≥2 different lean-groups). Headlines are never the evidence; article text is. `MSM_BAN_LIST` still applies to every host that is not on the allowlist.**
 - One unified score (Arena Points). 12 tiers.
 - Ethical guardrails from `docs/ADDICTION_ARCHITECTURE.md` are absolute.
 
