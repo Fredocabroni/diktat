@@ -133,15 +133,27 @@ export async function fetchOgText(
       return null;
     }
     if (parsed.protocol !== 'https:') return null;
-    // Allowlist check — must resolve to one of the 30 outlets AND
-    // the URL path must NOT match any opinion / editorial / contributor
-    // prefix on that outlet. The second check closes PR #214 round-1
-    // reviewer MED 2 — a DB-sourced URL (`gdelt_event_cluster_outlet`)
-    // whose path begins with e.g. `/opinion/` would otherwise slip
-    // through the host-only allowlist and return og:title from a
-    // column rather than a news article.
+    // Allowlist check — three gates, all three must pass.
+    //   (a) `lookupOutlet` resolves the hostname against one of the
+    //       30 outlets (suffix-match for www. / subdomain tolerance).
+    //   (b) The *resolved* outlet's hostname must be an EXACT match
+    //       for `outlet.domain` or `www.<outlet.domain>` — not any
+    //       deeper subdomain. Closes PR #214 round-2 reviewer MED 7:
+    //       `lookupOutlet`'s suffix match admits
+    //       `evil.subdomain.cnn.com` → `cnn.com`, which an attacker
+    //       could reach via DNS wildcard / subdomain takeover and
+    //       serve crafted og:title. The suffix-match is appropriate
+    //       for `www.<x>` / `edition.<x>` normalisation inside
+    //       classifyUrl's broader check; here, where we're about to
+    //       fetch and consume the body as evidence, we require an
+    //       exact apex match.
+    //   (c) The outlet is news-type (commentary never carries evidence).
+    //   (d) The URL path does NOT match any opinion / editorial /
+    //       contributor prefix on that outlet (closes round-1 MED 2).
     const outlet = lookupOutlet(parsed.hostname);
     if (outlet === null) return null;
+    const normalizedHost = parsed.hostname.toLowerCase().replace(/^www\./, '');
+    if (normalizedHost !== outlet.domain) return null;
     if (outlet.type !== 'news') return null;
     if (isExcludedPath(outlet, parsed.toString())) return null;
 
@@ -246,30 +258,82 @@ async function readBodyText(response: Response, maxBytes: number): Promise<strin
   }
 }
 
-/** Prefer og:title; fall back to <title>. Both regexes are
- *  intentionally lenient (whitespace / quoting variants). */
+/** Max bytes of a single <meta ...> or <title ...> tag we're willing
+ *  to parse. Legit tags are a few hundred bytes; capping here bounds
+ *  the inner-regex work on a per-tag basis so a pathological body
+ *  can't push any one match toward quadratic behaviour. 4 KiB per tag
+ *  is wildly generous — real og:title values are tens of bytes. The
+ *  value is baked into the regex literals below (JS RegExp quantifier
+ *  bounds must be literal integers, not variables). */
+
+/** Two-stage, non-backtracking meta-tag parser.
+ *
+ *  Replaces the earlier `<meta[^>]+property...["']([^"']+)["']` single-
+ *  regex approach (closes PR #214 round-2 reviewer MED 9: nested
+ *  character-class alternation under JS regex engines can degrade to
+ *  O(n²) on crafted input where many partial matches of
+ *  `property\s*=\s*["']og:title["']` are abandoned mid-regex).
+ *
+ *  Stage 1: `<meta ... >` splitter. `[^>]*` on `<meta` only; no inner
+ *  back-tracking across the attribute space. A `g` flag + per-match
+ *  index advance guarantees linear scan over the body.
+ *
+ *  Stage 2: for each extracted tag (bounded at META_TAG_MAX_CHARS),
+ *  pull out two attribute values via simple non-nested regexes. These
+ *  work against the SMALL per-tag string, not the full body, so even
+ *  if an attribute regex has mild backtracking the work is bounded. */
 export function extractTitle(html: string): string | null {
-  const og = /<meta[^>]+property\s*=\s*["']og:title["'][^>]+content\s*=\s*["']([^"']+)["']/i.exec(
-    html,
-  );
-  if (og && og[1]) return decodeHtmlEntities(og[1].trim());
-  const t = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html);
+  const og = findMetaByAttr(html, 'property', 'og:title');
+  if (og !== null) return decodeHtmlEntities(og.trim());
+  // <title> fallback — the tag is small by convention; lazy content
+  // match on `[\s\S]*?` has no backtracking surface on a well-formed
+  // page. Cap after .exec() in case of a pathological unterminated tag.
+  const t = /<title[^>]*>([\s\S]{0,8192}?)<\/title>/i.exec(html);
   if (t && t[1]) return decodeHtmlEntities(t[1].trim());
   return null;
 }
 
-/** Prefer og:description; fall back to <meta name="description">. */
 export function extractDescription(html: string): string | null {
-  const og =
-    /<meta[^>]+property\s*=\s*["']og:description["'][^>]+content\s*=\s*["']([^"']+)["']/i.exec(
-      html,
-    );
-  if (og && og[1]) return decodeHtmlEntities(og[1].trim());
-  const d = /<meta[^>]+name\s*=\s*["']description["'][^>]+content\s*=\s*["']([^"']+)["']/i.exec(
-    html,
-  );
-  if (d && d[1]) return decodeHtmlEntities(d[1].trim());
+  const og = findMetaByAttr(html, 'property', 'og:description');
+  if (og !== null) return decodeHtmlEntities(og.trim());
+  const name = findMetaByAttr(html, 'name', 'description');
+  if (name !== null) return decodeHtmlEntities(name.trim());
   return null;
+}
+
+/** Walk every `<meta ...>` tag in the body (bounded by
+ *  META_TAG_MAX_CHARS each) and return the `content` attribute of
+ *  the first one whose `attrName="attrValue"` pair matches. Returns
+ *  null if no tag matches. */
+function findMetaByAttr(html: string, attrName: string, attrValue: string): string | null {
+  // Linear scan: match each <meta ...> opening-tag boundary. The
+  // inner `[^>]{0,META_TAG_MAX_CHARS}` is bounded, so the engine
+  // can't take super-linear time per match.
+  const metaIter = html.matchAll(/<meta([^>]{0,4096})>/gi);
+  for (const match of metaIter) {
+    const inside = match[1] ?? '';
+    // Attribute lookup inside the small tag body (max 4 KiB).
+    // Match `attrName = "attrValue"` or 'attrValue' — the three
+    // sub-regexes operate on the bounded `inside` string, so even if
+    // the attribute character class allows mild backtracking the
+    // work is bounded.
+    const nameRe = new RegExp(
+      `\\b${escapeRegex(attrName)}\\s*=\\s*(?:"${escapeRegex(attrValue)}"|'${escapeRegex(attrValue)}')`,
+      'i',
+    );
+    if (!nameRe.test(inside)) continue;
+    const contentMatch = /\bcontent\s*=\s*(?:"([^"]{0,4096})"|'([^']{0,4096})')/i.exec(inside);
+    if (!contentMatch) continue;
+    const value = contentMatch[1] ?? contentMatch[2] ?? '';
+    if (value.length === 0) continue;
+    return value;
+  }
+  return null;
+}
+
+/** Escape user-supplied text for safe literal use inside a RegExp. */
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 /** Minimal HTML entity decode — covers the five entities that commonly

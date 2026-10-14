@@ -803,7 +803,16 @@ export async function clusterGdeltMentions(
       const cls = classifyUrl(m.url);
       if (cls.allowed) {
         try {
-          const host = normalizeHost(new URL(m.url).hostname);
+          // Scheme-assert at the storage boundary, symmetric with the
+          // candidate-picking path below (closes PR #214 round-2
+          // reviewer MED 8: classifyUrl asserts https but the sink
+          // path previously relied on that single layer. The
+          // symmetric guard means a future classifyUrl refactor that
+          // loosens scheme strictness cannot silently open a stored-
+          // non-https URL path through the cluster table).
+          const parsed = requireHttpsUrl(m.url);
+          if (parsed === null) continue;
+          const host = normalizeHost(parsed.hostname);
           const isReputable = cls.role === 'reputable';
           await sink({
             globalEventId: m.globalEventId,

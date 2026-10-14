@@ -218,6 +218,70 @@ describe('fetchOgText — SSRF-safe single-URL fetch', () => {
     expect(result).toBeNull();
   });
 
+  // Round-2 reviewer MED 7 — host-exact-match. `lookupOutlet` admits
+  // suffix matches (edition.cnn.com → cnn.com), which is correct for
+  // classifyUrl's broader allowlist check, but UNSAFE at the fetch
+  // boundary where we're about to consume the body as evidence. A
+  // crafted deep subdomain (via DNS wildcard / subdomain takeover)
+  // must be rejected.
+  it('rejects a deep subdomain of a reputable host (round-2 MED 7)', async () => {
+    const fetchImpl = vi.fn();
+    const result = await fetchOgText(fetchImpl as never, 'https://evil.subdomain.cnn.com/story');
+    expect(result).toBeNull();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('accepts the apex host AND www.<apex>, rejects a deeper subdomain', async () => {
+    const html = `<title>ok</title>`;
+    const fetchImpl = vi.fn(async () => new Response(html, { status: 200 }));
+    // apex
+    expect(await fetchOgText(fetchImpl as never, 'https://cnn.com/politics/x')).not.toBeNull();
+    // www. (allowed per operator spec)
+    expect(await fetchOgText(fetchImpl as never, 'https://www.cnn.com/politics/x')).not.toBeNull();
+    // single subdomain beyond www (edition.cnn.com) — rejected
+    const edition = await fetchOgText(fetchImpl as never, 'https://edition.cnn.com/politics/x');
+    expect(edition).toBeNull();
+  });
+
+  it('rejects a redirect that lands on a deep subdomain of the same reputable host', async () => {
+    const fetchImpl = vi.fn(async (input: string | URL) => {
+      const url = String(input);
+      if (url === 'https://www.cnn.com/a') {
+        return new Response('', {
+          status: 302,
+          headers: { location: 'https://evil.subdomain.cnn.com/pwn' },
+        });
+      }
+      return new Response(`<title>should-not-serve</title>`, { status: 200 });
+    });
+    const result = await fetchOgText(fetchImpl as never, 'https://www.cnn.com/a');
+    expect(result).toBeNull();
+  });
+
+  // Round-2 reviewer MED 9 — extractTitle/Description must handle a
+  // 2 MiB input in bounded time. The non-backtracking two-stage parser
+  // walks each <meta> tag at most once per outer match + once per
+  // attribute search on a 4 KiB-bounded tag body.
+  it('extractTitle / extractDescription complete quickly on a pathological 2 MiB input (round-2 MED 9)', () => {
+    // 2 MiB of <meta attr="x"> with no og:title / og:description —
+    // the parser must walk every meta tag once but never backtrack.
+    const nonMatching = '<meta attr="x">'.repeat(130_000); // ~2 MiB
+    const start = Date.now();
+    expect(extractTitle(nonMatching)).toBeNull();
+    expect(extractDescription(nonMatching)).toBeNull();
+    const elapsed = Date.now() - start;
+    // Linear scan on 2 MiB with 15-char tag width = ~130 000 iterations.
+    // 1-second cap is wildly loose — a backtracking regex would blow past
+    // this on crafted input.
+    expect(elapsed).toBeLessThan(1000);
+  });
+
+  it('extractTitle still finds og:title in a worst-case body ending with it', () => {
+    const prefix = '<meta attr="x">'.repeat(50_000); // ~750 KiB of distraction
+    const html = `${prefix}<meta property="og:title" content="Final headline">`;
+    expect(extractTitle(html)).toBe('Final headline');
+  });
+
   // Round-1 reviewer MED 1 — readBodyText fallback branch must count
   // BYTES, not UTF-16 code units. A CJK/emoji-heavy body can exceed
   // the byte cap while its String .length is under.

@@ -33,15 +33,33 @@
 --   create public.gdelt_event_cluster_outlet — append-only, dedup
 --     across ticks via (global_event_id, host) composite PK.
 --
--- Down:
+-- Down (strict reversal order — functions that depend on enum / table
+-- types MUST be dropped BEFORE the types they reference, or the DROP
+-- TYPE statements fail with "cannot drop type X because function
+-- upsert_gdelt_event_mention depends on it"):
+--
+--   -- 1. Function that references the enum + table types.
+--   drop function if exists public.upsert_gdelt_event_mention(
+--     text, text, text, public.news_evidence_tier, text,
+--     public.news_outlet_group, public.news_outlet_type, boolean
+--   );
+--
+--   -- 2. Trigger + table drops (outlet first — FK references cluster).
+--   drop trigger if exists gdelt_event_cluster_set_updated_at
+--     on public.gdelt_event_cluster;
 --   drop table public.gdelt_event_cluster_outlet;
 --   drop table public.gdelt_event_cluster;
+--
+--   -- 3. Column drops on news_topics_candidates.
 --   alter table public.news_topics_candidates
 --     drop column evidence_tier,
 --     drop column outlet_lean,
 --     drop column outlet_group,
 --     drop column outlet_type,
 --     drop column global_event_id;
+--
+--   -- 4. source_category check-constraint narrowing — revert the
+--   --    widening by replacing the constraint back to the 11-value form.
 --   alter table public.news_topics_candidates
 --     drop constraint news_topics_candidates_source_category_check,
 --     add constraint news_topics_candidates_source_category_check check (
@@ -49,6 +67,9 @@
 --         'cdc_health','sec_filings','cbo_fiscal','scotus_judicial',
 --         'census_demographic','doj_legal','fed_monetary','state_election']::text[])
 --     );
+--
+--   -- 5. Enum drops — only safe AFTER the function + columns above
+--   --    have been dropped.
 --   drop type public.news_outlet_type;
 --   drop type public.news_outlet_group;
 --   drop type public.news_evidence_tier;
@@ -69,6 +90,14 @@
 --     are nullable except evidence_tier, which defaults to 'primary'.
 --     Code paths that previously inserted without stamping these
 --     columns continue to produce valid rows.
+
+-- =========================================================================
+-- Transaction wrapper — the Supabase CLI auto-wraps each file, but the
+-- explicit BEGIN/COMMIT pair makes the atomicity contract readable at
+-- the file level (schema-reviewer round-2 ask). COMMIT lands at EOF.
+-- =========================================================================
+
+begin;
 
 -- =========================================================================
 -- 1. Enums + source_category widening
@@ -176,7 +205,7 @@ comment on column public.news_topics_candidates.outlet_group is
 comment on column public.news_topics_candidates.outlet_type is
   'News vs commentary. Commentary counts for trend_score + the ≥2-group balance signal, but is NEVER the card link on a Drop.';
 comment on column public.news_topics_candidates.global_event_id is
-  'GDELT GLOBALEVENTID for the mention. Joins to public.gdelt_event_cluster for cross-tick accumulation + S3 balance eligibility.';
+  'GDELT GLOBALEVENTID for the mention. Joins to public.gdelt_event_cluster for cross-tick accumulation + S3 balance eligibility. NO FK by design (soft reference): news_topics_candidates rows persist indefinitely for audit, while gdelt_event_cluster rows are swept at 24h — a hard FK would either block the retention sweep or orphan audit rows. Downstream code treating this join as a left-join handles the cluster-not-found case explicitly.';
 
 -- =========================================================================
 -- 3. gdelt_event_cluster — rolling-24h aggregate, one row per GLOBALEVENTID
@@ -238,6 +267,17 @@ create index gdelt_event_cluster_drop_eligible_idx
 
 comment on table public.gdelt_event_cluster is
   'Rolling-24h aggregate of GDELT mentions per GLOBALEVENTID. Updated on every ingest tick that sees a mention of the event; retention sweep deletes rows older than 24h via ON DELETE CASCADE on the outlet table.';
+
+-- Auto-maintain updated_at on every row-level UPDATE. public.set_updated_at
+-- is the shared trigger function (first installed by migration
+-- 20260420090005 — see news_topics / predictions / fact_checks). The
+-- upsert_gdelt_event_mention RPC sets updated_at explicitly on every
+-- call, but routing it through this trigger makes the column drift-
+-- proof against any future direct UPDATE path (schema-reviewer round-2
+-- ask).
+create trigger gdelt_event_cluster_set_updated_at
+  before update on public.gdelt_event_cluster
+  for each row execute function public.set_updated_at();
 
 -- =========================================================================
 -- 4. gdelt_event_cluster_outlet — append-only, dedup across ticks
@@ -337,10 +377,15 @@ grant select on public.gdelt_event_cluster_outlet to authenticated;
 --
 -- SECURITY DEFINER so the workers service_role runs with the
 -- function's owner's privileges — no RLS to traverse. `set
--- search_path = ''` closes the search-path hijack vector. Executes
--- on authenticated + service_role so a future client-side caller
--- can only produce rows the function allows (and even then only
--- when granted explicitly).
+-- search_path = ''` closes the search-path hijack vector.
+--
+-- GRANTS: revoked from PUBLIC, granted EXECUTE to service_role ONLY.
+-- authenticated / anon have no execute privilege and cannot call this
+-- RPC via PostgREST. A future client-side caller would need an
+-- explicit `grant execute to authenticated` in a subsequent
+-- migration AND a server-side value-check at the function body (the
+-- current body trusts its arguments because its only caller is the
+-- workers process); do not grant to authenticated without re-reviewing.
 create or replace function public.upsert_gdelt_event_mention(
   p_global_event_id text,
   p_url text,
@@ -423,3 +468,5 @@ grant execute on function public.upsert_gdelt_event_mention(
 
 comment on function public.upsert_gdelt_event_mention is
   'Atomic cross-tick upsert for one GDELT mention. Called per allowed mention from the news-ingest workers process. COALESCE on primary_url / best_news_url preserves first-seen-wins URL stability under concurrent ticks (closes PR #214 round-1 MED 3). Outlet row insert uses ON CONFLICT DO NOTHING on the composite PK for cross-tick dedup.';
+
+commit;

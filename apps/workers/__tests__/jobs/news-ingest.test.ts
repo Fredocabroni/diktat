@@ -630,6 +630,36 @@ describe('clusterGdeltMentions — operator trend-score + primary-source rules',
     expect(await clusterGdeltMentions([])).toEqual([]);
   });
 
+  // Round-2 reviewer MED 8 — GDELT sink applies requireHttpsUrl
+  // symmetrically with the candidate-picking path. A non-https URL
+  // that somehow slipped past classifyUrl must not reach the sink.
+  it('gdeltMentionSink rejects a non-https URL before invoking the sink (round-2 MED 8)', async () => {
+    const sinkCalls: unknown[] = [];
+    const sinks = {
+      gdeltMentionSink: async (payload: unknown) => {
+        sinkCalls.push(payload);
+      },
+    };
+    // Craft a mention whose classifyUrl would have thrown — but if a
+    // future classifyUrl loosening ever lets http:// through, the
+    // sink path's requireHttpsUrl re-check keeps the storage boundary
+    // closed. We can't directly test "classifyUrl loosened" from here;
+    // instead we assert that a known-invalid URL (file:) never reaches
+    // the sink even if classifyUrl ever misclassified it. The current
+    // classifyUrl correctly rejects file:, so the sink is never called
+    // for that URL today — which is the test contract.
+    await clusterGdeltMentions(
+      [
+        m({ eventId: 'X', domain: 'congress.gov', url: 'file:///etc/passwd' }),
+        m({ eventId: 'X', domain: 'congress.gov', url: 'https://www.congress.gov/ok' }),
+      ],
+      sinks,
+    );
+    // Only the valid https URL should reach the sink.
+    expect(sinkCalls).toHaveLength(1);
+    expect((sinkCalls[0] as { url: string }).url).toBe('https://www.congress.gov/ok');
+  });
+
   // S1+S3 — the sink fires per allowed mention (primary + reputable).
   it('invokes gdeltMentionSink for every allowed mention (not disallowed)', async () => {
     const sinkCalls: unknown[] = [];
