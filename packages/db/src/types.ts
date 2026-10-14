@@ -592,6 +592,7 @@ export type Database = {
       }
       gdelt_event_cluster_outlet: {
         Row: {
+          created_at: string
           first_seen_at: string
           global_event_id: string
           host: string
@@ -601,6 +602,7 @@ export type Database = {
           url: string
         }
         Insert: {
+          created_at?: string
           first_seen_at?: string
           global_event_id: string
           host: string
@@ -610,6 +612,7 @@ export type Database = {
           url: string
         }
         Update: {
+          created_at?: string
           first_seen_at?: string
           global_event_id?: string
           host?: string

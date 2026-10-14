@@ -33,10 +33,10 @@
 --   create public.gdelt_event_cluster_outlet — append-only, dedup
 --     across ticks via (global_event_id, host) composite PK.
 --
--- Down (strict reversal order — functions that depend on enum / table
+-- Down: strict reversal order — functions that depend on enum / table
 -- types MUST be dropped BEFORE the types they reference, or the DROP
 -- TYPE statements fail with "cannot drop type X because function
--- upsert_gdelt_event_mention depends on it"):
+-- upsert_gdelt_event_mention depends on it":
 --
 --   -- 1. Function that references the enum + table types.
 --   drop function if exists public.upsert_gdelt_event_mention(
@@ -296,6 +296,13 @@ create table public.gdelt_event_cluster_outlet (
   outlet_type public.news_outlet_type,
 
   url text not null,
+  -- `created_at`: canonical audit timestamp present on every new
+  -- table per the schema-reviewer checklist. The outlet table is
+  -- append-only (composite PK + `on conflict do nothing` upsert
+  -- means a row never UPDATEs after insert), so `created_at` and
+  -- `first_seen_at` carry the same value — the former is the
+  -- audit-contract column, the latter is the domain-contract one.
+  created_at timestamptz not null default now(),
   first_seen_at timestamptz not null default now(),
 
   -- Composite PK: cross-tick dedup is "ON CONFLICT DO NOTHING" on
