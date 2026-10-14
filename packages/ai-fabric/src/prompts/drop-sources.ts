@@ -23,6 +23,14 @@
 // touching one and not the other are a contract drift and the
 // neutrality-auditor will flag them.
 
+import {
+  isExcludedPath,
+  lookupOutlet,
+  type OutletGroup,
+  type OutletLean,
+  type OutletType,
+} from '@diktat/shared/news-outlets';
+
 /**
  * The eleven source-category buckets — schema-side CHECK on
  * news_topics_candidates.source_category enforces these exact values.
@@ -42,6 +50,13 @@ export const SOURCE_CATEGORIES = [
   'doj_legal',
   'fed_monetary',
   'state_election',
+  // 'news' is the catch-all category for S1-tier='reputable' outlets
+  // (CNN, NYT, WaPo, WSJ, Reuters, AP, …). Reputable-tier candidates
+  // don't carry a topical primary-source bucket; the structural signal
+  // is `evidence_tier`. The schema CHECK on
+  // news_topics_candidates.source_category admits 'news' per migration
+  // 20261016000000.
+  'news',
 ] as const;
 export type SourceCategory = (typeof SOURCE_CATEGORIES)[number];
 
@@ -123,25 +138,35 @@ export const PRIMARY_ALLOW_LIST: ReadonlyArray<HostPattern> = [
 ];
 
 /**
- * BAN list — mirrors fact-check.ts NOT TRUTH SOURCES list verbatim.
- * Hosts here MAY appear in news_topics.additional_sources with role
- * 'framing', but MUST NEVER populate primary_source_url. Enforced by
- * classifyUrl() returning { allowed: false } for any matching host.
+ * BAN list — mirrors fact-check.ts NOT TRUTH SOURCES list verbatim,
+ * MINUS the outlets that landed in the S1+S3 reputable-tier allowlist
+ * (packages/shared/src/news-outlets.ts). As of migration 20261016000000:
+ * CNN, NYT, Washington Post, and WSJ have been removed from this
+ * ban list — they are now reputable-tier evidence sources on Drops
+ * with no primary document, gated by the S3 ≥2-groups-of-3 outlet-
+ * balance guard. The MSM-ban non-negotiable is REPLACED by the
+ * tier+balance invariant (operator decision 2026-10-13).
+ *
+ * Hosts STILL on this list are either (a) opinion-first with factual
+ * ratings below the 'Mostly Factual' floor, OR (b) not approved for
+ * the reputable-tier allowlist by the operator. They remain usable
+ * ONLY as role='framing' (additional context), never as evidence.
+ * Enforced by classifyUrl() returning { allowed: false } for any
+ * matching host.
  *
  * Per the §1 contract: "they can be referenced as framing ('here's
  * how [outlet] framed it') but never as truth source."
  */
 export const MSM_BAN_LIST: ReadonlyArray<string> = [
-  // ABC list from fact-check.ts:35-37 — CNN, Fox, MSNBC, NYT, WaPo,
-  // WSJ, HuffPost, Daily Wire, Breitbart, Jacobin
-  'cnn.com',
+  // Hosts REMOVED by S1+S3 (now reputable-tier via news-outlets.ts):
+  //   cnn.com, nytimes.com, washingtonpost.com, wsj.com
+  //
+  // Hosts STILL banned (either MBFC-mixed, operator-rejected, or
+  // opinion-first with no factual-rating floor pass):
   'foxnews.com',
   'fox.com',
   'foxbusiness.com',
   'msnbc.com',
-  'nytimes.com',
-  'washingtonpost.com',
-  'wsj.com',
   'huffpost.com',
   'huffingtonpost.com',
   'dailywire.com',
@@ -151,21 +176,35 @@ export const MSM_BAN_LIST: ReadonlyArray<string> = [
 ];
 
 /**
- * Classify a URL against the host registries. Three outcomes:
+ * Classify a URL against the host registries. Four allowed/disallowed
+ * outcomes:
  *
  *   - allowed=true, role='primary'    — host is on the PRIMARY allow-
- *                                       list. Can populate
- *                                       primary_source_url.
+ *                                       list (.gov, courts, c-span).
+ *                                       Can populate primary_source_url.
+ *                                       evidence_tier='primary'.
+ *   - allowed=true, role='reputable'  — host is in the S1+S3 reputable-
+ *                                       tier allowlist
+ *                                       (packages/shared/src/news-outlets.ts),
+ *                                       AND the URL path is NOT an
+ *                                       excluded opinion/editorial
+ *                                       prefix. evidence_tier='reputable'
+ *                                       and the caller receives
+ *                                       outlet_lean/group/type for the
+ *                                       S3 balance check at Drop time.
  *   - allowed=false, role='framing'   — host is on the MSM ban-list.
  *                                       MAY appear in
  *                                       additional_sources only.
- *   - allowed=false, role='rejected'  — host is on neither list.
- *                                       Drop pipeline ignores entirely
- *                                       (V1 behavior — strict primary-
- *                                       source posture). A future
- *                                       'neutral' bucket (e.g. AP,
- *                                       Reuters wire) would need an
- *                                       explicit founder call to add.
+ *   - allowed=false, role='rejected'  — host is on neither list, OR
+ *                                       host IS reputable but the URL
+ *                                       path matches an opinion /
+ *                                       editorial / contributor prefix.
+ *                                       Drop pipeline ignores entirely.
+ *
+ * Opinion-path exclusion: a URL like `https://www.nytimes.com/opinion/x`
+ * matches the reputable-host allowlist but hits NYT's `exclude_prefixes`
+ * = ['/opinion/', '/live/opinion/']. classifyUrl returns rejected for
+ * those — commentary is never evidence on a Drop.
  *
  * Used by the news_ingest handler to gate each candidate URL before
  * it lands in news_topics_candidates. Reject reasons are stamped into
@@ -175,8 +214,19 @@ export type UrlClassification =
   | {
       readonly allowed: true;
       readonly role: 'primary';
+      readonly evidence_tier: 'primary' | 'direct';
       readonly category: SourceCategory;
       readonly host: string;
+    }
+  | {
+      readonly allowed: true;
+      readonly role: 'reputable';
+      readonly evidence_tier: 'reputable';
+      readonly category: SourceCategory;
+      readonly host: string;
+      readonly outlet_lean: OutletLean;
+      readonly outlet_group: OutletGroup;
+      readonly outlet_type: OutletType;
     }
   | { readonly allowed: false; readonly role: 'framing'; readonly host: string }
   | { readonly allowed: false; readonly role: 'rejected'; readonly host: string }
@@ -198,14 +248,48 @@ export function classifyUrl(rawUrl: string): UrlClassification {
 
   const host = normalizeHost(url.hostname);
 
-  if (matchesAnySuffix(host, MSM_BAN_LIST)) {
-    return { allowed: false, role: 'framing', host };
-  }
-
+  // Primary allowlist wins over everything (operator contract — primary
+  // tier is NEVER swapped for a reputable alternative, even if a .gov
+  // host were somehow also in the reputable list).
   for (const pat of PRIMARY_ALLOW_LIST) {
     if (hostMatchesSuffix(host, pat.hostSuffix)) {
-      return { allowed: true, role: 'primary', category: pat.category, host };
+      return {
+        allowed: true,
+        role: 'primary',
+        evidence_tier: 'primary',
+        category: pat.category,
+        host,
+      };
     }
+  }
+
+  // Reputable-tier (S1+S3). The news-outlets allowlist is the second-
+  // layer evidence source for Drops with no primary document. Opinion-
+  // path exclusion lives on each outlet entry; a matching exclude_prefix
+  // demotes the row to rejected (never evidence).
+  const outlet = lookupOutlet(host);
+  if (outlet !== null) {
+    if (isExcludedPath(outlet, rawUrl)) {
+      return { allowed: false, role: 'rejected', host };
+    }
+    return {
+      allowed: true,
+      role: 'reputable',
+      evidence_tier: 'reputable',
+      category: 'news',
+      host,
+      outlet_lean: outlet.lean,
+      outlet_group: outlet.group,
+      outlet_type: outlet.type,
+    };
+  }
+
+  // MSM ban-list — hosts explicitly flagged for framing-only use. Falls
+  // AFTER the reputable check so an outlet that lands on both lists
+  // (shouldn't happen post-migration-20261016000000, but defensive)
+  // prefers reputable.
+  if (matchesAnySuffix(host, MSM_BAN_LIST)) {
+    return { allowed: false, role: 'framing', host };
   }
 
   return { allowed: false, role: 'rejected', host };

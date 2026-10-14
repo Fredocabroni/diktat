@@ -30,6 +30,7 @@ import { unzipSync } from 'fflate';
 import Parser from 'rss-parser';
 
 import { classifyUrl, normalizeHost, type SourceCategory } from '@diktat/ai-fabric';
+import { PAYWALL_FREE_PREFERRED_HOSTS } from '@diktat/shared/news-outlets';
 
 import { loadEnv, type Env } from '../env.js';
 import type { JobHandler } from './scheduler.js';
@@ -57,6 +58,56 @@ export interface CandidateInput {
    *  via migration 20261014000000. news-dedup-rank will bias
    *  rank_score on this in a follow-up PR. */
   readonly trend_score?: number | null;
+  /** S1 evidence tier (migration 20261016000000). Defaults to
+   *  'primary' at the DB level; adapters emitting reputable-tier
+   *  candidates (GDELT after S1+S3) stamp 'reputable' here. */
+  readonly evidence_tier?: 'primary' | 'direct' | 'reputable';
+  /** AllSides v9 lean, present only when evidence_tier='reputable'. */
+  readonly outlet_lean?: 'left' | 'lean-left' | 'center' | 'lean-right' | 'right' | null;
+  /** 3-group collapse per operator spec; present only when
+   *  evidence_tier='reputable'. */
+  readonly outlet_group?: 'left' | 'center' | 'right' | null;
+  /** News vs commentary. Commentary counts for trend_score + the S3
+   *  balance signal, but is NEVER the card link on a Drop. Present
+   *  only when evidence_tier='reputable'. */
+  readonly outlet_type?: 'news' | 'commentary' | null;
+  /** GDELT GLOBALEVENTID (joins to public.gdelt_event_cluster). Null
+   *  for RSS adapters. */
+  readonly global_event_id?: string | null;
+}
+
+/** Side-effect sinks the handler passes down to specific adapters.
+ *  Optional per field — adapters that don't need a given sink leave
+ *  it undefined (RSS adapters today, Grok tomorrow). The GDELT
+ *  adapter uses `gdeltMentionSink` to feed the rolling-24h cluster
+ *  state (public.gdelt_event_cluster + outlet) one mention at a time.
+ *
+ *  Keeping sinks on a dedicated parameter (rather than threading
+ *  Supabase through the adapter contract) preserves the test seam —
+ *  tests pass a vi.fn and verify the exact payload shape without
+ *  needing a Supabase mock. */
+export interface AdapterSinks {
+  readonly gdeltMentionSink?: (m: GdeltMentionUpsert) => Promise<void>;
+}
+
+/** The per-mention payload the GDELT adapter emits to the cluster
+ *  sink. Shape mirrors the gdelt_event_cluster + outlet columns the
+ *  handler upserts. */
+export interface GdeltMentionUpsert {
+  readonly globalEventId: string;
+  /** GDELT 2.0 EventTimeDate — `yyyyMMddHHmmss` UTC. */
+  readonly eventTimeDate: string;
+  readonly url: string;
+  readonly host: string;
+  readonly evidenceTier: 'primary' | 'direct' | 'reputable';
+  /** Present only when evidenceTier='reputable'. */
+  readonly outletLean?: 'left' | 'lean-left' | 'center' | 'lean-right' | 'right';
+  readonly outletGroup?: 'left' | 'center' | 'right';
+  readonly outletType?: 'news' | 'commentary';
+  /** True when the host is in PAYWALL_FREE_PREFERRED_HOSTS (AP /
+   *  Reuters / NPR / BBC / Axios / The Hill). Drop-publish uses this
+   *  flag to pick the "best news URL" for the lazy text fetch. */
+  readonly isPaywallFreePreferred: boolean;
 }
 
 /** Per-source adapter. Receives the fetch impl AND the validated Env
@@ -72,11 +123,19 @@ export interface CandidateInput {
  *  toggle an adapter's feature flag without the Zod schema seeing
  *  the new value, and a future refactor cannot silently drop the
  *  gate because the gate variable is a function parameter, not a
- *  module-scope `process.env` read. */
+ *  module-scope `process.env` read.
+ *
+ *  `sinks` is optional — pre-S1+S3 RSS adapters never set it. The
+ *  GDELT adapter uses `sinks.gdeltMentionSink` for cross-tick
+ *  cluster accumulation (public.gdelt_event_cluster + outlet). */
 export interface NewsIngestAdapter {
   readonly name: string;
   readonly defaultCategory: SourceCategory;
-  fetch(fetchImpl: typeof globalThis.fetch, env: Env): Promise<CandidateInput[]>;
+  fetch(
+    fetchImpl: typeof globalThis.fetch,
+    env: Env,
+    sinks?: AdapterSinks,
+  ): Promise<CandidateInput[]>;
 }
 
 /** Hard cap on RSS feed body size — guards against a hostile or
@@ -727,10 +786,52 @@ export function humanizeUrlSlug(url: string, fallbackHost: string, fallbackId: s
  *  the domain field reliable enough as a trending signal. If this
  *  ever changes, revisit by switching to a primary-only count AND
  *  lowering GDELT_MIN_TREND_SCORE to 1 so the Drop pool doesn't shrink. */
-export function clusterGdeltMentions(mentions: GdeltMention[]): CandidateInput[] {
+export async function clusterGdeltMentions(
+  mentions: GdeltMention[],
+  sinks?: AdapterSinks,
+): Promise<CandidateInput[]> {
   type Group = { readonly domains: Set<string>; readonly rows: GdeltMention[] };
   const groups = new Map<string, Group>();
+  const sink = sinks?.gdeltMentionSink;
   for (const m of mentions) {
+    // Feed the cluster-upsert sink for every ALLOWED mention. Classify
+    // once; use the result below. This propagates to the handler's
+    // Supabase upsert of gdelt_event_cluster + outlet (migration
+    // 20261016000000). Non-allowed mentions are not sunk — they would
+    // never be eligible for the Drop pool anyway.
+    if (sink) {
+      const cls = classifyUrl(m.url);
+      if (cls.allowed) {
+        try {
+          // Scheme-assert at the storage boundary, symmetric with the
+          // candidate-picking path below (closes PR #214 round-2
+          // reviewer MED 8: classifyUrl asserts https but the sink
+          // path previously relied on that single layer. The
+          // symmetric guard means a future classifyUrl refactor that
+          // loosens scheme strictness cannot silently open a stored-
+          // non-https URL path through the cluster table).
+          const parsed = requireHttpsUrl(m.url);
+          if (parsed === null) continue;
+          const host = normalizeHost(parsed.hostname);
+          const isReputable = cls.role === 'reputable';
+          await sink({
+            globalEventId: m.globalEventId,
+            eventTimeDate: m.eventTimeDate,
+            url: m.url,
+            host,
+            evidenceTier: cls.evidence_tier,
+            outletLean: isReputable ? cls.outlet_lean : undefined,
+            outletGroup: isReputable ? cls.outlet_group : undefined,
+            outletType: isReputable ? cls.outlet_type : undefined,
+            isPaywallFreePreferred: PAYWALL_FREE_PREFERRED_HOSTS.includes(host),
+          });
+        } catch {
+          // URL parse / sink throw → fire-and-forget; cluster upsert
+          // is observability + Drop-pool enrichment, not critical path.
+        }
+      }
+    }
+
     const existing = groups.get(m.globalEventId);
     if (existing) {
       existing.domains.add(m.sourceName.toLowerCase());
@@ -747,46 +848,72 @@ export function clusterGdeltMentions(mentions: GdeltMention[]): CandidateInput[]
     const trendScore = group.domains.size;
     if (trendScore < GDELT_MIN_TREND_SCORE) continue;
 
-    let primary: GdeltMention | null = null;
-    let primaryClassification: ReturnType<typeof classifyUrl> | null = null;
+    // Pick the best-tier allowed mention from this event. Priority:
+    //   1. primary / direct (tier='primary' from classifyUrl)
+    //   2. reputable (tier='reputable') — S1+S3 widening
+    // Everything else is skipped. (Non-allowed URLs don't reach the
+    // handler; the handler would also reject them, but filtering here
+    // keeps the adapter output tight.)
+    let picked: GdeltMention | null = null;
+    let pickedClassification: ReturnType<typeof classifyUrl> | null = null;
+    // First pass: primary.
     for (const m of group.rows) {
       const classification = classifyUrl(m.url);
       if (classification.allowed && classification.role === 'primary') {
-        primary = m;
-        primaryClassification = classification;
+        picked = m;
+        pickedClassification = classification;
         break;
       }
     }
-    if (!primary || primaryClassification === null) continue;
-    if (!primaryClassification.allowed || primaryClassification.role !== 'primary') continue;
+    // Second pass: reputable fallback.
+    if (picked === null) {
+      for (const m of group.rows) {
+        const classification = classifyUrl(m.url);
+        if (classification.allowed && classification.role === 'reputable') {
+          picked = m;
+          pickedClassification = classification;
+          break;
+        }
+      }
+    }
+    if (!picked || pickedClassification === null) continue;
+    if (!pickedClassification.allowed) continue;
 
-    // Length caps BEFORE the scheme-assert URL parse — a hostile upstream
-    // could ship a 100 KB URL string that passes classifyUrl's hostname
-    // suffix match but inflates index + TOAST storage.
-    if (primary.url.length > INGEST_MAX_URL_CHARS) continue;
-
-    // Scheme assertion (security-reviewer PR #201 round 3 MED 7.2):
-    // `classifyUrl` currently rejects non-https schemes at its own
-    // first gate, but relying on that single layer couples a storage-
-    // boundary invariant to the host-classifier's internals.
-    const parsedUrl = requireHttpsUrl(primary.url);
+    // Length cap BEFORE the scheme-assert URL parse.
+    if (picked.url.length > INGEST_MAX_URL_CHARS) continue;
+    const parsedUrl = requireHttpsUrl(picked.url);
     if (parsedUrl === null) continue;
     const host = normalizeHost(parsedUrl.hostname);
 
-    const title = humanizeUrlSlug(primary.url, host, eventId);
+    const title = humanizeUrlSlug(picked.url, host, eventId);
 
+    // Narrow the classification shape for TS: only 'reputable' carries
+    // the outlet triple. The pickedClassification.role check already
+    // narrowed to the allowed-true union above.
+    const outletLean =
+      pickedClassification.role === 'reputable' ? pickedClassification.outlet_lean : null;
+    const outletGroup =
+      pickedClassification.role === 'reputable' ? pickedClassification.outlet_group : null;
+    const outletType =
+      pickedClassification.role === 'reputable' ? pickedClassification.outlet_type : null;
     out.push({
       source_provider: 'gdelt',
-      source_category: primaryClassification.category,
+      source_category: pickedClassification.category,
       source_title: title,
-      source_url: primary.url,
+      source_url: picked.url,
       source_host: host,
-      source_published_at: parseGdeltMentionsDate(primary.eventTimeDate),
+      source_published_at: parseGdeltMentionsDate(picked.eventTimeDate),
       // Legacy prefix kept so a downstream renderer reading `summary`
       // sees the trend context (same shape as the pre-rewrite output).
       summary: `[trend=${trendScore}] ${group.rows.length} mention(s) across ${trendScore} outlet(s).`,
-      dedup_url_canon: canonicalizeUrl(primary.url),
+      dedup_url_canon: canonicalizeUrl(picked.url),
       trend_score: trendScore,
+      // S1+S3 stamps.
+      evidence_tier: pickedClassification.evidence_tier,
+      outlet_lean: outletLean,
+      outlet_group: outletGroup,
+      outlet_type: outletType,
+      global_event_id: eventId,
     });
   }
 
@@ -836,7 +963,7 @@ let gdeltLastFetchAt = 0;
 export const gdeltAdapter: NewsIngestAdapter = {
   name: 'gdelt',
   defaultCategory: 'congress', // overridden per-article by classifyUrl.
-  async fetch(fetchImpl, env) {
+  async fetch(fetchImpl, env, sinks) {
     if (!env.GDELT_ENABLED) return [];
     const now = Date.now();
     if (now - gdeltLastFetchAt < GDELT_MIN_FETCH_INTERVAL_MS) {
@@ -844,7 +971,7 @@ export const gdeltAdapter: NewsIngestAdapter = {
     }
     gdeltLastFetchAt = now;
     const mentions = await fetchGdeltMentionsLatest(fetchImpl);
-    return clusterGdeltMentions(mentions);
+    return clusterGdeltMentions(mentions, sinks);
   },
 };
 
@@ -1048,8 +1175,15 @@ async function ingestOne(
   deps: Parameters<JobHandler>[1],
 ): Promise<IngestSummary> {
   let candidates: CandidateInput[];
+  // Per-adapter sinks. The GDELT adapter uses `gdeltMentionSink` to
+  // feed the rolling-24h cluster state (public.gdelt_event_cluster +
+  // outlet) one mention at a time. RSS adapters don't use any sink.
+  const sinks: AdapterSinks = {
+    gdeltMentionSink:
+      adapter.name === 'gdelt' ? (m) => upsertGdeltEventMention(deps, m) : undefined,
+  };
   try {
-    candidates = await adapter.fetch(fetchImpl, env);
+    candidates = await adapter.fetch(fetchImpl, env, sinks);
   } catch (err) {
     // Surface the whole cause chain, not just `err.message`. Undici's
     // `fetch failed` message is useless without the inner cause.
@@ -1255,6 +1389,51 @@ async function upsertAdapterHealth(
   }
 }
 
+/** Upsert one GDELT mention into the rolling-24h cluster state
+ *  (public.gdelt_event_cluster + public.gdelt_event_cluster_outlet)
+ *  via the atomic SECURITY DEFINER RPC `upsert_gdelt_event_mention`.
+ *
+ *  The RPC does BOTH writes in a single SQL statement set with
+ *  ON CONFLICT DO UPDATE and COALESCE on `primary_url` /
+ *  `best_news_url` so the first-seen value wins under concurrent
+ *  ticks. Closes PR #214 round-1 reviewer MED 3 (TOCTOU race
+ *  between a two-step upsert+update pattern).
+ *
+ *  Fire-and-forget on error. The cluster state is observability +
+ *  Drop-pool enrichment, not the critical path. A failed call logs
+ *  but never breaks the ingest tick. */
+async function upsertGdeltEventMention(
+  deps: Parameters<JobHandler>[1],
+  m: GdeltMentionUpsert,
+): Promise<void> {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { error } = await (deps.supabase as any).rpc('upsert_gdelt_event_mention', {
+      p_global_event_id: m.globalEventId,
+      p_url: m.url,
+      p_host: m.host,
+      p_evidence_tier: m.evidenceTier,
+      p_outlet_lean: m.outletLean ?? null,
+      p_outlet_group: m.outletGroup ?? null,
+      p_outlet_type: m.outletType ?? null,
+      p_is_paywall_free_preferred: m.isPaywallFreePreferred,
+    });
+    if (error) {
+      deps.logger.warn({
+        event: 'news_ingest.gdelt_cluster_upsert_failed',
+        global_event_id: m.globalEventId,
+        message: scrubMessage((error as { message?: string }).message ?? 'unknown'),
+      });
+    }
+  } catch (err) {
+    deps.logger.warn({
+      event: 'news_ingest.gdelt_cluster_upsert_threw',
+      global_event_id: m.globalEventId,
+      message: errorChainMessage(err),
+    });
+  }
+}
+
 /** Idempotent insert via ON CONFLICT(source_provider, source_url) DO
  *  NOTHING. Returns true if a new row was inserted, false if the
  *  unique constraint absorbed it. */
@@ -1278,6 +1457,15 @@ async function insertCandidate(
     // the distinct-outlet count. news-dedup-rank reads it in a
     // follow-up PR to bias rank_score.
     trend_score: c.trend_score ?? null,
+    // S1 label stamps (migration 20261016000000). evidence_tier
+    // defaults to 'primary' at the DB level; adapters pre-S1+S3 (RSS
+    // primary-source feeds) don't set it. GDELT adapter stamps
+    // 'reputable' or 'primary' depending on which URL it picked.
+    evidence_tier: c.evidence_tier ?? undefined,
+    outlet_lean: c.outlet_lean ?? null,
+    outlet_group: c.outlet_group ?? null,
+    outlet_type: c.outlet_type ?? null,
+    global_event_id: c.global_event_id ?? null,
     rejected_reason: rejectedReason,
   })) as { error: { code?: string; message: string } | null };
 
@@ -1325,6 +1513,7 @@ export const __testing = {
   requireHttpsUrl,
   resetGdeltRateLimitState,
   errorChainMessage,
+  upsertGdeltEventMention,
   INGEST_MAX_TITLE_CHARS,
   INGEST_MAX_URL_CHARS,
   GDELT_MIN_FETCH_INTERVAL_MS,

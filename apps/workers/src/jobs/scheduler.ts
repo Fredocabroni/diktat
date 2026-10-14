@@ -25,6 +25,7 @@ import { scrubMessage, type Alerter } from '@diktat/shared/alerts';
 
 import { dropPublishHandler } from './drop-publish.js';
 import { factCheckOrchestratorHandler } from './fact-check-orchestrator.js';
+import { gdeltEventRetentionHandler } from './gdelt-event-retention.js';
 import { localBoundarySweepHandler } from './local-boundary-sweep.js';
 import { newsDedupRankHandler } from './news-dedup-rank.js';
 import { buildNewsIngestHandler } from './news-ingest.js';
@@ -397,6 +398,7 @@ export const defaultHandlers: Readonly<Record<string, JobHandler>> = Object.free
   news_ingest: buildNewsIngestHandler(),
   news_dedup_rank: newsDedupRankHandler,
   drop_publish: dropPublishHandler,
+  gdelt_event_retention: gdeltEventRetentionHandler,
 });
 
 /** Build the runtime registry. The push_deliver handler is a factory because
