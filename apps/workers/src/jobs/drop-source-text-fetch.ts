@@ -306,21 +306,22 @@ export function extractDescription(html: string): string | null {
  *  the first one whose `attrName="attrValue"` pair matches. Returns
  *  null if no tag matches. */
 function findMetaByAttr(html: string, attrName: string, attrValue: string): string | null {
+  // Compile the attribute-match regex ONCE per call, not per matched
+  // meta tag. The earlier shape recompiled on every iteration (~390k
+  // compiles on the MED 9 pathological 2 MiB input) — PR #214 round-3
+  // CI timing failure. Attribute-lookup regex is bounded against the
+  // small 4 KiB tag body `inside`, so even if the character class
+  // allows mild backtracking the work is bounded.
+  const nameRe = new RegExp(
+    `\\b${escapeRegex(attrName)}\\s*=\\s*(?:"${escapeRegex(attrValue)}"|'${escapeRegex(attrValue)}')`,
+    'i',
+  );
   // Linear scan: match each <meta ...> opening-tag boundary. The
   // inner `[^>]{0,META_TAG_MAX_CHARS}` is bounded, so the engine
   // can't take super-linear time per match.
   const metaIter = html.matchAll(/<meta([^>]{0,4096})>/gi);
   for (const match of metaIter) {
     const inside = match[1] ?? '';
-    // Attribute lookup inside the small tag body (max 4 KiB).
-    // Match `attrName = "attrValue"` or 'attrValue' — the three
-    // sub-regexes operate on the bounded `inside` string, so even if
-    // the attribute character class allows mild backtracking the
-    // work is bounded.
-    const nameRe = new RegExp(
-      `\\b${escapeRegex(attrName)}\\s*=\\s*(?:"${escapeRegex(attrValue)}"|'${escapeRegex(attrValue)}')`,
-      'i',
-    );
     if (!nameRe.test(inside)) continue;
     const contentMatch = /\bcontent\s*=\s*(?:"([^"]{0,4096})"|'([^']{0,4096})')/i.exec(inside);
     if (!contentMatch) continue;
