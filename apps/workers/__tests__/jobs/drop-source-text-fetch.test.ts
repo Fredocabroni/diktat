@@ -57,6 +57,27 @@ describe('pickTextSources — operator priority order', () => {
     const picked = pickTextSources(outlets, 'https://apnews.com/story', 'apnews.com');
     expect(picked).toHaveLength(1);
   });
+
+  // GDELT stores BBC as `bbc.co.uk` far more often than `bbc.com`.
+  // Before the alias was added to PAYWALL_FREE_PREFERRED_HOSTS, a
+  // bbc.co.uk row fell through to the "remaining news" sweep and sat
+  // behind any non-preferred news outlet listed ahead of it.
+  it('prefers a bbc.co.uk outlet row over a non-preferred news host', () => {
+    const outlets = [
+      { url: 'https://www.nytimes.com/story', host: 'nytimes.com', outlet_type: 'news' as const },
+      { url: 'https://www.bbc.co.uk/news/x', host: 'bbc.co.uk', outlet_type: 'news' as const },
+    ];
+    const picked = pickTextSources(outlets, null, null);
+    expect(picked.map((p) => p.host)).toEqual(['bbc.co.uk', 'nytimes.com']);
+  });
+
+  it('accepts a bbc.co.uk bestNewsUrl as a preferred hint', () => {
+    const outlets = [
+      { url: 'https://www.nytimes.com/story', host: 'nytimes.com', outlet_type: 'news' as const },
+    ];
+    const picked = pickTextSources(outlets, 'https://www.bbc.co.uk/news/x', 'bbc.co.uk');
+    expect(picked[0]?.host).toBe('bbc.co.uk');
+  });
 });
 
 describe('extractTitle / extractDescription — meta-tag parser', () => {
@@ -87,6 +108,34 @@ describe('extractTitle / extractDescription — meta-tag parser', () => {
 
   it('returns null when no title present', () => {
     expect(extractTitle('<html></html>')).toBeNull();
+  });
+
+  // PR #226 security-reviewer MEDIUM 1: strip literal angle brackets
+  // after entity decoding so a crafted og:title can't carry raw < / >
+  // past the extractor. The LLM-rewrite output already bars angle
+  // brackets via SAFE_TEXT_RE; the fallback branch (empty rewrite →
+  // use source.title / source.summary verbatim) relied on the og text
+  // being clean. This test enforces the invariant at the extractor
+  // level so every downstream consumer of DropTextSource is covered.
+  it('strips literal angle brackets after entity decoding (MED 1)', () => {
+    // Encoded < / > that decode to raw characters in a potential
+    // attack payload.
+    const html =
+      '<html><head><meta property="og:title" content="&lt;img src=x onerror=alert(1)&gt;"/></head>';
+    const got = extractTitle(html);
+    expect(got).not.toContain('<');
+    expect(got).not.toContain('>');
+    // The non-bracket content survives.
+    expect(got).toBe('img src=x onerror=alert(1)');
+  });
+
+  it('strips literal angle brackets from og:description too', () => {
+    const html =
+      '<meta property="og:description" content="A story about &lt;hr&gt; tags and &lt;b&gt;bold&lt;/b&gt;"/>';
+    const got = extractDescription(html);
+    expect(got).not.toContain('<');
+    expect(got).not.toContain('>');
+    expect(got).toBe('A story about hr tags and bbold/b');
   });
 });
 

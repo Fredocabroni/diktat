@@ -10,9 +10,12 @@
 #
 # Outcome contract:
 #   exit 0 + stdout "ok"        — real review, verdict is PASS /
-#                                  APPROVE / NEEDS-USER-DECISION
+#                                  APPROVE
 #                                  (caller posts the body, check green).
-#   exit 0 + stdout "ok_block"  — real review ending in a BLOCK verdict
+#   exit 0 + stdout "ok_block"  — real review ending in a BLOCK or
+#                                  NEEDS-USER-DECISION verdict (a
+#                                  verdict that needs a human decision
+#                                  fails closed, same as BLOCK)
 #                                  (caller posts the body AND exits 1 so
 #                                  the check turns red; the hard rule
 #                                  "a BLOCK verdict counts as blocking
@@ -69,7 +72,9 @@
 #       PR #46 copy-linter body).
 #
 # Verdict classification — three channels, each tried in order,
-# BLOCK beats PASS beats ambiguous:
+# BLOCK beats PASS beats ambiguous. NEEDS-USER-DECISION is in the BLOCK
+# family in every channel (it was in the PASS family until 2026-10-14,
+# which let a "needs a human decision" verdict merge on a green check):
 #
 #   (A) Explicit single-line verdict:
 #         `[**##_]*(Overall )?Verdict[: ]*[**_]*(BLOCK|PASS|APPROVE|NEEDS-USER-DECISION)`
@@ -261,16 +266,18 @@ full_nonblank=$(awk 'NF' "$file")
 
 # --- Channel (A): explicit single-line verdict -------------------------
 # Match `(**|##|_)*(Overall )?Verdict[: ]*(**|_)*VALUE`. Case-insensitive.
-# BLOCK: original pattern from the prior script.
-if printf '%s\n' "$tail_body" | grep -iqE '^[[:space:]]*(\*\*|##? ?|_)*(overall[[:space:]]+)?verdict[[:space:]]*:?[[:space:]]*(\*\*|_)*[[:space:]]*BLOCK\b'; then
+# BLOCK family: BLOCK, plus NEEDS-USER-DECISION. A verdict that needs a
+# human decision must not merge on a green check, so it fails closed
+# exactly like BLOCK (operator decision 2026-10-14; matches the
+# addiction-auditor's own mapping "NEEDS-USER-DECISION → Verdict: BLOCK").
+if printf '%s\n' "$tail_body" | grep -iqE '^[[:space:]]*(\*\*|##? ?|_)*(overall[[:space:]]+)?verdict[[:space:]]*:?[[:space:]]*(\*\*|_)*[[:space:]]*(BLOCK|NEEDS-USER-DECISION)\b'; then
   explicit_block="yes"
 else
   explicit_block=""
 fi
-# PASS family — symmetric to the BLOCK channel. `APPROVE WITH NOTES`
-# matches `APPROVE\b` because `\b` is satisfied by the space after
-# APPROVE.
-if printf '%s\n' "$tail_body" | grep -iqE '^[[:space:]]*(\*\*|##? ?|_)*(overall[[:space:]]+)?verdict[[:space:]]*:?[[:space:]]*(\*\*|_)*[[:space:]]*(PASS|APPROVE|NEEDS-USER-DECISION)\b'; then
+# PASS family — PASS and APPROVE only. `APPROVE WITH NOTES` matches
+# `APPROVE\b` because `\b` is satisfied by the space after APPROVE.
+if printf '%s\n' "$tail_body" | grep -iqE '^[[:space:]]*(\*\*|##? ?|_)*(overall[[:space:]]+)?verdict[[:space:]]*:?[[:space:]]*(\*\*|_)*[[:space:]]*(PASS|APPROVE)\b'; then
   explicit_pass="yes"
 else
   explicit_pass=""
@@ -284,6 +291,9 @@ case "$trailing_line" in
   "BLOCK"|"BLOCK."|"**BLOCK**"|"**BLOCK**."|"__BLOCK__"|"__BLOCK__.")
     trailing_block="yes"
     ;;
+  "NEEDS-USER-DECISION"|"NEEDS-USER-DECISION."|"**NEEDS-USER-DECISION**"|"**NEEDS-USER-DECISION**."|"__NEEDS-USER-DECISION__"|"__NEEDS-USER-DECISION__.")
+    trailing_block="yes"
+    ;;
   *)
     trailing_block=""
     ;;
@@ -293,9 +303,6 @@ case "$trailing_line" in
     trailing_pass="yes"
     ;;
   "APPROVE"|"APPROVE."|"**APPROVE**"|"**APPROVE**."|"__APPROVE__"|"__APPROVE__.")
-    trailing_pass="yes"
-    ;;
-  "NEEDS-USER-DECISION"|"NEEDS-USER-DECISION."|"**NEEDS-USER-DECISION**"|"**NEEDS-USER-DECISION**.")
     trailing_pass="yes"
     ;;
   *)
@@ -339,7 +346,7 @@ multiline_block=$(printf '%s\n' "$full_nonblank_lower" | awk -v lookahead="$MULT
   }
   waiting > 0 {
     waiting--
-    if (match($0, /^[[:space:]]*(\*\*|_)*block([^[:alnum:]_]|$)/)) {
+    if (match($0, /^[[:space:]]*(\*\*|_)*(block|needs-user-decision)([^[:alnum:]_]|$)/)) {
       print "yes"
       exit
     }
@@ -353,7 +360,7 @@ multiline_pass=$(printf '%s\n' "$full_nonblank_lower" | awk -v lookahead="$MULTI
   }
   waiting > 0 {
     waiting--
-    if (match($0, /^[[:space:]]*(\*\*|_)*(pass|approve|needs-user-decision)([^[:alnum:]_]|$)/)) {
+    if (match($0, /^[[:space:]]*(\*\*|_)*(pass|approve)([^[:alnum:]_]|$)/)) {
       print "yes"
       exit
     }

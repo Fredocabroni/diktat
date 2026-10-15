@@ -25,9 +25,7 @@
 //   - All adapter fetches go through the injected fetch impl so tests
 //     can substitute without hitting the network.
 
-import type { Database } from '@diktat/db';
 import { scrubMessage } from '@diktat/shared/alerts';
-import type { SupabaseClient } from '@supabase/supabase-js';
 import { unzipSync } from 'fflate';
 import Parser from 'rss-parser';
 
@@ -256,15 +254,19 @@ async function fetchAndParseRss(
   if (!response.ok) {
     throw new Error(`news_ingest: feed ${feedUrl} returned ${response.status}`);
   }
-  const xml = await response.text();
-  // Bound the feed body. Primary-source RSS feeds are tens-to-hundreds
-  // of KB; >10MB is either compromised or a billion-laughs probe.
-  // security-reviewer ask, 2026-06-16.
-  if (xml.length > MAX_FEED_BYTES) {
+  // #218 MED C: enforce the body cap DURING the read, not after. The
+  // prior shape was `await response.text()` → check length → throw.
+  // A hostile server shipping a 1 GB payload would allocate the full
+  // string into memory before the length check tripped. Switch to
+  // the chunk-streaming reader (same shape used for the GDELT
+  // mentions.CSV.zip download) so the first chunk that would exceed
+  // the cap aborts the reader and throws.
+  const bytes = await readBodyAsBytesWithSizeCap(response, MAX_FEED_BYTES).catch((err: unknown) => {
     throw new Error(
-      `news_ingest: feed ${feedUrl} body ${xml.length} exceeds ${MAX_FEED_BYTES}B cap`,
+      `news_ingest: feed ${feedUrl} ${scrubMessage(err instanceof Error ? err.message : String(err))}`,
     );
-  }
+  });
+  const xml = new TextDecoder('utf-8').decode(bytes);
   // rss-parser accepts a raw XML string via parseString.
   const parser = new Parser();
   const feed = await parser.parseString(xml);
@@ -851,28 +853,86 @@ export async function clusterGdeltMentions(
     if (trendScore < GDELT_MIN_TREND_SCORE) continue;
 
     // Pick the best-tier allowed mention from this event. Priority:
-    //   1. primary / direct (tier='primary' from classifyUrl)
-    //   2. reputable (tier='reputable') — S1+S3 widening
-    // Everything else is skipped. (Non-allowed URLs don't reach the
-    // handler; the handler would also reject them, but filtering here
-    // keeps the adapter output tight.)
+    //   1. primary / direct (role='primary' from classifyUrl)
+    //   2. reputable NEWS-TYPE, in PAYWALL_FREE_PREFERRED_HOSTS order
+    //   3. any remaining reputable news-type (insertion order)
+    //   4. reputable commentary — last-resort fallback only
+    //
+    // Operator spec (2026-10-14): a reputable fallback must prefer a
+    // news-type outlet. The prior shape — "take the first reputable
+    // mention in GDELT's export order" — could promote a commentary
+    // mention to the candidate even when news-type mentions existed
+    // in the same cluster. The published Drop then had a commentary
+    // primary_source_url, which violates the §2 "primary sources,
+    // not op-eds" integrity contract. The commentary branch (step 4)
+    // stays because the end-to-end Drop-time S3 gate in SQL
+    // (migration 20261019000000) now excludes commentary candidates
+    // from Drop-eligibility — commentary at this layer only remains
+    // as an audit trail of the cluster's reputable spread.
+    // Non-allowed URLs don't reach the handler; the handler would
+    // also reject them, but filtering here keeps the adapter output
+    // tight.
     let picked: GdeltMention | null = null;
     let pickedClassification: ReturnType<typeof classifyUrl> | null = null;
-    // First pass: primary.
-    for (const m of group.rows) {
-      const classification = classifyUrl(m.url);
+    // Classify once per mention — classifyUrl walks the outlet
+    // allowlist, cheap but not free. We reuse the result across all
+    // four passes below.
+    const classified = group.rows.map((m) => ({
+      mention: m,
+      classification: classifyUrl(m.url),
+    }));
+    // Pass 1: primary.
+    for (const { mention, classification } of classified) {
       if (classification.allowed && classification.role === 'primary') {
-        picked = m;
+        picked = mention;
         pickedClassification = classification;
         break;
       }
     }
-    // Second pass: reputable fallback.
+    // Pass 2: reputable news-type in PAYWALL_FREE_PREFERRED_HOSTS order.
+    //   The host is derived from the classified URL (apex-match via
+    //   normalizeHost) so an alias like bbc.co.uk aligns with
+    //   PAYWALL_FREE_PREFERRED's `bbc.com` entry via `isApexHost`-
+    //   equivalent allowlist walk inside classifyUrl.
     if (picked === null) {
-      for (const m of group.rows) {
-        const classification = classifyUrl(m.url);
-        if (classification.allowed && classification.role === 'reputable') {
-          picked = m;
+      for (const preferredHost of PAYWALL_FREE_PREFERRED_HOSTS) {
+        for (const { mention, classification } of classified) {
+          if (!classification.allowed) continue;
+          if (classification.role !== 'reputable') continue;
+          if (classification.outlet_type !== 'news') continue;
+          const parsed = requireHttpsUrl(mention.url);
+          if (parsed === null) continue;
+          if (normalizeHost(parsed.hostname) !== preferredHost) continue;
+          picked = mention;
+          pickedClassification = classification;
+          break;
+        }
+        if (picked !== null) break;
+      }
+    }
+    // Pass 3: any remaining reputable news-type (insertion order).
+    if (picked === null) {
+      for (const { mention, classification } of classified) {
+        if (
+          classification.allowed &&
+          classification.role === 'reputable' &&
+          classification.outlet_type === 'news'
+        ) {
+          picked = mention;
+          pickedClassification = classification;
+          break;
+        }
+      }
+    }
+    // Pass 4: reputable commentary — last-resort fallback.
+    if (picked === null) {
+      for (const { mention, classification } of classified) {
+        if (
+          classification.allowed &&
+          classification.role === 'reputable' &&
+          classification.outlet_type === 'commentary'
+        ) {
+          picked = mention;
           pickedClassification = classification;
           break;
         }
@@ -940,7 +1000,19 @@ function requireHttpsUrl(raw: string): URL | null {
   } catch {
     return null;
   }
-  return u.protocol === 'https:' ? u : null;
+  if (u.protocol !== 'https:') return null;
+  // #215 LOW: reject URLs that carry credentials in the authority.
+  // `new URL('https://attacker.com@internal.svc/').hostname` is
+  // `internal.svc` — a URL parser treats the pre-`@` portion as
+  // credentials and routes to the post-`@` host, bypassing any
+  // name-based filter that inspected the raw prefix. The DB-side
+  // https CHECK (migration 20261018000000) also rejects `@` in the
+  // host char class, but that constraint fires at storage; this
+  // guard is the earliest storage boundary and keeps the credential-
+  // carrying URL from ever reaching the sink / RPC call. Defense in
+  // depth with the DB CHECK.
+  if (u.username !== '' || u.password !== '') return null;
+  return u;
 }
 
 /** Parse the GDELT Mentions 14-digit date format back to an ISO 8601
@@ -1090,20 +1162,13 @@ export function buildNewsIngestHandler(
  *  A read failure is swallowed with a debug log — observability must
  *  never crash the ingest tick. */
 async function warnStaleAdapters(deps: Parameters<JobHandler>[1]): Promise<void> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data, error } = (await (deps.supabase as any)
+  // Typed via the Database generic on ServiceClient (apps/workers/src/
+  // supabase.ts). The compiler now verifies the table name and the
+  // selected columns against packages/db/src/types.ts without an
+  // `as any` cast. Closes #218 MED B.
+  const { data, error } = await deps.supabase
     .from('news_adapter_health')
-    .select('adapter, last_success_at, last_fresh_insert_at, updated_at')) as {
-    data:
-      | {
-          adapter: string;
-          last_success_at: string | null;
-          last_fresh_insert_at: string | null;
-          updated_at: string;
-        }[]
-      | null;
-    error: { message: string } | null;
-  };
+    .select('adapter, last_success_at, last_fresh_insert_at, updated_at');
   if (error) {
     deps.logger.debug({
       event: 'news_ingest.health_read_failed',
@@ -1409,16 +1474,13 @@ async function upsertGdeltEventMention(
   m: GdeltMentionUpsert,
 ): Promise<void> {
   try {
-    // Narrow the untyped ServiceClient (apps/workers/src/supabase.ts
-    // exports SupabaseClient without the Database generic, so most
-    // workers call sites still rely on `as any`) to the generated-
-    // types-aware SupabaseClient<Database> for this one RPC. The
-    // compiler now verifies the function name, arg names, and arg
-    // types against packages/db/src/types.ts. Closes PR #214 push-5
-    // security-reviewer condition 3 (remove `as any` on the
-    // upsert_gdelt_event_mention RPC call using the generated types).
-    const typedClient = deps.supabase as unknown as SupabaseClient<Database>;
-    const { error } = await typedClient.rpc('upsert_gdelt_event_mention', {
+    // ServiceClient is now parameterized with `Database` at its source
+    // (apps/workers/src/supabase.ts) — the per-site `as unknown as
+    // SupabaseClient<Database>` double-cast #215 LOW 1 pointed at is
+    // gone. The compiler verifies the function name, arg names, and
+    // arg types against packages/db/src/types.ts at every call site
+    // without additional casts.
+    const { error } = await deps.supabase.rpc('upsert_gdelt_event_mention', {
       p_global_event_id: m.globalEventId,
       p_url: m.url,
       p_host: m.host,

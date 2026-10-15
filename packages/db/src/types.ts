@@ -490,60 +490,6 @@ export type Database = {
           },
         ]
       }
-      fact_checks: {
-        Row: {
-          claim: string
-          confidence: number | null
-          created_at: string
-          created_by_user_id: string | null
-          evidence: Json
-          id: string
-          provider: string | null
-          topic_id: string | null
-          updated_at: string
-          verdict: string
-        }
-        Insert: {
-          claim: string
-          confidence?: number | null
-          created_at?: string
-          created_by_user_id?: string | null
-          evidence?: Json
-          id?: string
-          provider?: string | null
-          topic_id?: string | null
-          updated_at?: string
-          verdict: string
-        }
-        Update: {
-          claim?: string
-          confidence?: number | null
-          created_at?: string
-          created_by_user_id?: string | null
-          evidence?: Json
-          id?: string
-          provider?: string | null
-          topic_id?: string | null
-          updated_at?: string
-          verdict?: string
-        }
-        Relationships: [
-          {
-            foreignKeyName: "fact_checks_created_by_user_id_fkey"
-            columns: ["created_by_user_id"]
-            isOneToOne: false
-            referencedRelation: "users"
-            referencedColumns: ["id"]
-          },
-          {
-            foreignKeyName: "fact_checks_topic_id_fkey"
-            columns: ["topic_id"]
-            isOneToOne: false
-            referencedRelation: "news_topics"
-            referencedColumns: ["id"]
-          },
-        ]
-      }
       gdelt_event_cluster: {
         Row: {
           best_news_host: string | null
@@ -1564,6 +1510,24 @@ export type Database = {
         Returns: boolean
       }
       is_self: { Args: { target_user_id: string }; Returns: boolean }
+      pick_drop_eligible_candidates: {
+        Args: { p_commentary_as_drop_candidate?: boolean }
+        Returns: {
+          dedup_cluster_id: string | null
+          evidence_tier: Database["public"]["Enums"]["news_evidence_tier"]
+          global_event_id: string | null
+          id: string
+          outlet_type: Database["public"]["Enums"]["news_outlet_type"] | null
+          rank_score: number | null
+          source_category: string
+          source_host: string
+          source_provider: string
+          source_published_at: string | null
+          source_title: string
+          source_url: string
+          summary: string | null
+        }[]
+      }
       place_prediction: {
         Args: {
           p_ap_stake: number
@@ -1596,6 +1560,10 @@ export type Database = {
         }
       }
       set_user_timezone: { Args: { p_tz: string }; Returns: string }
+      stamp_cluster_drop_published: {
+        Args: { p_at?: string; p_global_event_id: string }
+        Returns: boolean
+      }
       submit_trivia_answer: {
         Args: {
           p_battle_id: string

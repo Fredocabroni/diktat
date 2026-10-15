@@ -215,4 +215,24 @@ describe('PAYWALL_FREE_PREFERRED_HOSTS — preference order for lazy text fetch'
       expect(lookupOutlet(host)?.type).toBe('news');
     }
   });
+
+  // Callers compare against this list by EXACT host (news-ingest's
+  // isPaywallFreePreferred, pickTextSources' preferred sweep), so a
+  // preferred outlet stored under an alias form (BBC → bbc.co.uk) is
+  // silently never preferred unless the alias is listed too.
+  it('lists every alias of a preferred outlet (exact-host callers)', () => {
+    for (const o of OUTLETS) {
+      if (!PAYWALL_FREE_PREFERRED_HOSTS.includes(o.domain)) continue;
+      for (const alias of o.aliases ?? []) {
+        expect(PAYWALL_FREE_PREFERRED_HOSTS).toContain(alias);
+      }
+    }
+  });
+
+  it('includes both BBC forms, adjacent, so either keeps BBC priority', () => {
+    const com = PAYWALL_FREE_PREFERRED_HOSTS.indexOf('bbc.com');
+    const couk = PAYWALL_FREE_PREFERRED_HOSTS.indexOf('bbc.co.uk');
+    expect(com).toBeGreaterThanOrEqual(0);
+    expect(couk).toBe(com + 1);
+  });
 });

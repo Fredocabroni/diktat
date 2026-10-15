@@ -285,21 +285,37 @@ async function readBodyText(response: Response, maxBytes: number): Promise<strin
  *  if an attribute regex has mild backtracking the work is bounded. */
 export function extractTitle(html: string): string | null {
   const og = findMetaByAttr(html, 'property', 'og:title');
-  if (og !== null) return decodeHtmlEntities(og.trim());
+  if (og !== null) return sanitizeExtractedText(decodeHtmlEntities(og.trim()));
   // <title> fallback — the tag is small by convention; lazy content
   // match on `[\s\S]*?` has no backtracking surface on a well-formed
   // page. Cap after .exec() in case of a pathological unterminated tag.
   const t = /<title[^>]*>([\s\S]{0,8192}?)<\/title>/i.exec(html);
-  if (t && t[1]) return decodeHtmlEntities(t[1].trim());
+  if (t && t[1]) return sanitizeExtractedText(decodeHtmlEntities(t[1].trim()));
   return null;
 }
 
 export function extractDescription(html: string): string | null {
   const og = findMetaByAttr(html, 'property', 'og:description');
-  if (og !== null) return decodeHtmlEntities(og.trim());
+  if (og !== null) return sanitizeExtractedText(decodeHtmlEntities(og.trim()));
   const name = findMetaByAttr(html, 'name', 'description');
-  if (name !== null) return decodeHtmlEntities(name.trim());
+  if (name !== null) return sanitizeExtractedText(decodeHtmlEntities(name.trim()));
   return null;
+}
+
+/** Strip literal angle brackets from decoded text.
+ *
+ *  `decodeHtmlEntities` turns `&lt;img src=x onerror=…&gt;` into
+ *  `<img src=x onerror=…>`. If the LLM rewrite then returns empty
+ *  and the handler falls back to this text, the raw brackets would
+ *  land in `news_topics.headline`/`.summary`. The AI-generated rewrite
+ *  branch is already guarded by `SAFE_TEXT_RE` in drop-publish.ts, but
+ *  the fallback branch had no sanitizer — PR #226 security-reviewer
+ *  MEDIUM 1. Stripping at the extractor keeps every downstream
+ *  consumer (`DropTextSource.title` / `.description`, the headline
+ *  rewrite prompt input, the news_topics insert) safe without
+ *  duplicating the strip at every call site. */
+function sanitizeExtractedText(decoded: string): string {
+  return decoded.replace(/[<>]/g, '');
 }
 
 /** Walk every `<meta ...>` tag in the body (bounded by

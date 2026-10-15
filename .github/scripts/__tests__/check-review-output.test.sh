@@ -205,6 +205,19 @@ run_case "no verdict in body + non-trivial content → ambiguous (fail-closed)" 
   "${FIX}/real-review-ambiguous-no-verdict.md" 0 0 ambiguous
 
 echo
+echo "=== Group G: NEEDS-USER-DECISION fails closed like BLOCK (exit 0, stdout 'ok_block') ==="
+# A verdict that needs a human decision must not merge on a green
+# check. Until 2026-10-14 the gate grouped NEEDS-USER-DECISION with
+# PASS / APPROVE in all three channels and returned "ok". One case per
+# channel so a regression in any single channel is caught.
+run_case "channel A: 'Overall verdict: NEEDS-USER-DECISION' → ok_block" \
+  "${FIX}/real-review-explicit-needs-user-decision.md" 0 0 ok_block
+run_case "channel B: trailing standalone **NEEDS-USER-DECISION** → ok_block" \
+  "${FIX}/real-review-trailing-needs-user-decision.md" 0 0 ok_block
+run_case "channel C: '## Verdict\\n\\n**NEEDS-USER-DECISION**\\n[prose]' → ok_block" \
+  "${FIX}/real-review-multiline-needs-user-decision.md" 0 0 ok_block
+
+echo
 echo "========================================"
 echo "${pass_count} passed, ${fail_count} failed"
 echo "========================================"
