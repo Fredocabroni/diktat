@@ -1616,10 +1616,10 @@ export type Database = {
           p_evidence_tier: Database["public"]["Enums"]["news_evidence_tier"]
           p_global_event_id: string
           p_host: string
-          p_is_paywall_free_preferred: boolean
-          p_outlet_group: Database["public"]["Enums"]["news_outlet_group"]
-          p_outlet_lean: string
-          p_outlet_type: Database["public"]["Enums"]["news_outlet_type"]
+          p_is_paywall_free_preferred?: boolean
+          p_outlet_group?: Database["public"]["Enums"]["news_outlet_group"]
+          p_outlet_lean?: string
+          p_outlet_type?: Database["public"]["Enums"]["news_outlet_type"]
           p_url: string
         }
         Returns: undefined

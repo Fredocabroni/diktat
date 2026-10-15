@@ -25,7 +25,9 @@
 //   - All adapter fetches go through the injected fetch impl so tests
 //     can substitute without hitting the network.
 
+import type { Database } from '@diktat/db';
 import { scrubMessage } from '@diktat/shared/alerts';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import { unzipSync } from 'fflate';
 import Parser from 'rss-parser';
 
@@ -1407,15 +1409,26 @@ async function upsertGdeltEventMention(
   m: GdeltMentionUpsert,
 ): Promise<void> {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const { error } = await (deps.supabase as any).rpc('upsert_gdelt_event_mention', {
+    // Narrow the untyped ServiceClient (apps/workers/src/supabase.ts
+    // exports SupabaseClient without the Database generic, so most
+    // workers call sites still rely on `as any`) to the generated-
+    // types-aware SupabaseClient<Database> for this one RPC. The
+    // compiler now verifies the function name, arg names, and arg
+    // types against packages/db/src/types.ts. Closes PR #214 push-5
+    // security-reviewer condition 3 (remove `as any` on the
+    // upsert_gdelt_event_mention RPC call using the generated types).
+    const typedClient = deps.supabase as unknown as SupabaseClient<Database>;
+    const { error } = await typedClient.rpc('upsert_gdelt_event_mention', {
       p_global_event_id: m.globalEventId,
       p_url: m.url,
       p_host: m.host,
       p_evidence_tier: m.evidenceTier,
-      p_outlet_lean: m.outletLean ?? null,
-      p_outlet_group: m.outletGroup ?? null,
-      p_outlet_type: m.outletType ?? null,
+      // Optional per the SQL function's `default null`; the generated
+      // types mark these three as `?` so pass `undefined` (not `null`)
+      // when the mention is primary-tier.
+      p_outlet_lean: m.outletLean,
+      p_outlet_group: m.outletGroup,
+      p_outlet_type: m.outletType,
       p_is_paywall_free_preferred: m.isPaywallFreePreferred,
     });
     if (error) {
