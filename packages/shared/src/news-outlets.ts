@@ -464,12 +464,21 @@ export function isExcludedPath(outlet: Outlet, url: string): boolean {
  *  Drop time (headline rewrite + fact-explainer input). Order matters
  *  — drop-publish tries these first, in order, before falling back to
  *  other news-type outlets. Operator-approved 2026-10-13: AP, Reuters,
- *  NPR, BBC, Axios, The Hill. */
+ *  NPR, BBC, Axios, The Hill.
+ *
+ *  Entries are compared by EXACT normalized host (news-ingest's
+ *  `isPaywallFreePreferred` flag and `pickTextSources`' preferred
+ *  sweep both use `includes` / `===`), so every alias form an outlet
+ *  is actually stored under must be listed. BBC is stored as
+ *  `bbc.co.uk` far more often than `bbc.com` (GDELT's dominant form,
+ *  see the BBC `aliases` note above); without the alias here, BBC text
+ *  was never preferred and `best_news_url` never took a BBC URL. */
 export const PAYWALL_FREE_PREFERRED_HOSTS: ReadonlyArray<string> = [
   'apnews.com',
   'reuters.com',
   'npr.org',
   'bbc.com',
+  'bbc.co.uk',
   'axios.com',
   'thehill.com',
 ];

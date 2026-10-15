@@ -57,6 +57,27 @@ describe('pickTextSources — operator priority order', () => {
     const picked = pickTextSources(outlets, 'https://apnews.com/story', 'apnews.com');
     expect(picked).toHaveLength(1);
   });
+
+  // GDELT stores BBC as `bbc.co.uk` far more often than `bbc.com`.
+  // Before the alias was added to PAYWALL_FREE_PREFERRED_HOSTS, a
+  // bbc.co.uk row fell through to the "remaining news" sweep and sat
+  // behind any non-preferred news outlet listed ahead of it.
+  it('prefers a bbc.co.uk outlet row over a non-preferred news host', () => {
+    const outlets = [
+      { url: 'https://www.nytimes.com/story', host: 'nytimes.com', outlet_type: 'news' as const },
+      { url: 'https://www.bbc.co.uk/news/x', host: 'bbc.co.uk', outlet_type: 'news' as const },
+    ];
+    const picked = pickTextSources(outlets, null, null);
+    expect(picked.map((p) => p.host)).toEqual(['bbc.co.uk', 'nytimes.com']);
+  });
+
+  it('accepts a bbc.co.uk bestNewsUrl as a preferred hint', () => {
+    const outlets = [
+      { url: 'https://www.nytimes.com/story', host: 'nytimes.com', outlet_type: 'news' as const },
+    ];
+    const picked = pickTextSources(outlets, 'https://www.bbc.co.uk/news/x', 'bbc.co.uk');
+    expect(picked[0]?.host).toBe('bbc.co.uk');
+  });
 });
 
 describe('extractTitle / extractDescription — meta-tag parser', () => {
