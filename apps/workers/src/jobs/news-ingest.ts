@@ -851,28 +851,86 @@ export async function clusterGdeltMentions(
     if (trendScore < GDELT_MIN_TREND_SCORE) continue;
 
     // Pick the best-tier allowed mention from this event. Priority:
-    //   1. primary / direct (tier='primary' from classifyUrl)
-    //   2. reputable (tier='reputable') — S1+S3 widening
-    // Everything else is skipped. (Non-allowed URLs don't reach the
-    // handler; the handler would also reject them, but filtering here
-    // keeps the adapter output tight.)
+    //   1. primary / direct (role='primary' from classifyUrl)
+    //   2. reputable NEWS-TYPE, in PAYWALL_FREE_PREFERRED_HOSTS order
+    //   3. any remaining reputable news-type (insertion order)
+    //   4. reputable commentary — last-resort fallback only
+    //
+    // Operator spec (2026-10-14): a reputable fallback must prefer a
+    // news-type outlet. The prior shape — "take the first reputable
+    // mention in GDELT's export order" — could promote a commentary
+    // mention to the candidate even when news-type mentions existed
+    // in the same cluster. The published Drop then had a commentary
+    // primary_source_url, which violates the §2 "primary sources,
+    // not op-eds" integrity contract. The commentary branch (step 4)
+    // stays because the end-to-end Drop-time S3 gate in SQL
+    // (migration 20261019000000) now excludes commentary candidates
+    // from Drop-eligibility — commentary at this layer only remains
+    // as an audit trail of the cluster's reputable spread.
+    // Non-allowed URLs don't reach the handler; the handler would
+    // also reject them, but filtering here keeps the adapter output
+    // tight.
     let picked: GdeltMention | null = null;
     let pickedClassification: ReturnType<typeof classifyUrl> | null = null;
-    // First pass: primary.
-    for (const m of group.rows) {
-      const classification = classifyUrl(m.url);
+    // Classify once per mention — classifyUrl walks the outlet
+    // allowlist, cheap but not free. We reuse the result across all
+    // four passes below.
+    const classified = group.rows.map((m) => ({
+      mention: m,
+      classification: classifyUrl(m.url),
+    }));
+    // Pass 1: primary.
+    for (const { mention, classification } of classified) {
       if (classification.allowed && classification.role === 'primary') {
-        picked = m;
+        picked = mention;
         pickedClassification = classification;
         break;
       }
     }
-    // Second pass: reputable fallback.
+    // Pass 2: reputable news-type in PAYWALL_FREE_PREFERRED_HOSTS order.
+    //   The host is derived from the classified URL (apex-match via
+    //   normalizeHost) so an alias like bbc.co.uk aligns with
+    //   PAYWALL_FREE_PREFERRED's `bbc.com` entry via `isApexHost`-
+    //   equivalent allowlist walk inside classifyUrl.
     if (picked === null) {
-      for (const m of group.rows) {
-        const classification = classifyUrl(m.url);
-        if (classification.allowed && classification.role === 'reputable') {
-          picked = m;
+      for (const preferredHost of PAYWALL_FREE_PREFERRED_HOSTS) {
+        for (const { mention, classification } of classified) {
+          if (!classification.allowed) continue;
+          if (classification.role !== 'reputable') continue;
+          if (classification.outlet_type !== 'news') continue;
+          const parsed = requireHttpsUrl(mention.url);
+          if (parsed === null) continue;
+          if (normalizeHost(parsed.hostname) !== preferredHost) continue;
+          picked = mention;
+          pickedClassification = classification;
+          break;
+        }
+        if (picked !== null) break;
+      }
+    }
+    // Pass 3: any remaining reputable news-type (insertion order).
+    if (picked === null) {
+      for (const { mention, classification } of classified) {
+        if (
+          classification.allowed &&
+          classification.role === 'reputable' &&
+          classification.outlet_type === 'news'
+        ) {
+          picked = mention;
+          pickedClassification = classification;
+          break;
+        }
+      }
+    }
+    // Pass 4: reputable commentary — last-resort fallback.
+    if (picked === null) {
+      for (const { mention, classification } of classified) {
+        if (
+          classification.allowed &&
+          classification.role === 'reputable' &&
+          classification.outlet_type === 'commentary'
+        ) {
+          picked = mention;
           pickedClassification = classification;
           break;
         }
