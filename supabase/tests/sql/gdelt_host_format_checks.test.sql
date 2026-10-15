@@ -52,18 +52,12 @@ select pg_temp.expect_check_violation(
   'primary_host: whitespace'
 );
 
-select pg_temp.expect_check_violation(
-  format(
-    $sql$ update public.gdelt_event_cluster
-            set primary_url = 'https://example.com/x',
-                primary_host = %L,
-                primary_tier = 'primary'
-            where global_event_id = 'host-format-test-1' $sql$,
-    'example.com' || chr(0)
-  ),
-  'gdelt_event_cluster_primary_host_format',
-  'primary_host: trailing null byte'
-);
+-- Null bytes in text are rejected by the Postgres parser itself
+-- ("ERROR: null character not permitted") before the CHECK runs,
+-- so a null-byte adversarial input is unreachable via SQL. The
+-- normalizeHost() TS boundary strips bytes to printable ASCII, and
+-- the DB parser's null-byte guard is the last-mile defense. Not
+-- testable at the CHECK layer.
 
 select pg_temp.expect_check_violation(
   $sql$ update public.gdelt_event_cluster
