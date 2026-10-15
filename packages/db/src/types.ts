@@ -490,60 +490,6 @@ export type Database = {
           },
         ]
       }
-      fact_checks: {
-        Row: {
-          claim: string
-          confidence: number | null
-          created_at: string
-          created_by_user_id: string | null
-          evidence: Json
-          id: string
-          provider: string | null
-          topic_id: string | null
-          updated_at: string
-          verdict: string
-        }
-        Insert: {
-          claim: string
-          confidence?: number | null
-          created_at?: string
-          created_by_user_id?: string | null
-          evidence?: Json
-          id?: string
-          provider?: string | null
-          topic_id?: string | null
-          updated_at?: string
-          verdict: string
-        }
-        Update: {
-          claim?: string
-          confidence?: number | null
-          created_at?: string
-          created_by_user_id?: string | null
-          evidence?: Json
-          id?: string
-          provider?: string | null
-          topic_id?: string | null
-          updated_at?: string
-          verdict?: string
-        }
-        Relationships: [
-          {
-            foreignKeyName: "fact_checks_created_by_user_id_fkey"
-            columns: ["created_by_user_id"]
-            isOneToOne: false
-            referencedRelation: "users"
-            referencedColumns: ["id"]
-          },
-          {
-            foreignKeyName: "fact_checks_topic_id_fkey"
-            columns: ["topic_id"]
-            isOneToOne: false
-            referencedRelation: "news_topics"
-            referencedColumns: ["id"]
-          },
-        ]
-      }
       gdelt_event_cluster: {
         Row: {
           best_news_host: string | null

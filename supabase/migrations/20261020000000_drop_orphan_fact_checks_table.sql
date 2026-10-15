@@ -26,13 +26,12 @@
 --   drop table if exists public.fact_checks cascade;
 --
 -- Down:
---   (Recreation would restore the orphan skeleton, not a working
---   fact-check surface. If a future PR needs the three-table shape
---   restored for revert, re-apply 20260420090005 verbatim — it was
---   not modified by this migration.)
---   NOTE: Down is intentionally lossy. The table carried no rows and
---   no live writer, so reverting the DROP is schema-only and the
---   schema was superseded by PR 4.7's fact_check_* trio.
+--   Irreversible — backup before applying. The table carried no rows
+--   and no live writer; reverting the DROP is schema-only. To restore
+--   the orphan skeleton, re-apply 20260420090005 verbatim — it was not
+--   modified by this migration. The schema was superseded by PR 4.7's
+--   fact_check_* trio (claims / verdicts / sources), so a revert would
+--   restore an unused table shape, not a working fact-check surface.
 
 begin;
 
