@@ -150,11 +150,20 @@ jobs:
           echo "Files in diff:"
           git diff --name-only "origin/${BASE_REF}...HEAD" -- supabase/migrations/ packages/db/
           wc -l pr.diff
+          # Wrap the file list in a fenced code block so filenames
+          # with markdown control characters (backticks, angle brackets,
+          # bare URLs) render as literal text in the step summary.
+          # Cosmetic hardening per #167 (LOW A in #222's security
+          # review): `$GITHUB_STEP_SUMMARY` is a markdown file the
+          # GitHub UI parses, not a workflow-command sink, so no
+          # execution risk — just unexpected rendering if a path
+          # contains markdown.
           {
             echo "### schema-reviewer input: files in diff"
             echo ""
-            git diff --name-only "origin/${BASE_REF}...HEAD" -- supabase/migrations/ packages/db/ \
-              | sed 's/^/- /'
+            echo '```'
+            git diff --name-only "origin/${BASE_REF}...HEAD" -- supabase/migrations/ packages/db/
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
       # Capture-then-post pattern, harmonized with claude-review.yml.
