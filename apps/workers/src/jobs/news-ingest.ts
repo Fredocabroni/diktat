@@ -996,7 +996,19 @@ function requireHttpsUrl(raw: string): URL | null {
   } catch {
     return null;
   }
-  return u.protocol === 'https:' ? u : null;
+  if (u.protocol !== 'https:') return null;
+  // #215 LOW: reject URLs that carry credentials in the authority.
+  // `new URL('https://attacker.com@internal.svc/').hostname` is
+  // `internal.svc` — a URL parser treats the pre-`@` portion as
+  // credentials and routes to the post-`@` host, bypassing any
+  // name-based filter that inspected the raw prefix. The DB-side
+  // https CHECK (migration 20261018000000) also rejects `@` in the
+  // host char class, but that constraint fires at storage; this
+  // guard is the earliest storage boundary and keeps the credential-
+  // carrying URL from ever reaching the sink / RPC call. Defense in
+  // depth with the DB CHECK.
+  if (u.username !== '' || u.password !== '') return null;
+  return u;
 }
 
 /** Parse the GDELT Mentions 14-digit date format back to an ISO 8601

@@ -782,6 +782,20 @@ describe('clusterGdeltMentions — operator trend-score + primary-source rules',
       expect(requireHttpsUrl('not-a-url')).toBeNull();
       expect(requireHttpsUrl('')).toBeNull();
     });
+
+    // #215 LOW: reject URLs that carry credentials in the authority.
+    // Partners with the DB-side `@`-exclusion in migration
+    // 20261018000000's regex — this guard is the earliest storage
+    // boundary and keeps the credential-carrying URL from ever
+    // reaching the sink / RPC call.
+    it('rejects URLs that carry credentials in the authority (#215)', () => {
+      // `new URL('https://a@b/').hostname` is 'b' and would route
+      // the fetch to attacker-controlled territory while any name-
+      // based filter examined the raw prefix.
+      expect(requireHttpsUrl('https://attacker.com@internal.svc/path')).toBeNull();
+      expect(requireHttpsUrl('https://user:pass@example.com/x')).toBeNull();
+      expect(requireHttpsUrl('https://user@example.com/')).toBeNull();
+    });
   });
 
   describe('length caps on source_url (PR #205 LOW 2.4)', () => {
