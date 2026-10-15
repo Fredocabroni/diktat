@@ -1564,6 +1564,24 @@ export type Database = {
         Returns: boolean
       }
       is_self: { Args: { target_user_id: string }; Returns: boolean }
+      pick_drop_eligible_candidates: {
+        Args: { p_commentary_as_drop_candidate?: boolean }
+        Returns: {
+          dedup_cluster_id: string | null
+          evidence_tier: Database["public"]["Enums"]["news_evidence_tier"]
+          global_event_id: string | null
+          id: string
+          outlet_type: Database["public"]["Enums"]["news_outlet_type"] | null
+          rank_score: number | null
+          source_category: string
+          source_host: string
+          source_provider: string
+          source_published_at: string | null
+          source_title: string
+          source_url: string
+          summary: string | null
+        }[]
+      }
       place_prediction: {
         Args: {
           p_ap_stake: number
@@ -1596,6 +1614,10 @@ export type Database = {
         }
       }
       set_user_timezone: { Args: { p_tz: string }; Returns: string }
+      stamp_cluster_drop_published: {
+        Args: { p_at?: string; p_global_event_id: string }
+        Returns: boolean
+      }
       submit_trivia_answer: {
         Args: {
           p_battle_id: string

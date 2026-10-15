@@ -109,6 +109,34 @@ describe('extractTitle / extractDescription — meta-tag parser', () => {
   it('returns null when no title present', () => {
     expect(extractTitle('<html></html>')).toBeNull();
   });
+
+  // PR #226 security-reviewer MEDIUM 1: strip literal angle brackets
+  // after entity decoding so a crafted og:title can't carry raw < / >
+  // past the extractor. The LLM-rewrite output already bars angle
+  // brackets via SAFE_TEXT_RE; the fallback branch (empty rewrite →
+  // use source.title / source.summary verbatim) relied on the og text
+  // being clean. This test enforces the invariant at the extractor
+  // level so every downstream consumer of DropTextSource is covered.
+  it('strips literal angle brackets after entity decoding (MED 1)', () => {
+    // Encoded < / > that decode to raw characters in a potential
+    // attack payload.
+    const html =
+      '<html><head><meta property="og:title" content="&lt;img src=x onerror=alert(1)&gt;"/></head>';
+    const got = extractTitle(html);
+    expect(got).not.toContain('<');
+    expect(got).not.toContain('>');
+    // The non-bracket content survives.
+    expect(got).toBe('img src=x onerror=alert(1)');
+  });
+
+  it('strips literal angle brackets from og:description too', () => {
+    const html =
+      '<meta property="og:description" content="A story about &lt;hr&gt; tags and &lt;b&gt;bold&lt;/b&gt;"/>';
+    const got = extractDescription(html);
+    expect(got).not.toContain('<');
+    expect(got).not.toContain('>');
+    expect(got).toBe('A story about hr tags and bbold/b');
+  });
 });
 
 describe('fetchOgText — SSRF-safe single-URL fetch', () => {

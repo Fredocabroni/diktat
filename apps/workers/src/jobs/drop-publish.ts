@@ -4,51 +4,49 @@
 // 23:59 ET. The first 20:00 ET tick of the day fires; later ticks no-op
 // via the partial-unique idempotency index on (job_type, idempotency_key).
 //
-// Pipeline order:
-//   1. Fetch active candidates (selected_at NULL, rejected_reason NULL,
-//      dedup_cluster_id NOT NULL, rank_score NOT NULL), ordered by
-//      rank_score desc.
+// PR C changes (2026-10-14):
+//   - Candidate list now sourced from the SECURITY DEFINER RPC
+//     `pick_drop_eligible_candidates` (migration 20261019000000), which
+//     enforces S3 outlet-balance in SQL: reputable-tier candidates only
+//     pass when their GDELT cluster has >=2 distinct hosts from >=2
+//     distinct outlet_groups AND >=1 news-type outlet AND the cluster
+//     has not already been Drop-published.
+//   - Reputable-tier candidates have their news-type article text
+//     fetched via `fetchFirstReadable(pickTextSources(cluster.outlets,
+//     best_news_url, best_news_host))`. The fetched URL becomes
+//     `primary_source_url`; the fetched title + description feed the
+//     headline rewrite and fact explainer. If no readable text is found
+//     for a reputable candidate, the handler walks to the next eligible
+//     candidate — "nothing readable = next eligible candidate".
+//   - Commentary mentions can appear in a cluster's outlet set (they
+//     count toward the 2-host / 2-group spread) but are NEVER the Drop
+//     link — `pickTextSources` already drops commentary outlets.
+//   - Primary / direct candidates publish unchanged (their source_url
+//     IS the primary document; no cluster lookup, no fetch).
+//   - After a reputable Drop lands, `stamp_cluster_drop_published` RPC
+//     stamps the cluster so it cannot be Dropped again.
+//
+// Pipeline order (updated):
+//   1. Fetch eligible candidates via pick_drop_eligible_candidates RPC.
 //   2. Compute the blocked-cluster set: every dedup_cluster_id stamped
 //      on a news_topics row where is_drop=true AND drop_at >= now - 2d.
-//      Same cluster cannot be the Drop today or for the next 2 days.
-//      "No score-dominance override" per the founder call.
-//   3. Walk the ranked list and pick the first candidate whose cluster
-//      is NOT in the blocked set. This is the chosen candidate.
-//   4. Find the runner-up = top candidate in a DIFFERENT, also-unblocked,
-//      cluster. (Within-cluster ranks don't compare — they're the same
-//      story.)
-//   5. Apply the confidence threshold:
-//        chosen.score > 2 × runnerUp.score → curation_mode='auto_dominant'
-//        else (tight spread)               → 'auto_fallback_no_channel'
-//      V1 ships only these two paths; curator-channel paths are pre-
-//      declared in the curation_mode enum but unused until the curator
-//      notification PR lands.
-//   6. Edge case: every active candidate is in a blocked cluster (slow
-//      news week + cluster has rolled for 3 days). The §5 ADDICTION
-//      contract is "never skip a day" — we still publish the top
-//      candidate, stamp curation_mode='auto_fallback_no_channel', and
-//      flag block_exhausted=true in the row's telemetry payload so ops
-//      sees the exception.
-//   7. LLM rewrite of the source title via the ai-fabric
-//      drop_headline_rewrite task, using DROP_HEADLINE_REWRITE_SYSTEM_
-//      PROMPT from packages/ai-fabric/src/prompts/drop-headline.ts as
-//      the integrity contract. Structured output yields a Diktat-voice
-//      headline + 1-sentence summary + a single fact-checkable claim.
-//      Failure modes degrade gracefully: missing deps.invoke, model
-//      error, or empty model output all fall back to source_title
-//      verbatim (the §5 "never skip a day" contract trumps voice
-//      polish).
-//   8. Insert the chosen candidate as a news_topics row (is_drop=true,
-//      drop_at=today 20:00 ET, dedup_cluster_id stamped forward for
-//      the 3-day repeat-block scan). source_title preserved verbatim
-//      regardless of rewrite outcome.
-//   9. If the rewrite produced a non-empty claim, enqueue an auto-
-//      fact-check by upserting fact_check_claims and inserting a
-//      scheduled_jobs row of job_type='fact_check'. Mirrors the
-//      trpc.factCheck.enqueue path (PR 4.7 contract) — same dedup
-//      hash, same idempotency key shape.
-//   10. Mark every candidate in the chosen cluster as selected_at=now()
-//       so subsequent ingest ticks don't re-promote them.
+//   3. Walk ranked candidates. For each unblocked candidate:
+//        - primary/direct: use as-is → publish and done.
+//        - reputable: load cluster outlets, pickTextSources,
+//          fetchFirstReadable; if a news-type outlet yields readable
+//          text, use it → publish and done. If no readable text,
+//          continue to next candidate.
+//   4. If no candidate yielded a publishable Drop AND some candidates
+//      were blocked (block-exhaustion edge), make a second pass that
+//      ignores the blocked set — the §5 "never skip a day" contract.
+//   5. If both passes fail, stamp `no_candidates: true`.
+//   6. LLM rewrite + fact explainer feed on the fetched text (reputable)
+//      or candidate source_title (primary/direct).
+//   7. Insert the chosen candidate as a news_topics row.
+//   8. Enqueue auto-fact-check (gated by FACT_CHECK_ENABLED).
+//   9. For reputable Drops: stamp the GDELT cluster via
+//      stamp_cluster_drop_published RPC.
+//   10. Mark every candidate in the chosen cluster as selected_at=now().
 
 import { createHash } from 'crypto';
 
@@ -63,6 +61,15 @@ import {
 import { z } from 'zod';
 
 import type { JobHandler } from './scheduler.js';
+import {
+  fetchFirstReadable,
+  pickTextSources,
+  type DropTextSource,
+  type GdeltClusterOutletRow,
+} from './drop-source-text-fetch.js';
+
+type EvidenceTier = 'primary' | 'direct' | 'reputable';
+type OutletType = 'news' | 'commentary' | null;
 
 interface ActiveCandidate {
   id: string;
@@ -75,6 +82,10 @@ interface ActiveCandidate {
   summary: string | null;
   dedup_cluster_id: string;
   rank_score: number;
+  // PR C — added so the handler can enforce S3 at Drop time.
+  evidence_tier: EvidenceTier;
+  outlet_type: OutletType;
+  global_event_id: string | null;
 }
 
 interface DropOutcome {
@@ -89,12 +100,18 @@ interface DropOutcome {
   readonly news_topic_id: string;
   readonly headline_rewritten: boolean;
   readonly fact_check_enqueued: boolean;
+  // PR C — new fields.
+  readonly evidence_tier: EvidenceTier;
+  readonly text_fetched: boolean;
+  readonly fetched_host: string | null;
+  readonly cluster_stamped: boolean;
 }
 
 /** Structured-output contract for the LLM rewrite. Empty strings are
  *  ALLOWED per the drop-headline.ts prompt — "empty output preferred
- *  to a slanted rewrite." The handler falls back to source_title
- *  verbatim when headline is empty.
+ *  to a slanted rewrite." The handler falls back to the fetched title
+ *  (reputable) or source_title (primary/direct) verbatim when headline
+ *  is empty.
  *
  *  Headline + summary regex bars angle brackets and embedded URLs at
  *  the schema layer (defense in depth against a hostile feed prompt-
@@ -171,20 +188,11 @@ const CLUSTER_BLOCK_DAYS = 2;
  *  this multiple of the runner-up's score. */
 const DOMINANCE_RATIO = 2.0;
 
-/** Strip control characters (every newline variant, DEL, C1 range) and
- *  cap length before embedding in `claim_context`. The string is both a
- *  dedup-hash input (collisions via `\n---\n` separator injection in
- *  LLM-controlled title/url) AND the operand of the fact-check
- *  orchestrator's user prompt. Security-reviewer PR #191 Low 6 +
- *  PR #193 Medium 1. */
-/** Produce a diagnostic digest from an AI-invoke error that is safe to
- *  log structurally. For Zod parse failures, flatten `issues` to
- *  `code:path` pairs so operators can see which field drifted without
- *  the invalid value echoing into the log (a Zod .refine failure
- *  includes `received` by default — if the LLM returned a source-title
- *  fragment as source_url, that fragment lands in the message).
- *  Everything else goes through scrubMessage. Security-reviewer PR
- *  #199 round 2 M3. */
+/** PR C: max news-type URLs tried per reputable candidate before
+ *  moving on to the next candidate. Matches the operator spec in
+ *  drop-source-text-fetch.ts L204-206. */
+const PER_CANDIDATE_TEXT_FETCH_ATTEMPTS = 3;
+
 function aiErrorDigest(err: unknown): string {
   if (err instanceof z.ZodError) {
     return err.issues.map((i) => `${i.code}:${i.path.join('.') || '<root>'}`).join(', ');
@@ -193,28 +201,13 @@ function aiErrorDigest(err: unknown): string {
 }
 
 // Match the sanitize-field pattern from fact-explainer.ts / drop-
-// headline.ts verbatim: the same codepoint coverage AND the same
+// headline.ts verbatim: same codepoint coverage AND the same
 // `new RegExp(string)` form so Prettier can't collapse the \uXXXX
-// escapes into literal invisible characters inside the regex
-// literal. See fact-explainer.ts around the STRIP_CONTROL_PATTERN
-// comment for the full breakdown of covered classes:
-//   U+0000-U+001F   C0 control chars
-//   U+007F-U+009F   DEL + C1 control chars
-//   U+200B-U+200F   zero-width space, ZWNJ, ZWJ, LRM, RLM
-//   U+2028-U+2029   line / paragraph separators
-//   U+202A-U+202E   LRE / RLE / PDF / LRO / RLO (bidi overrides)
-//   U+2066-U+2069   LRI / RLI / FSI / PDI (bidi isolates)
-//   U+FEFF          BOM / ZWNBSP
-// Security-reviewer PR #199 MEDIUM #1 (round 1) + round-3 MEDIUM: the
-// prior round-1 fix added bidi coverage but did so with a regex
-// literal that embedded the invisibles as literal chars — the
-// unauditability the reviewer flagged for the sibling prompt files.
-// This round-3 fix mirrors fact-explainer.ts / drop-headline.ts.
+// escapes into literal invisible characters inside the regex literal.
 
 const CLAIM_STRIP_CONTROL_PATTERN =
   '[\\u0000-\\u001F\\u007F-\\u009F\\u200B-\\u200F\\u2028\\u2029\\u202A-\\u202E\\u2066-\\u2069\\uFEFF]';
 const CLAIM_STRIP_CONTROL_RE = new RegExp(CLAIM_STRIP_CONTROL_PATTERN, 'g');
-// Unicode tag block (U+E0000..U+E007F) as surrogate pairs.
 const CLAIM_STRIP_TAG_BLOCK_RE = new RegExp('[\\uDB40][\\uDC00-\\uDC7F]', 'g');
 
 function sanitizeClaimContextField(raw: string): string {
@@ -244,11 +237,8 @@ export function selectDropFromPool(opts: {
   blockExhausted: boolean;
 } | null {
   if (opts.candidates.length === 0) return null;
-  // Pre-sort by rank_score desc (defensive — caller should already
-  // pass them ordered, but we don't trust caller ordering).
   const ranked = [...opts.candidates].sort((a, b) => b.rank_score - a.rank_score);
 
-  // Walk for the first unblocked candidate.
   let chosen: ActiveCandidate | undefined;
   for (const c of ranked) {
     if (!opts.blockedClusters.has(c.dedup_cluster_id)) {
@@ -258,19 +248,10 @@ export function selectDropFromPool(opts: {
   }
   let blockExhausted = false;
   if (!chosen) {
-    // Every candidate is blocked. §5 contract: never skip a day. Pick
-    // the absolute top (even though blocked) and stamp the
-    // block_exhausted telemetry.
     chosen = ranked[0]!;
     blockExhausted = true;
   }
 
-  // Runner-up = top candidate in a DIFFERENT cluster. Same cluster =
-  // same story = invalid runner-up. Cluster-block does NOT apply to
-  // the runner-up: it's a comparison signal, not a publishing
-  // candidate, and we want the comparison to reflect the actual
-  // strength of the chosen candidate against the next-strongest story
-  // in the pool.
   const runnerUp = ranked.find((c) => c.dedup_cluster_id !== chosen!.dedup_cluster_id) ?? null;
 
   return { chosen, runnerUp, blockExhausted };
@@ -278,9 +259,6 @@ export function selectDropFromPool(opts: {
 
 /**
  * Apply the confidence threshold to decide curation_mode.
- * - chosen.score > DOMINANCE_RATIO × runnerUp.score → 'auto_dominant'
- * - else → 'auto_fallback_no_channel' (V1: no curator channel)
- * If there's no runner-up (single-cluster pool), treat as dominant.
  */
 export function decideCurationMode(opts: {
   chosenScore: number;
@@ -292,10 +270,8 @@ export function decideCurationMode(opts: {
     : 'auto_fallback_no_channel';
 }
 
-/** Today's 20:00 ET as ISO timestamp. ET local-time is the source-of-
- *  truth anchor (ADDICTION §5: "Never move The Drop time"). */
+/** Today's 20:00 ET as ISO timestamp. */
 export function todayDropAtEt(now: Date): string {
-  // Compute the local-ET date components for `now`.
   const fmt = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'America/New_York',
     year: 'numeric',
@@ -306,24 +282,13 @@ export function todayDropAtEt(now: Date): string {
   });
   const parts = fmt.formatToParts(now);
   const get = (t: string): string => parts.find((p) => p.type === t)?.value ?? '';
-  // 8 PM ET = 20:00. Build an ISO string in ET wall-clock, then convert
-  // through the same offset logic Node uses for tz.
   const isoLocalEt = `${get('year')}-${get('month')}-${get('day')}T20:00:00`;
-  // Use the tz-aware roundtrip: parse as if it's in ET. Date.UTC + tz
-  // offset for that specific ET datetime. The cleanest way without a
-  // dep: pass through an intermediate Date in UTC and let Intl handle
-  // the offset.
   const etOffsetMs = etOffsetMsAt(isoLocalEt);
   const utcMs = Date.parse(`${isoLocalEt}Z`) - etOffsetMs;
   return new Date(utcMs).toISOString();
 }
 
-/** Return the offset (in ms) from UTC for America/New_York at the given
- *  ET wall-clock timestamp. DST-correct via Intl. */
 function etOffsetMsAt(etWallClockIso: string): number {
-  // Parse the ET wall-clock as if it were UTC, then ask Intl what the
-  // ET-local representation of that UTC instant is. The difference is
-  // the offset.
   const utcAsIfEt = new Date(`${etWallClockIso}Z`);
   const fmt = new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/New_York',
@@ -346,27 +311,60 @@ function etOffsetMsAt(etWallClockIso: string): number {
 }
 
 // ---------------------------------------------------------------------------
+// PR C — picked-source normalization. Primary/direct uses the candidate's
+// own URL + title/summary. Reputable uses the fetched news-type outlet's
+// URL + og:title + og:description.
+// ---------------------------------------------------------------------------
+
+interface PickedSource {
+  /** The URL that will be stamped as `news_topics.primary_source_url`. */
+  readonly url: string;
+  /** The host for the picked URL (used in logging + telemetry). */
+  readonly host: string;
+  /** The title that feeds the headline rewrite + fact explainer. */
+  readonly title: string;
+  /** The description/summary input to the rewrite + fact explainer. */
+  readonly summary: string | null;
+  /** True iff the URL came from a GDELT cluster news-type outlet
+   *  (reputable path), false if it's the candidate's own source_url
+   *  (primary/direct path). */
+  readonly fromClusterOutletFetch: boolean;
+}
+
+function pickedFromCandidate(c: ActiveCandidate): PickedSource {
+  return {
+    url: c.source_url,
+    host: c.source_host,
+    title: c.source_title,
+    summary: c.summary,
+    fromClusterOutletFetch: false,
+  };
+}
+
+function pickedFromText(text: DropTextSource): PickedSource {
+  return {
+    url: text.url,
+    host: text.host,
+    title: text.title,
+    summary: text.description,
+    fromClusterOutletFetch: true,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Handler
 // ---------------------------------------------------------------------------
 
 export const dropPublishHandler: JobHandler = async (row, deps) => {
   const now = new Date();
 
-  // (1) Active candidates with a cluster + rank score, ranked.
+  // (1) Fetch Drop-eligible candidates via the SECURITY DEFINER RPC
+  //     that enforces S3 (migration 20261019000000).
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data: candData, error: candErr } = (await (deps.supabase as any)
-    .from('news_topics_candidates')
-    .select(
-      'id, source_provider, source_category, source_title, source_url, source_host, source_published_at, summary, dedup_cluster_id, rank_score',
-    )
-    .is('selected_at', null)
-    .is('rejected_reason', null)
-    .not('dedup_cluster_id', 'is', null)
-    .not('rank_score', 'is', null)
-    .order('rank_score', { ascending: false })) as {
-    data: ActiveCandidate[] | null;
-    error: { message: string } | null;
-  };
+  const { data: candData, error: candErr } = (await (deps.supabase as any).rpc(
+    'pick_drop_eligible_candidates',
+    {},
+  )) as { data: ActiveCandidate[] | null; error: { message: string } | null };
   if (candErr) throw new Error(`drop_publish: fetch candidates: ${scrubMessage(candErr.message)}`);
   const candidates = candData ?? [];
   if (candidates.length === 0) {
@@ -391,39 +389,39 @@ export const dropPublishHandler: JobHandler = async (row, deps) => {
     throw new Error(`drop_publish: fetch blocked clusters: ${scrubMessage(blockedErr.message)}`);
   const blockedClusters = new Set((blockedData ?? []).map((r) => r.dedup_cluster_id));
 
-  // (3-6) Select.
-  const sel = selectDropFromPool({ candidates, blockedClusters });
-  if (!sel) {
-    // Unreachable given the empty-pool check above, but defensive.
+  // (3) Walk ranked candidates, honoring blocked set. Reputable candidates
+  //     must yield readable news-type outlet text; if none, skip to next.
+  //     On full exhaustion of the unblocked pool, pass B tries the
+  //     entire pool regardless of block state (§5 "never skip a day").
+  const walkResult = await walkCandidates(deps, candidates, blockedClusters, false);
+  const picked = walkResult ?? (await walkCandidates(deps, candidates, blockedClusters, true));
+
+  if (!picked) {
     await stampPayload(deps, row.id, { ...row.payload, no_candidates: true });
+    deps.logger.warn({ event: 'drop_publish.no_eligible_candidate', jobId: row.id });
     return;
   }
+
+  const { chosen, runnerUp, blockExhausted, source } = picked;
   const curationMode = decideCurationMode({
-    chosenScore: sel.chosen.rank_score,
-    runnerUpScore: sel.runnerUp ? sel.runnerUp.rank_score : null,
+    chosenScore: chosen.rank_score,
+    runnerUpScore: runnerUp ? runnerUp.rank_score : null,
   });
 
-  // (7) LLM rewrite — Diktat voice + claim extraction for fact-check.
-  //     Falls back to source_title verbatim on any failure mode (no
-  //     invoke configured, model error, empty model output). §5
-  //     "never skip a day" trumps voice polish.
-  const rewrite = await rewriteHeadlineSafely(deps, sel.chosen);
+  // (6a) LLM rewrite — fed with the picked source's title/summary
+  //      (fetched text for reputable; candidate fields for primary).
+  const rewrite = await rewriteHeadlineSafely(deps, chosen, source);
 
-  // (7b) Fact explainer (A4) — neutral both-sides-or-single-side
-  //     explainer the user reads before voting. Same fail-tolerant
-  //     posture as the headline rewrite: on any failure (missing
-  //     invoke, model error, Zod parse fail, empty output), persist
-  //     null and let the UI fall through to the raw primary_source_url
-  //     link. The explainer and the headline rewrite are independent
-  //     ai-fabric calls; a failure in one must not block the other.
-  const factExplainer = await generateFactExplainerSafely(deps, sel.chosen);
+  // (6b) Fact explainer (A4).
+  const factExplainer = await generateFactExplainerSafely(deps, chosen, source);
 
-  // (8) Promote to news_topics. source_title preserved verbatim
-  //     regardless of rewrite outcome.
+  // (7) Promote to news_topics. primary_source_url is the picked source
+  //     URL — fetched news-type outlet for reputable, candidate.source_url
+  //     for primary/direct.
   const dropAt = todayDropAtEt(now);
-  const slug = await generateSlug(deps, sel.chosen, now);
-  const finalHeadline = rewrite.headline.length > 0 ? rewrite.headline : sel.chosen.source_title;
-  const finalSummary = rewrite.summary.length > 0 ? rewrite.summary : sel.chosen.summary;
+  const slug = await generateSlug(deps, chosen, now);
+  const finalHeadline = rewrite.headline.length > 0 ? rewrite.headline : source.title;
+  const finalSummary = rewrite.summary.length > 0 ? rewrite.summary : source.summary;
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { data: topicData, error: topicErr } = (await (deps.supabase as any)
@@ -431,20 +429,17 @@ export const dropPublishHandler: JobHandler = async (row, deps) => {
     .insert({
       slug,
       headline: finalHeadline,
-      source_title: sel.chosen.source_title,
+      source_title: chosen.source_title,
       summary: finalSummary,
-      primary_source_url: sel.chosen.source_url,
-      category: sel.chosen.source_category,
-      published_at: sel.chosen.source_published_at,
+      primary_source_url: source.url,
+      category: chosen.source_category,
+      published_at: chosen.source_published_at,
       drop_at: dropAt,
       is_drop: true,
-      is_block_exhausted: sel.blockExhausted,
-      dedup_cluster_id: sel.chosen.dedup_cluster_id,
+      is_block_exhausted: blockExhausted,
+      dedup_cluster_id: chosen.dedup_cluster_id,
       curation_mode: curationMode,
       additional_sources: [],
-      // A4: fact_explainer is nullable — persist non-null only when
-      // the generator produced a valid payload with a non-empty
-      // for_summary (empty = "could not neutralize" per rule 10).
       fact_explainer: factExplainer,
       fact_explainer_generated_at: factExplainer === null ? null : now.toISOString(),
     })
@@ -456,23 +451,11 @@ export const dropPublishHandler: JobHandler = async (row, deps) => {
     );
   }
 
-  // (9) Auto-fact-check enqueue. Two gates:
-  //     - Non-empty claim (empty = "no fact-checkable proposition" per
-  //       drop-headline.ts rule 10).
-  //     - FACT_CHECK_ENABLED env flag = 'true' (pre-launch kill-switch —
-  //       fact-check is a hidden feature; its orchestrator does NOT
-  //       try/catch the invoke, so a stray enqueue dead-letters jobs
-  //       and burns spend. Default off until the UI ships.).
-  //     Mirrors trpc.factCheck.enqueue (PR 4.7 contract) when gated on.
+  // (8) Auto-fact-check enqueue.
   let factCheckEnqueued = false;
   const factCheckEnabled = process.env.FACT_CHECK_ENABLED === 'true';
   if (rewrite.claim.length > 0 && factCheckEnabled) {
-    // Sanitize before embedding in claim_context — the string is both a
-    // dedup-hash input (collisions via embedded `\n---\n` or newline-
-    // separated injection) and the second-step prompt operand for the
-    // fact-check orchestrator. Mirrors the §11 prompt-input sanitizer
-    // (security-reviewer PR #191 Low 6 + #193 Medium 1).
-    const claimContext = `${sanitizeClaimContextField(sel.chosen.source_title)}\n${sanitizeClaimContextField(sel.chosen.source_url)}`;
+    const claimContext = `${sanitizeClaimContextField(source.title)}\n${sanitizeClaimContextField(source.url)}`;
     factCheckEnqueued = await enqueueDropFactCheck(deps, {
       claimText: rewrite.claim,
       claimContext,
@@ -487,38 +470,60 @@ export const dropPublishHandler: JobHandler = async (row, deps) => {
     });
   }
 
+  // (9) PR C: stamp the GDELT cluster so it can't be Dropped again. Only
+  //     reputable candidates carry a global_event_id; primary/direct skip.
+  let clusterStamped = false;
+  if (chosen.evidence_tier === 'reputable' && chosen.global_event_id) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data: stampedData, error: stampErr } = (await (deps.supabase as any).rpc(
+      'stamp_cluster_drop_published',
+      { p_global_event_id: chosen.global_event_id, p_at: now.toISOString() },
+    )) as { data: boolean | null; error: { message: string } | null };
+    if (stampErr) {
+      deps.logger.warn({
+        event: 'drop_publish.cluster_stamp_failed',
+        global_event_id: chosen.global_event_id,
+        message: scrubMessage(stampErr.message),
+      });
+      // Non-fatal: news_topics was already inserted. A missed stamp risks
+      // re-pick of the same cluster next tick; the follow-up read gate on
+      // drop_published_at is a defense, not a sole guarantee.
+    } else {
+      clusterStamped = stampedData === true;
+    }
+  }
+
   // (10) Mark every candidate in the chosen cluster as selected_at=now.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { error: markErr } = (await (deps.supabase as any)
     .from('news_topics_candidates')
     .update({ selected_at: now.toISOString() })
-    .eq('dedup_cluster_id', sel.chosen.dedup_cluster_id)
+    .eq('dedup_cluster_id', chosen.dedup_cluster_id)
     .is('selected_at', null)) as { error: { message: string } | null };
   if (markErr) {
     deps.logger.warn({
       event: 'drop_publish.mark_selected_failed',
       message: scrubMessage(markErr.message),
     });
-    // Non-fatal: the news_topics row was inserted; candidates table
-    // staleness self-heals on the next retention sweep.
   }
 
-  // Telemetry — stamp outcome into the row's payload.
   const outcome: DropOutcome = {
-    chosen_candidate_id: sel.chosen.id,
-    chosen_cluster_id: sel.chosen.dedup_cluster_id,
-    chosen_score: sel.chosen.rank_score,
-    runner_up_cluster_id: sel.runnerUp?.dedup_cluster_id ?? null,
-    runner_up_score: sel.runnerUp?.rank_score ?? null,
+    chosen_candidate_id: chosen.id,
+    chosen_cluster_id: chosen.dedup_cluster_id,
+    chosen_score: chosen.rank_score,
+    runner_up_cluster_id: runnerUp?.dedup_cluster_id ?? null,
+    runner_up_score: runnerUp?.rank_score ?? null,
     score_ratio:
-      sel.runnerUp && sel.runnerUp.rank_score > 0
-        ? sel.chosen.rank_score / sel.runnerUp.rank_score
-        : null,
+      runnerUp && runnerUp.rank_score > 0 ? chosen.rank_score / runnerUp.rank_score : null,
     curation_mode: curationMode,
-    block_exhausted: sel.blockExhausted,
+    block_exhausted: blockExhausted,
     news_topic_id: topicData.id,
     headline_rewritten: rewrite.headline.length > 0,
     fact_check_enqueued: factCheckEnqueued,
+    evidence_tier: chosen.evidence_tier,
+    text_fetched: source.fromClusterOutletFetch,
+    fetched_host: source.fromClusterOutletFetch ? source.host : null,
+    cluster_stamped: clusterStamped,
   };
   await stampPayload(deps, row.id, { ...row.payload, outcome });
 
@@ -532,6 +537,123 @@ export const dropPublishHandler: JobHandler = async (row, deps) => {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+interface WalkResult {
+  chosen: ActiveCandidate;
+  runnerUp: ActiveCandidate | null;
+  blockExhausted: boolean;
+  source: PickedSource;
+}
+
+/** PR C: walk ranked candidates and return the first publishable one.
+ *  "Publishable" means: unblocked (unless blockExhaustedMode) AND
+ *    - primary/direct candidates: always publishable, use candidate URL.
+ *    - reputable candidates: must have a global_event_id AND the cluster
+ *      must yield readable news-type outlet text via fetchFirstReadable.
+ *  Returns null if no candidate is publishable under the given mode. */
+async function walkCandidates(
+  deps: Parameters<JobHandler>[1],
+  candidates: ReadonlyArray<ActiveCandidate>,
+  blockedClusters: ReadonlySet<string>,
+  blockExhaustedMode: boolean,
+): Promise<WalkResult | null> {
+  const ranked = [...candidates].sort((a, b) => b.rank_score - a.rank_score);
+  for (const chosen of ranked) {
+    if (!blockExhaustedMode && blockedClusters.has(chosen.dedup_cluster_id)) continue;
+    if (chosen.evidence_tier === 'primary' || chosen.evidence_tier === 'direct') {
+      const runnerUp = ranked.find((c) => c.dedup_cluster_id !== chosen.dedup_cluster_id) ?? null;
+      return {
+        chosen,
+        runnerUp,
+        blockExhausted: blockExhaustedMode,
+        source: pickedFromCandidate(chosen),
+      };
+    }
+    // Reputable path: require readable news-type outlet text.
+    if (!chosen.global_event_id) {
+      deps.logger.warn({
+        event: 'drop_publish.reputable_candidate_without_global_event_id',
+        candidateId: chosen.id,
+      });
+      continue;
+    }
+    const text = await tryFetchReputableText(deps, chosen);
+    if (text === null) {
+      deps.logger.info({
+        event: 'drop_publish.reputable_candidate_text_unavailable',
+        candidateId: chosen.id,
+        globalEventId: chosen.global_event_id,
+      });
+      continue;
+    }
+    const runnerUp = ranked.find((c) => c.dedup_cluster_id !== chosen.dedup_cluster_id) ?? null;
+    return {
+      chosen,
+      runnerUp,
+      blockExhausted: blockExhaustedMode,
+      source: pickedFromText(text),
+    };
+  }
+  return null;
+}
+
+/** Load a reputable candidate's GDELT cluster outlets + best_news_url,
+ *  rank them via pickTextSources, and fetch the first readable one. */
+async function tryFetchReputableText(
+  deps: Parameters<JobHandler>[1],
+  candidate: ActiveCandidate,
+): Promise<DropTextSource | null> {
+  if (!candidate.global_event_id) return null;
+  const fetchImpl = deps.fetch ?? globalThis.fetch;
+  if (!fetchImpl) {
+    deps.logger.warn({
+      event: 'drop_publish.no_fetch_impl',
+      candidateId: candidate.id,
+    });
+    return null;
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data: clusterData, error: clusterErr } = (await (deps.supabase as any)
+    .from('gdelt_event_cluster')
+    .select('best_news_url, best_news_host')
+    .eq('global_event_id', candidate.global_event_id)
+    .maybeSingle()) as {
+    data: { best_news_url: string | null; best_news_host: string | null } | null;
+    error: { message: string } | null;
+  };
+  if (clusterErr) {
+    deps.logger.warn({
+      event: 'drop_publish.cluster_fetch_failed',
+      candidateId: candidate.id,
+      message: scrubMessage(clusterErr.message),
+    });
+    return null;
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data: outletData, error: outletErr } = (await (deps.supabase as any)
+    .from('gdelt_event_cluster_outlet')
+    .select('url, host, outlet_type')
+    .eq('global_event_id', candidate.global_event_id)) as {
+    data: GdeltClusterOutletRow[] | null;
+    error: { message: string } | null;
+  };
+  if (outletErr) {
+    deps.logger.warn({
+      event: 'drop_publish.outlet_fetch_failed',
+      candidateId: candidate.id,
+      message: scrubMessage(outletErr.message),
+    });
+    return null;
+  }
+  const outlets = outletData ?? [];
+  const sources = pickTextSources(
+    outlets,
+    clusterData?.best_news_url ?? null,
+    clusterData?.best_news_host ?? null,
+  );
+  if (sources.length === 0) return null;
+  return fetchFirstReadable(fetchImpl, sources, PER_CANDIDATE_TEXT_FETCH_ATTEMPTS);
+}
 
 /** Generate a slug from the source title + ET date. Citext-unique on
  *  news_topics.slug; collisions retry once with a -2, -3 suffix
@@ -555,7 +677,6 @@ async function generateSlug(
   const fallback = `drop-${datePart}-${candidate.id.slice(0, 8)}`;
   const slug = base.length > 0 ? `${datePart}-${base}` : fallback;
 
-  // Check if the slug already exists; if so, append a numeric suffix.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { data } = (await (deps.supabase as any)
     .from('news_topics')
@@ -573,7 +694,6 @@ async function generateSlug(
       .maybeSingle()) as { data: { slug: string } | null };
     if (!existing) return trySlug;
   }
-  // Last-resort uniqueness — full uuid suffix.
   return `${slug}-${candidate.id.slice(0, 8)}`;
 }
 
@@ -592,13 +712,13 @@ async function stampPayload(
   }
 }
 
-/** Call the ai-fabric drop_headline_rewrite task. Returns empty strings
- *  on any failure (missing invoke, model error, empty model output).
- *  The handler treats empty headline as "fall back to source_title
- *  verbatim" — §5 "never skip a day" trumps voice polish. */
+/** Call the ai-fabric drop_headline_rewrite task.
+ *  PR C: now takes a PickedSource (fetched text for reputable;
+ *  candidate fields for primary/direct). */
 async function rewriteHeadlineSafely(
   deps: Parameters<JobHandler>[1],
   candidate: ActiveCandidate,
+  source: PickedSource,
 ): Promise<DropHeadlineRewriteOutput> {
   const empty: DropHeadlineRewriteOutput = { headline: '', summary: '', claim: '' };
   if (!deps.invoke) {
@@ -614,11 +734,11 @@ async function rewriteHeadlineSafely(
       task: 'drop_headline_rewrite',
       system: DROP_HEADLINE_REWRITE_SYSTEM_PROMPT,
       user: buildDropHeadlineUserPrompt({
-        sourceTitle: candidate.source_title,
-        sourceUrl: candidate.source_url,
-        sourceHost: candidate.source_host,
+        sourceTitle: source.title,
+        sourceUrl: source.url,
+        sourceHost: source.host,
         sourceCategory: candidate.source_category,
-        sourceSummary: candidate.summary,
+        sourceSummary: source.summary,
       }),
       schema: DropHeadlineRewriteSchema,
       env: deps.providerEnv ?? { xaiAvailable: false, perplexityAvailable: false },
@@ -633,19 +753,6 @@ async function rewriteHeadlineSafely(
       candidateId: candidate.id,
       issueDigest,
     });
-    // Telegram alert — the 14-day silent-degradation incident
-    // (Railway workers running without ANTHROPIC_API_KEY / OPENAI_API_KEY)
-    // was invisible precisely because this catch returned empty strings
-    // and the publish still marked `status='done'`. Alerter de-dups at
-    // 1 hour per task via dedupKey; the global rate cap in makeAlerter
-    // is the final safety net. Fire-and-forget so a Telegram outage
-    // never affects the Drop pipeline.
-    //
-    // Body is a static stub (security-reviewer PR #199 MEDIUM #3):
-    // scrubMessage covers PII patterns, but Zod parse-failure and
-    // provider-error strings can embed raw source-title fragments
-    // from the user prompt. The internal warn log keeps the scrubbed
-    // message; the alerter sees an operator-facing pointer only.
     void deps.alerter?.alert(
       'error',
       'drop_publish rewrite_failed',
@@ -659,18 +766,12 @@ async function rewriteHeadlineSafely(
   }
 }
 
-/** Call the ai-fabric topic_fact_explainer task (A4). Returns the
- *  structured payload on success, or null on any failure mode
- *  (missing invoke, model error, Zod parse fail, empty for_summary).
- *  The handler persists null and the UI falls through to the raw
- *  primary_source_url link — same fail-tolerant posture as the
- *  headline rewrite. Independent of the rewrite call: a rewrite
- *  success + explainer failure is a valid, published Drop with no
- *  explainer; a rewrite failure + explainer success writes the raw
- *  title AND the explainer. */
+/** Call the ai-fabric topic_fact_explainer task (A4).
+ *  PR C: now takes a PickedSource. */
 async function generateFactExplainerSafely(
   deps: Parameters<JobHandler>[1],
   candidate: ActiveCandidate,
+  source: PickedSource,
 ): Promise<FactExplainerOutput | null> {
   if (!deps.invoke) {
     deps.logger.warn({
@@ -685,11 +786,11 @@ async function generateFactExplainerSafely(
       task: 'topic_fact_explainer',
       system: TOPIC_FACT_EXPLAINER_SYSTEM_PROMPT,
       user: buildTopicFactExplainerUserPrompt({
-        sourceTitle: candidate.source_title,
-        sourceUrl: candidate.source_url,
-        sourceHost: candidate.source_host,
+        sourceTitle: source.title,
+        sourceUrl: source.url,
+        sourceHost: source.host,
         sourceCategory: candidate.source_category,
-        sourceSummary: candidate.summary,
+        sourceSummary: source.summary,
       }),
       schema: FactExplainerSchema,
       env: deps.providerEnv ?? { xaiAvailable: false, perplexityAvailable: false },
@@ -697,8 +798,6 @@ async function generateFactExplainerSafely(
       maxTokens: 1024,
     });
     const output = result.output as FactExplainerOutput;
-    // Empty for_summary = "could not neutralize" per fact-explainer.ts
-    // rule 10. Treat as null so the UI falls through to the raw link.
     if (output.for_summary.trim().length === 0) {
       deps.logger.info({
         event: 'drop_publish.fact_explainer_empty',
@@ -715,12 +814,6 @@ async function generateFactExplainerSafely(
       candidateId: candidate.id,
       issueDigest,
     });
-    // The alert body is static — scrubMessage covers PII-tagged
-    // patterns, but Zod parse-failure messages can embed raw model-
-    // output fragments (including source-title text that was fed into
-    // the prompt). Keep the raw message in the internal log only;
-    // the alerter sees a short, operator-facing stub.
-    // (security-reviewer PR #198 MEDIUM #3.)
     void deps.alerter?.alert(
       'error',
       'drop_publish fact_explainer_failed',
@@ -734,14 +827,6 @@ async function generateFactExplainerSafely(
   }
 }
 
-/** Upsert the claim into fact_check_claims and enqueue a fact_check
- *  scheduled_jobs row. Mirrors the trpc.factCheck.enqueue path (PR
- *  4.7 contract) — same sha256(claim_text + '\n---\n' + claim_context)
- *  dedup hash, same {claim_id}:{UTC_day} idempotency_key shape.
- *  Returns true if a new fact_check job row landed; false on any
- *  silent failure (23505 same-day dup is acceptable). Failures are
- *  logged but never throw — auto-fact-check is best-effort, the Drop
- *  publishes regardless. */
 async function enqueueDropFactCheck(
   deps: Parameters<JobHandler>[1],
   opts: { claimText: string; claimContext: string; refId: string; now: Date },
@@ -796,8 +881,6 @@ async function enqueueDropFactCheck(
     },
   })) as { error: { code?: string; message: string } | null };
   if (jobErr) {
-    // 23505 = unique violation on (job_type, idempotency_key) — a same-
-    // UTC-day re-enqueue is acceptable (orchestrator cache-hits anyway).
     if (jobErr.code === '23505') return false;
     deps.logger.warn({
       event: 'drop_publish.fact_check_enqueue_failed',
@@ -814,19 +897,7 @@ export const __testing = {
   todayDropAtEt,
   CLUSTER_BLOCK_DAYS,
   DOMINANCE_RATIO,
-  // Expose sanitizeClaimContextField so round-3 unit tests can
-  // observe the bidi + tag-block strip + length cap behaviour
-  // directly rather than through the gated fact-check enqueue path
-  // (FACT_CHECK_ENABLED=false in CI). Security-reviewer PR #199
-  // round 3 INFO (locked in alongside the MEDIUM `new RegExp(string)`
-  // fix to prevent regression on the sanitize contract).
+  PER_CANDIDATE_TEXT_FETCH_ATTEMPTS,
   sanitizeClaimContextField,
-  // Expose a safeParse wrapper rather than the live schema object
-  // (security-reviewer PR #199 LOW #3). Tests can observe the
-  // refine() behaviour without the schema's full z.ZodObject surface
-  // leaking into the test seam — a `.parse` or `.extend` call-site
-  // in a test would start to look load-bearing and get mimicked
-  // elsewhere. Returns { success, data?, error? } to mirror Zod's
-  // native safeParse shape.
   factExplainerSafeParse: (value: unknown) => FactExplainerSchema.safeParse(value),
 };

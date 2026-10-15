@@ -22,6 +22,10 @@ interface MinimalCandidate {
   summary: string | null;
   dedup_cluster_id: string;
   rank_score: number;
+  // PR C — added so dropPublishHandler can enforce S3.
+  evidence_tier: 'primary' | 'direct' | 'reputable';
+  outlet_type: 'news' | 'commentary' | null;
+  global_event_id: string | null;
 }
 
 function cand(overrides: Partial<MinimalCandidate>): MinimalCandidate {
@@ -36,6 +40,9 @@ function cand(overrides: Partial<MinimalCandidate>): MinimalCandidate {
     summary: null,
     dedup_cluster_id: 'cluster-A',
     rank_score: 3.0,
+    evidence_tier: 'primary',
+    outlet_type: null,
+    global_event_id: null,
     ...overrides,
   };
 }
@@ -185,6 +192,20 @@ interface RecentDrop {
   drop_at: string;
 }
 
+interface GdeltClusterRow {
+  global_event_id: string;
+  best_news_url: string | null;
+  best_news_host: string | null;
+  drop_published_at: string | null;
+}
+
+interface GdeltOutletRow {
+  global_event_id: string;
+  url: string;
+  host: string;
+  outlet_type: 'news' | 'commentary' | null;
+}
+
 interface FakeState {
   candidates: MinimalCandidate[];
   recentDrops: RecentDrop[];
@@ -199,9 +220,44 @@ interface FakeState {
   factCheckJobInserts: Record<string, unknown>[];
   factCheckJobInsertError: { code?: string; message: string } | null;
   nextFactCheckClaimId: string;
+  // PR C: gdelt_event_cluster + gdelt_event_cluster_outlet fixtures used
+  // when a reputable-tier candidate triggers a text-fetch lookup.
+  clusterRows?: GdeltClusterRow[];
+  outletRows?: GdeltOutletRow[];
+  // PR C: record stamp_cluster_drop_published calls so tests can assert
+  // the stamp side-effect on a published reputable Drop.
+  stampCalls?: { p_global_event_id: string; p_at: string }[];
+  // PR C: optionally force the stamp RPC to return false (already
+  // stamped) or an error path.
+  stampReturn?: boolean;
 }
 
 function buildSupabase(state: FakeState): ServiceClient {
+  const rpcImpl = (
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<{ data: unknown; error: { message: string } | null }> => {
+    if (name === 'pick_drop_eligible_candidates') {
+      // Default commentary gate matches the SQL default (false): drop
+      // commentary-outlet candidates unless the test asks for them.
+      const includeCommentary = args.p_commentary_as_drop_candidate === true;
+      const filtered = state.candidates.filter((c) =>
+        includeCommentary ? true : c.outlet_type !== 'commentary',
+      );
+      // RPC returns rank-ordered; mirror the SQL `order by rank_score
+      // desc nulls last` by rank_score desc so the handler can
+      // re-sort defensively.
+      const ordered = [...filtered].sort((a, b) => b.rank_score - a.rank_score);
+      return Promise.resolve({ data: ordered, error: null });
+    }
+    if (name === 'stamp_cluster_drop_published') {
+      const geid = args.p_global_event_id as string;
+      const at = (args.p_at as string | undefined) ?? new Date().toISOString();
+      (state.stampCalls ??= []).push({ p_global_event_id: geid, p_at: at });
+      return Promise.resolve({ data: state.stampReturn ?? true, error: null });
+    }
+    return Promise.resolve({ data: null, error: { message: `unknown rpc: ${name}` } });
+  };
   const fromImpl = (table: string) => ({
     select(_cols: string) {
       const handler = {
@@ -247,6 +303,10 @@ function buildSupabase(state: FakeState): ServiceClient {
             rows = state.recentDrops as unknown as Record<string, unknown>[];
           } else if (table === 'fact_check_claims') {
             rows = state.factCheckClaims as unknown as Record<string, unknown>[];
+          } else if (table === 'gdelt_event_cluster') {
+            rows = (state.clusterRows ?? []) as unknown as Record<string, unknown>[];
+          } else if (table === 'gdelt_event_cluster_outlet') {
+            rows = (state.outletRows ?? []) as unknown as Record<string, unknown>[];
           } else {
             rows = [];
           }
@@ -331,7 +391,7 @@ function buildSupabase(state: FakeState): ServiceClient {
       return upd;
     },
   });
-  return { from: fromImpl } as unknown as ServiceClient;
+  return { from: fromImpl, rpc: rpcImpl } as unknown as ServiceClient;
 }
 
 function buildLogger(): Logger & { calls: { level: string; obj: Record<string, unknown> }[] } {
@@ -1206,5 +1266,343 @@ describe('dropPublishHandler — FACT_CHECK_ENABLED kill-switch', () => {
     expect(
       logger.calls.find((c) => c.obj.event === 'drop_publish.fact_check_gated_off'),
     ).toBeUndefined();
+  });
+});
+
+// =========================================================================
+// PR C — S3 enforcement + reputable text wiring
+// =========================================================================
+
+/** Minimal `og:title` HTML the real fetchOgText parser accepts. */
+function okHtml(title: string, description: string): string {
+  return `<html><head><meta property="og:title" content="${title}"/><meta property="og:description" content="${description}"/></head><body></body></html>`;
+}
+
+function okResponse(html: string): Response {
+  return new Response(html, { status: 200, headers: { 'content-type': 'text/html' } });
+}
+
+function prCreputableState(opts: {
+  // The chosen candidate's cluster has multiple news-type outlets.
+  candidateId?: string;
+  globalEventId?: string;
+  bestNewsUrl?: string | null;
+  bestNewsHost?: string | null;
+  outlets?: GdeltOutletRow[];
+}): FakeState {
+  const geid = opts.globalEventId ?? 'cluster-news';
+  return {
+    candidates: [
+      cand({
+        id: opts.candidateId ?? 'rep-1',
+        source_provider: 'gdelt',
+        source_category: 'news',
+        source_title: 'Original GDELT title',
+        source_url: 'https://apnews.com/article/original',
+        source_host: 'apnews.com',
+        dedup_cluster_id: 'cluster-X',
+        rank_score: 1.0,
+        evidence_tier: 'reputable',
+        outlet_type: 'news',
+        global_event_id: geid,
+      }),
+    ],
+    recentDrops: [],
+    newsTopicInserts: [],
+    candidateUpdates: [],
+    payloadUpdates: [],
+    insertError: null,
+    nextNewsTopicId: 'nt-rep-1',
+    factCheckClaimUpserts: [],
+    factCheckClaims: [],
+    factCheckJobInserts: [],
+    factCheckJobInsertError: null,
+    nextFactCheckClaimId: 'fc-rep-1',
+    clusterRows: [
+      {
+        global_event_id: geid,
+        best_news_url: opts.bestNewsUrl ?? null,
+        best_news_host: opts.bestNewsHost ?? null,
+        drop_published_at: null,
+      },
+    ],
+    outletRows: opts.outlets ?? [
+      {
+        global_event_id: geid,
+        host: 'apnews.com',
+        url: 'https://apnews.com/article/fetched',
+        outlet_type: 'news',
+      },
+    ],
+    stampCalls: [],
+    stampReturn: true,
+  };
+}
+
+describe('dropPublishHandler — PR C: S3 enforcement + reputable text wiring', () => {
+  it('reputable candidate: primary_source_url is the fetched news-type URL, not candidate.source_url', async () => {
+    const state = prCreputableState({});
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+    const fetchMock = vi
+      .fn<[string, RequestInit?], Promise<Response>>()
+      .mockResolvedValue(okResponse(okHtml('Fetched Title', 'Fetched description')));
+
+    await dropPublishHandler(row(), {
+      supabase,
+      logger,
+      fetch: fetchMock as unknown as typeof globalThis.fetch,
+    });
+
+    expect(state.newsTopicInserts).toHaveLength(1);
+    const insert = state.newsTopicInserts[0]!;
+    // Not the GDELT mention URL; the fetched news-type outlet URL.
+    expect(insert.primary_source_url).toBe('https://apnews.com/article/fetched');
+    // source_title still holds the raw GDELT mention title for audit.
+    expect(insert.source_title).toBe('Original GDELT title');
+    // Headline is the fetched og:title because invoke is not supplied
+    // (empty rewrite output falls back to source.title).
+    expect(insert.headline).toBe('Fetched Title');
+    // Summary falls back to the fetched og:description.
+    expect(insert.summary).toBe('Fetched description');
+    // Fetch was called on the news-type outlet URL (not commentary).
+    expect(fetchMock).toHaveBeenCalled();
+    const calledUrl = fetchMock.mock.calls[0]![0] as string;
+    expect(calledUrl).toContain('apnews.com');
+  });
+
+  it('reputable candidate: stamp_cluster_drop_published is called with the global_event_id', async () => {
+    const state = prCreputableState({ globalEventId: 'cluster-abc-123' });
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+    const fetchMock = vi
+      .fn<[string, RequestInit?], Promise<Response>>()
+      .mockResolvedValue(okResponse(okHtml('T', 'D')));
+
+    await dropPublishHandler(row(), {
+      supabase,
+      logger,
+      fetch: fetchMock as unknown as typeof globalThis.fetch,
+    });
+
+    expect(state.stampCalls).toEqual([
+      expect.objectContaining({ p_global_event_id: 'cluster-abc-123' }),
+    ]);
+    const outcome = logger.calls.find((c) => c.obj.event === 'drop_publish.complete');
+    expect(outcome?.obj.cluster_stamped).toBe(true);
+    expect(outcome?.obj.evidence_tier).toBe('reputable');
+    expect(outcome?.obj.text_fetched).toBe(true);
+  });
+
+  it('primary candidate: no cluster lookup, no fetch, no stamp call', async () => {
+    const state: FakeState = {
+      candidates: [
+        cand({
+          id: 'prim-1',
+          source_provider: 'sec',
+          source_category: 'sec_filings',
+          source_url: 'https://www.sec.gov/pr/x',
+          source_host: 'sec.gov',
+          dedup_cluster_id: 'cluster-sec',
+          rank_score: 2.0,
+          evidence_tier: 'primary',
+          outlet_type: null,
+          global_event_id: null,
+        }),
+      ],
+      recentDrops: [],
+      newsTopicInserts: [],
+      candidateUpdates: [],
+      payloadUpdates: [],
+      insertError: null,
+      nextNewsTopicId: 'nt-prim-1',
+      factCheckClaimUpserts: [],
+      factCheckClaims: [],
+      factCheckJobInserts: [],
+      factCheckJobInsertError: null,
+      nextFactCheckClaimId: 'fc-prim-1',
+      clusterRows: [],
+      outletRows: [],
+      stampCalls: [],
+      stampReturn: true,
+    };
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+    const fetchMock = vi.fn<[string, RequestInit?], Promise<Response>>();
+
+    await dropPublishHandler(row(), {
+      supabase,
+      logger,
+      fetch: fetchMock as unknown as typeof globalThis.fetch,
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(state.stampCalls).toEqual([]);
+    expect(state.newsTopicInserts[0]!.primary_source_url).toBe('https://www.sec.gov/pr/x');
+    const outcome = logger.calls.find((c) => c.obj.event === 'drop_publish.complete');
+    expect(outcome?.obj.evidence_tier).toBe('primary');
+    expect(outcome?.obj.text_fetched).toBe(false);
+    expect(outcome?.obj.cluster_stamped).toBe(false);
+  });
+
+  it('reputable candidate yielding no readable text: walks to next eligible candidate', async () => {
+    const state: FakeState = {
+      candidates: [
+        cand({
+          id: 'rep-fail',
+          source_provider: 'gdelt',
+          source_category: 'news',
+          source_url: 'https://apnews.com/article/bad',
+          source_host: 'apnews.com',
+          dedup_cluster_id: 'cluster-fail',
+          rank_score: 2.0,
+          evidence_tier: 'reputable',
+          outlet_type: 'news',
+          global_event_id: 'cluster-fail',
+        }),
+        cand({
+          id: 'prim-fallback',
+          source_provider: 'sec',
+          source_category: 'sec_filings',
+          source_url: 'https://www.sec.gov/pr/fallback',
+          source_host: 'sec.gov',
+          dedup_cluster_id: 'cluster-sec-fallback',
+          rank_score: 1.0,
+          evidence_tier: 'primary',
+          outlet_type: null,
+          global_event_id: null,
+        }),
+      ],
+      recentDrops: [],
+      newsTopicInserts: [],
+      candidateUpdates: [],
+      payloadUpdates: [],
+      insertError: null,
+      nextNewsTopicId: 'nt-fallback',
+      factCheckClaimUpserts: [],
+      factCheckClaims: [],
+      factCheckJobInserts: [],
+      factCheckJobInsertError: null,
+      nextFactCheckClaimId: 'fc-fb',
+      clusterRows: [
+        {
+          global_event_id: 'cluster-fail',
+          best_news_url: null,
+          best_news_host: null,
+          drop_published_at: null,
+        },
+      ],
+      outletRows: [
+        {
+          global_event_id: 'cluster-fail',
+          host: 'apnews.com',
+          url: 'https://apnews.com/article/dead',
+          outlet_type: 'news',
+        },
+      ],
+      stampCalls: [],
+      stampReturn: true,
+    };
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+    // Every fetch 500s → fetchOgText returns null → walk to next.
+    const fetchMock = vi
+      .fn<[string, RequestInit?], Promise<Response>>()
+      .mockResolvedValue(new Response('', { status: 500 }));
+
+    await dropPublishHandler(row(), {
+      supabase,
+      logger,
+      fetch: fetchMock as unknown as typeof globalThis.fetch,
+    });
+
+    // Walked past the reputable candidate; published the primary fallback.
+    expect(state.newsTopicInserts).toHaveLength(1);
+    expect(state.newsTopicInserts[0]!.primary_source_url).toBe('https://www.sec.gov/pr/fallback');
+    expect(state.stampCalls).toEqual([]); // primary → no stamp
+    const skipLog = logger.calls.find(
+      (c) => c.obj.event === 'drop_publish.reputable_candidate_text_unavailable',
+    );
+    expect(skipLog).toBeDefined();
+    expect(skipLog?.obj.candidateId).toBe('rep-fail');
+  });
+
+  it('all eligible candidates fail text-fetch: stamps no_candidates and inserts nothing', async () => {
+    const state = prCreputableState({});
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+    const fetchMock = vi
+      .fn<[string, RequestInit?], Promise<Response>>()
+      .mockResolvedValue(new Response('', { status: 500 }));
+
+    await dropPublishHandler(row(), {
+      supabase,
+      logger,
+      fetch: fetchMock as unknown as typeof globalThis.fetch,
+    });
+
+    expect(state.newsTopicInserts).toEqual([]);
+    expect(state.stampCalls).toEqual([]);
+    const payloadStamp = state.payloadUpdates.find(
+      (p) => (p.patch.payload as Record<string, unknown> | undefined)?.no_candidates === true,
+    );
+    expect(payloadStamp).toBeDefined();
+  });
+
+  it('commentary candidate: dropped by RPC default (p_commentary_as_drop_candidate=false)', async () => {
+    const state: FakeState = {
+      candidates: [
+        // A commentary-outlet candidate; RPC default excludes it.
+        cand({
+          id: 'comm-1',
+          source_provider: 'gdelt',
+          source_category: 'news',
+          source_url: 'https://motherjones.com/x',
+          source_host: 'motherjones.com',
+          dedup_cluster_id: 'cluster-comm',
+          rank_score: 5.0,
+          evidence_tier: 'reputable',
+          outlet_type: 'commentary',
+          global_event_id: 'cluster-comm',
+        }),
+        // A primary that should win in commentary's absence.
+        cand({
+          id: 'prim-2',
+          source_provider: 'sec',
+          source_category: 'sec_filings',
+          source_url: 'https://www.sec.gov/pr/y',
+          source_host: 'sec.gov',
+          dedup_cluster_id: 'cluster-sec-y',
+          rank_score: 0.5,
+          evidence_tier: 'primary',
+          outlet_type: null,
+          global_event_id: null,
+        }),
+      ],
+      recentDrops: [],
+      newsTopicInserts: [],
+      candidateUpdates: [],
+      payloadUpdates: [],
+      insertError: null,
+      nextNewsTopicId: 'nt-comm-exclude',
+      factCheckClaimUpserts: [],
+      factCheckClaims: [],
+      factCheckJobInserts: [],
+      factCheckJobInsertError: null,
+      nextFactCheckClaimId: 'fc-exc',
+      clusterRows: [],
+      outletRows: [],
+      stampCalls: [],
+      stampReturn: true,
+    };
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+
+    await dropPublishHandler(row(), { supabase, logger });
+
+    expect(state.newsTopicInserts).toHaveLength(1);
+    // Commentary never surfaces as the published source.
+    expect(state.newsTopicInserts[0]!.primary_source_url).toBe('https://www.sec.gov/pr/y');
+    expect(state.newsTopicInserts[0]!.source_title).not.toContain('motherjones');
   });
 });
