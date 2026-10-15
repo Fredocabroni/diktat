@@ -220,6 +220,18 @@ jobs:
                 echo "::error::Reviewer verdict: BLOCK — see the posted PR comment for details."
                 exit 1
                 ;;
+              ambiguous)
+                # Ambiguous verdict: header + non-trivial body, but no
+                # detectable PASS / APPROVE / BLOCK marker. Mirrors the
+                # ambiguous arm in claude-review.yml. Without this arm the
+                # status fell through to `*)`, which failed the check
+                # (correct) but never posted the body, so the operator
+                # could not see what schema-reviewer actually said.
+                # Fail closed: post the body, then exit 1.
+                gh pr comment "$PR_NUMBER" --body-file review_output.md
+                echo "::error::Reviewer gate: ambiguous verdict — review body posted but no explicit PASS/BLOCK marker found. Rerun the workflow or ask the reviewer agent to end with the explicit verdict."
+                exit 1
+                ;;
               empty)
                 echo "schema-reviewer produced no substantive output (no files in scope)"
                 ;;
