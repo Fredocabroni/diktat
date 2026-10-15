@@ -320,6 +320,7 @@ jobs:
           set +e
           claude -p "$REVIEW_PROMPT" \
             --model "$REVIEW_MODEL" \
+            --max-turns 50 \
             --output-format text > review_output.md
           echo "$?" > review_exit_code
           set -e
