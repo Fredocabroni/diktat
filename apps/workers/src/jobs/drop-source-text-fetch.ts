@@ -19,6 +19,7 @@
 
 import {
   PAYWALL_FREE_PREFERRED_HOSTS,
+  isApexHost,
   isExcludedPath,
   lookupOutlet,
 } from '@diktat/shared/news-outlets';
@@ -133,27 +134,27 @@ export async function fetchOgText(
       return null;
     }
     if (parsed.protocol !== 'https:') return null;
-    // Allowlist check — three gates, all three must pass.
+    // Allowlist check — four gates, all four must pass.
     //   (a) `lookupOutlet` resolves the hostname against one of the
-    //       30 outlets (suffix-match for www. / subdomain tolerance).
-    //   (b) The *resolved* outlet's hostname must be an EXACT match
-    //       for `outlet.domain` or `www.<outlet.domain>` — not any
-    //       deeper subdomain. Closes PR #214 round-2 reviewer MED 7:
-    //       `lookupOutlet`'s suffix match admits
-    //       `evil.subdomain.cnn.com` → `cnn.com`, which an attacker
-    //       could reach via DNS wildcard / subdomain takeover and
-    //       serve crafted og:title. The suffix-match is appropriate
-    //       for `www.<x>` / `edition.<x>` normalisation inside
-    //       classifyUrl's broader check; here, where we're about to
-    //       fetch and consume the body as evidence, we require an
-    //       exact apex match.
+    //       30 outlets (suffix-match for www. / subdomain tolerance,
+    //       plus alias handling for multi-TLD outlets like BBC).
+    //   (b) `isApexHost` requires the hostname be EXACTLY the outlet's
+    //       canonical `domain`, any entry in its `aliases` list, or
+    //       `www.<domain>` / `www.<alias>` — not any deeper subdomain.
+    //       Closes PR #214 round-2 reviewer MED 7 (lookupOutlet
+    //       admits `evil.subdomain.cnn.com` → `cnn.com`; DNS wildcard
+    //       / subdomain takeover could serve crafted og:title). The
+    //       suffix-match is appropriate for lookupOutlet's broader
+    //       classify-time check; here, where we're about to fetch
+    //       and consume the body as evidence, we require an exact
+    //       apex match. Aliases are first-class apex names (BBC's
+    //       `bbc.co.uk` passes isApexHost; `news.bbc.co.uk` doesn't).
     //   (c) The outlet is news-type (commentary never carries evidence).
     //   (d) The URL path does NOT match any opinion / editorial /
     //       contributor prefix on that outlet (closes round-1 MED 2).
     const outlet = lookupOutlet(parsed.hostname);
     if (outlet === null) return null;
-    const normalizedHost = parsed.hostname.toLowerCase().replace(/^www\./, '');
-    if (normalizedHost !== outlet.domain) return null;
+    if (!isApexHost(outlet, parsed.hostname)) return null;
     if (outlet.type !== 'news') return null;
     if (isExcludedPath(outlet, parsed.toString())) return null;
 
