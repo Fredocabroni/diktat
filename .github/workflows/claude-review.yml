@@ -177,8 +177,8 @@ jobs:
           # round 1. Not the place to save pennies.
           - name: security-reviewer
             model: claude-sonnet-4-6
-            scope: full
-            prompt: "Run the security-reviewer subagent on this PR's diff. Output ONLY the review report in markdown. The VERY FIRST non-blank line of your output MUST be a markdown header (e.g. '# Security Review') — do not precede it with any preamble, and do not follow the report with any closing summary, meta-comment, or note about the report itself (e.g. never write 'the report above is complete'). The report IS your entire output. Do NOT edit files, request write or file permissions, run shell commands, or take any tool action of any kind. You are a read-only reviewer: if the diff has defects, name them and recommend the fix IN THE REPORT — never apply or offer to apply changes yourself. A human approves every change."
+            scope: diff-only
+            prompt: "Run the security-reviewer subagent on the PR diff at ./pr.diff. Report findings ONLY on code added or modified in that diff — never on untouched surrounding code, never on files not in the diff. You MAY read other repo files for context (to understand how a change fits with surrounding infrastructure, prior migrations, or callers), but a finding on a file that the diff doesn't touch must be omitted entirely. Output ONLY the review report in markdown. The VERY FIRST non-blank line of your output MUST be a markdown header (e.g. '# Security Review') — do not precede it with any preamble, and do not follow the report with any closing summary, meta-comment, or note about the report itself (e.g. never write 'the report above is complete'). The report IS your entire output. Do NOT edit files, request write or file permissions, run shell commands, or take any tool action of any kind. You are a read-only reviewer: if the diff has defects, name them and recommend the fix IN THE REPORT — never apply or offer to apply changes yourself. A human approves every change."
           # copy-linter → Haiku 4.5. Checklist-based pattern matching;
           # Haiku is capable at ~5-10× lower per-token cost. Also gated
           # via `changes.outputs.copy` so it only fires when a
@@ -245,24 +245,28 @@ jobs:
         if: ${{ env.SHOULD_RUN == 'true' }}
         run: npm i -g @anthropic-ai/claude-code@2.1.176
 
-      # Compute the PR diff for the diff-only reviewers. No GH_TOKEN
-      # needed: the fetch-depth: 0 checkout above gave us both refs,
-      # so `git diff origin/<base>...HEAD` reproduces exactly what a
-      # PR-diff view shows. Written to ./pr.diff, which the reviewer
-      # step reads by filename via the prompt. Runs for both copy +
-      # addiction; skipped for security-reviewer which continues to
-      # scope via the prompt's "on this PR's diff" language and its
-      # own subagent read pattern.
+      # Compute the PR diff for every reviewer. No GH_TOKEN needed: the
+      # fetch-depth: 0 checkout above gave us both refs, so
+      # `git diff origin/<base>...HEAD` reproduces exactly what a
+      # PR-diff view shows. Written to ./pr.diff, which each reviewer
+      # step reads by filename via its prompt.
+      #
+      # Previously this step was gated to copy-linter + addiction-auditor
+      # only. security-reviewer scoped via the prompt's "on this PR's
+      # diff" language instead, which gave the agent no actual diff to
+      # work from — the subagent inferred the PR surface from git state
+      # and in practice drifted onto already-merged migration files
+      # outside the diff (observed on PR #221 push-1 and push-2, logged
+      # on #167). Feeding the diff file to every reviewer makes the
+      # surface deterministic.
       #
       # Round-1 M2: `github.base_ref` is piped through env instead of
       # interpolated directly into the shell command. Same posture as
       # REVIEW_PROMPT / REVIEW_MODEL below — checked-in workflow YAML
       # is trusted, but consistent env-quoting removes the shell-word-
       # boundary attack surface across the whole workflow.
-      - name: Compute PR diff (copy + addiction only)
-        if: >-
-          ${{ env.SHOULD_RUN == 'true'
-              && matrix.reviewer.name != 'security-reviewer' }}
+      - name: Compute PR diff
+        if: ${{ env.SHOULD_RUN == 'true' }}
         env:
           BASE_REF: ${{ github.base_ref }}
         run: |

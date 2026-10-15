@@ -123,6 +123,40 @@ jobs:
         if: ${{ needs.changes.outputs.code == 'true' }}
         run: npm i -g @anthropic-ai/claude-code@2.1.176
 
+      # Compute the PR migration diff. Scoped to supabase/migrations/
+      # and packages/db/ — the only two paths the schema-reviewer is
+      # responsible for. Writing to ./pr.diff gives the reviewer a
+      # deterministic surface instead of forcing the subagent to
+      # infer which files are in the PR from git state (which drifted
+      # onto already-merged migrations outside the diff on PR #221
+      # push-1 and push-2 — logged on #167).
+      #
+      # Also prints `git diff --name-only` to stdout and appends the
+      # file list to $GITHUB_STEP_SUMMARY so the surface is visible
+      # in the workflow log and the run summary without opening the
+      # pr.diff artifact.
+      #
+      # `github.base_ref` is piped through env for consistent quoting
+      # (same pattern as claude-review.yml's REVIEW_PROMPT / REVIEW_MODEL).
+      - name: Compute PR diff
+        if: ${{ needs.changes.outputs.code == 'true' }}
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          # Base ref is checked out fetch-depth: 0, so origin/<base>
+          # exists locally.
+          git diff "origin/${BASE_REF}...HEAD" -- supabase/migrations/ packages/db/ > pr.diff
+          echo "Files in diff:"
+          git diff --name-only "origin/${BASE_REF}...HEAD" -- supabase/migrations/ packages/db/
+          wc -l pr.diff
+          {
+            echo "### schema-reviewer input: files in diff"
+            echo ""
+            git diff --name-only "origin/${BASE_REF}...HEAD" -- supabase/migrations/ packages/db/ \
+              | sed 's/^/- /'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       # Capture-then-post pattern, harmonized with claude-review.yml.
       # The prior legacy shape asked the agent to shell out to
       # `gh pr comment` itself — claude -p's headless Bash-permission
@@ -141,7 +175,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           set +e
-          claude -p "Run the schema-reviewer subagent on the supabase/migrations/ files changed in this PR. Output ONLY the review report in markdown. The VERY FIRST non-blank line of your output MUST be a markdown header (e.g. '# Schema Review') — do not precede it with any preamble, and do not follow the report with any closing summary, meta-comment, or note about the report itself (e.g. never write 'the report above is complete'). The report IS your entire output. Do NOT edit files, request write or file permissions, run shell commands, or take any tool action of any kind. You are a read-only reviewer: if the diff has defects, name them and recommend the fix IN THE REPORT — never apply or offer to apply changes yourself. A human approves every change." \
+          claude -p "Run the schema-reviewer subagent on the migration diff at ./pr.diff. Review ONLY the migration files that appear in that diff (added, modified, or renamed under supabase/migrations/ or packages/db/). You MAY read earlier migrations for context (schema state at apply time, prior constraints a new migration depends on), but a finding on a migration file that the diff doesn't touch must be omitted entirely. The newest already-applied migration is the newest migration file that exists on the base branch, not any file in the diff. Output ONLY the review report in markdown. The VERY FIRST non-blank line of your output MUST be a markdown header (e.g. '# Schema Review') — do not precede it with any preamble, and do not follow the report with any closing summary, meta-comment, or note about the report itself (e.g. never write 'the report above is complete'). The report IS your entire output. Do NOT edit files, request write or file permissions, run shell commands, or take any tool action of any kind. You are a read-only reviewer: if the diff has defects, name them and recommend the fix IN THE REPORT — never apply or offer to apply changes yourself. A human approves every change." \
             --model claude-sonnet-4-6 \
             --output-format text > review_output.md
           echo "$?" > review_exit_code
