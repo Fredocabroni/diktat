@@ -1088,20 +1088,13 @@ export function buildNewsIngestHandler(
  *  A read failure is swallowed with a debug log — observability must
  *  never crash the ingest tick. */
 async function warnStaleAdapters(deps: Parameters<JobHandler>[1]): Promise<void> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data, error } = (await (deps.supabase as any)
+  // Typed via the Database generic on ServiceClient (apps/workers/src/
+  // supabase.ts). The compiler now verifies the table name and the
+  // selected columns against packages/db/src/types.ts without an
+  // `as any` cast. Closes #218 MED B.
+  const { data, error } = await deps.supabase
     .from('news_adapter_health')
-    .select('adapter, last_success_at, last_fresh_insert_at, updated_at')) as {
-    data:
-      | {
-          adapter: string;
-          last_success_at: string | null;
-          last_fresh_insert_at: string | null;
-          updated_at: string;
-        }[]
-      | null;
-    error: { message: string } | null;
-  };
+    .select('adapter, last_success_at, last_fresh_insert_at, updated_at');
   if (error) {
     deps.logger.debug({
       event: 'news_ingest.health_read_failed',
