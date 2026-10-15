@@ -83,12 +83,16 @@ jobs:
         # rationale on this specific pin.
         uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
         with:
-          # `list-files: 'shell'` emits the matched-file list for every
-          # filter as `<name>_files` — shell-quoted, space-separated,
-          # suitable for `eval set --`. The `scope` step below reads
-          # these to perform real test-file exclusion (see that step
-          # for why `!X` patterns don't do it).
-          list-files: 'shell'
+          # `list-files: 'json'` emits the matched-file list for every
+          # filter as `<name>_files` — a JSON array of path strings
+          # with no shell escaping involved anywhere. The `scope` step
+          # below reads these to perform real test-file exclusion
+          # (see that step for why `!X` patterns don't do it) via jq
+          # + a NUL-safe-adjacent read loop; the earlier `'shell'`
+          # format was flagged on PR #244 as a structural eval surface
+          # on attacker-controlled filenames, and JSON transport
+          # eliminates every eval and word-split path.
+          list-files: 'json'
           filters: |
             code:
               - 'apps/**'
@@ -154,23 +158,37 @@ jobs:
               - 'docs/ADDICTION_ARCHITECTURE.md'
 
       # Shell-based test-file exclusion. Reads dorny's `copy_files` and
-      # `addiction_files` outputs (shell-quoted via `list-files: 'shell'`
+      # `addiction_files` JSON-array outputs (via `list-files: 'json'`
       # above) and emits `copy` / `addiction` as "at least one non-test
       # file matched the positive patterns". A file is "test" if its
       # path has a /__tests__/ segment, its name ends .test.ts or
-      # .test.tsx, or it lives under supabase/tests/. The classifying
-      # logic is isolated in .github/scripts/filter-non-test-scope.sh
-      # with coverage in .github/scripts/__tests__/filter-non-test-scope.test.sh
-      # (wired into main CI).
+      # .test.tsx, or it lives under supabase/tests/.
+      #
+      # Hardening posture (per the security-reviewer MEDIUM on PR #244):
+      #   - dorny emits JSON, never a shell-escaped list → the script
+      #     uses jq + `while IFS= read -r` and never touches `eval`.
+      #   - Values flow via `env:` so no `${{ }}` is interpolated into
+      #     the `run:` script body (GitHub's expression-injection
+      #     guidance).
+      #   - Values reach the script via STDIN, not argv — the only
+      #     entry point the script supports — so caller-side quoting
+      #     cannot smuggle data past the JSON boundary even in future
+      #     edits.
+      # The classifying logic is isolated in
+      # .github/scripts/filter-non-test-scope.sh with coverage in
+      # .github/scripts/__tests__/filter-non-test-scope.test.sh,
+      # including attacker-filename cases (single-quote,
+      # command-substitution, backtick, space) + a canary assertion.
+      # Wired into main CI.
       - id: scope
         name: Compute non-test scope for copy and addiction
         env:
-          COPY_FILES: ${{ steps.filter.outputs.copy_files }}
-          ADDICTION_FILES: ${{ steps.filter.outputs.addiction_files }}
+          COPY_FILES_JSON: ${{ steps.filter.outputs.copy_files }}
+          ADDICTION_FILES_JSON: ${{ steps.filter.outputs.addiction_files }}
         run: |
           set -euo pipefail
-          copy=$(.github/scripts/filter-non-test-scope.sh "$COPY_FILES")
-          addiction=$(.github/scripts/filter-non-test-scope.sh "$ADDICTION_FILES")
+          copy=$(printf '%s' "$COPY_FILES_JSON" | .github/scripts/filter-non-test-scope.sh)
+          addiction=$(printf '%s' "$ADDICTION_FILES_JSON" | .github/scripts/filter-non-test-scope.sh)
           echo "copy=$copy" >> "$GITHUB_OUTPUT"
           echo "addiction=$addiction" >> "$GITHUB_OUTPUT"
 
