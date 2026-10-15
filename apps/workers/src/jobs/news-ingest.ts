@@ -25,9 +25,7 @@
 //   - All adapter fetches go through the injected fetch impl so tests
 //     can substitute without hitting the network.
 
-import type { Database } from '@diktat/db';
 import { scrubMessage } from '@diktat/shared/alerts';
-import type { SupabaseClient } from '@supabase/supabase-js';
 import { unzipSync } from 'fflate';
 import Parser from 'rss-parser';
 
@@ -1467,16 +1465,13 @@ async function upsertGdeltEventMention(
   m: GdeltMentionUpsert,
 ): Promise<void> {
   try {
-    // Narrow the untyped ServiceClient (apps/workers/src/supabase.ts
-    // exports SupabaseClient without the Database generic, so most
-    // workers call sites still rely on `as any`) to the generated-
-    // types-aware SupabaseClient<Database> for this one RPC. The
-    // compiler now verifies the function name, arg names, and arg
-    // types against packages/db/src/types.ts. Closes PR #214 push-5
-    // security-reviewer condition 3 (remove `as any` on the
-    // upsert_gdelt_event_mention RPC call using the generated types).
-    const typedClient = deps.supabase as unknown as SupabaseClient<Database>;
-    const { error } = await typedClient.rpc('upsert_gdelt_event_mention', {
+    // ServiceClient is now parameterized with `Database` at its source
+    // (apps/workers/src/supabase.ts) — the per-site `as unknown as
+    // SupabaseClient<Database>` double-cast #215 LOW 1 pointed at is
+    // gone. The compiler verifies the function name, arg names, and
+    // arg types against packages/db/src/types.ts at every call site
+    // without additional casts.
+    const { error } = await deps.supabase.rpc('upsert_gdelt_event_mention', {
       p_global_event_id: m.globalEventId,
       p_url: m.url,
       p_host: m.host,
