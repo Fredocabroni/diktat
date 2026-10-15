@@ -578,6 +578,66 @@ describe('clusterGdeltMentions — operator trend-score + primary-source rules',
     expect(out[0]?.source_url).toContain('congress.gov');
   });
 
+  // Operator spec 2026-10-14: reputable fallback must prefer a news-type
+  // outlet. Prior shape picked the FIRST reputable in GDELT's export
+  // order, which could be a commentary mention even when news-type
+  // mentions were in the same cluster.
+  it('reputable fallback: picks news-type over commentary, even when commentary is listed first', async () => {
+    const out = await clusterGdeltMentions([
+      // Commentary listed FIRST — the prior "first reputable wins" shape
+      // would promote this.
+      m({
+        eventId: '101',
+        domain: 'motherjones.com',
+        url: 'https://www.motherjones.com/politics/x',
+      }),
+      // News-type listed SECOND — must win under the new preference.
+      m({ eventId: '101', domain: 'reuters.com', url: 'https://www.reuters.com/world/story' }),
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0]?.evidence_tier).toBe('reputable');
+    expect(out[0]?.outlet_type).toBe('news');
+    expect(out[0]?.source_url).toContain('reuters.com');
+  });
+
+  // The news-type preference also honors PAYWALL_FREE_PREFERRED_HOSTS
+  // order among news-type outlets.
+  it('reputable fallback: picks a PAYWALL_FREE_PREFERRED host over a non-preferred news-type outlet', async () => {
+    const out = await clusterGdeltMentions([
+      // Non-preferred news-type listed FIRST (nytimes is news, not in the
+      // paywall-free preferred list).
+      m({ eventId: '102', domain: 'nytimes.com', url: 'https://www.nytimes.com/world/story' }),
+      // Preferred-list news-type (reuters) listed SECOND — must win.
+      m({ eventId: '102', domain: 'reuters.com', url: 'https://www.reuters.com/world/story' }),
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0]?.evidence_tier).toBe('reputable');
+    expect(out[0]?.outlet_type).toBe('news');
+    expect(out[0]?.source_url).toContain('reuters.com');
+  });
+
+  // Last-resort fallback: when the cluster has ONLY commentary mentions
+  // on the reputable side, commentary falls through so the cluster still
+  // counts toward the Drop pool (the Drop-time SQL S3 gate separately
+  // excludes commentary candidates by default).
+  it('reputable fallback: commentary wins only when no news-type reputable exists in the cluster', async () => {
+    const out = await clusterGdeltMentions([
+      m({
+        eventId: '103',
+        domain: 'motherjones.com',
+        url: 'https://www.motherjones.com/politics/x',
+      }),
+      m({
+        eventId: '103',
+        domain: 'nationalreview.com',
+        url: 'https://www.nationalreview.com/politics/y',
+      }),
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0]?.evidence_tier).toBe('reputable');
+    expect(out[0]?.outlet_type).toBe('commentary');
+  });
+
   it('sorts output by trend score desc (big viral first — operator rule)', async () => {
     const rows = [
       // Event A: 2 outlets, 1 primary (sec.gov).
