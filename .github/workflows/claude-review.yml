@@ -103,17 +103,38 @@ jobs:
             # Anything not on this list — routers, workers, migrations,
             # generated types — has no user-facing copy for the linter
             # to review.
+            #
+            # Cost cut 3 (test-only diff skip): exclude test files from the
+            # trigger set. Test files cannot ship user-facing copy by
+            # definition; a PR that touches only tests should not spend
+            # the advisory reviewer on a surface that will never render
+            # to a user. `!`-prefixed patterns in dorny/paths-filter are
+            # exclusions evaluated after includes — the last-matching
+            # rule wins. A PR that touches both a .tsx and a .test.tsx
+            # still fires copy-linter because the .tsx file is not
+            # excluded. A PR that touches only .test.tsx or files under
+            # __tests__/ does NOT fire copy-linter. security-reviewer's
+            # gate (via `changes.outputs.code`) is unchanged — test-only
+            # PRs still get security review.
             copy:
               - 'apps/web/**/*.tsx'
               - 'apps/web/**/*.ts'
               - 'apps/bots/**/templates/**'
               - 'packages/ai-fabric/src/prompts/**'
               - 'packages/ui/src/**/*.tsx'
+              - '!**/__tests__/**'
+              - '!**/*.test.ts'
+              - '!**/*.test.tsx'
             # Cost cut 2 (addiction-auditor): fire only on engagement-
             # mechanic surfaces. Trigger set matches the "engagement
             # mechanic" definition in .claude/agents/addiction-auditor.md
             # (notifications, streaks, matchmaking, loss/win flows,
             # onboarding hooks, retention loops, auto-play/auto-load).
+            #
+            # Cost cut 3 (test-only diff skip): same rationale as the
+            # `copy` filter — test files do not define engagement
+            # mechanics even when they live under paths this filter
+            # otherwise includes (e.g. apps/web/**).
             addiction:
               - 'apps/web/**'
               - 'apps/workers/src/jobs/matchmake.ts'
@@ -126,6 +147,10 @@ jobs:
               - 'packages/ap-engine/**'
               - 'packages/ai-fabric/src/prompts/**'
               - 'docs/ADDICTION_ARCHITECTURE.md'
+              - '!**/__tests__/**'
+              - '!**/*.test.ts'
+              - '!**/*.test.tsx'
+              - '!supabase/tests/**'
 
   review:
     name: ${{ matrix.reviewer.name }}
