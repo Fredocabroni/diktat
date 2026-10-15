@@ -172,6 +172,9 @@ importers:
       '@diktat/ap-engine':
         specifier: workspace:*
         version: link:../../packages/ap-engine
+      '@diktat/db':
+        specifier: workspace:*
+        version: link:../../packages/db
       '@diktat/shared':
         specifier: workspace:*
         version: link:../../packages/shared

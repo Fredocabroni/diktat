@@ -1339,7 +1339,7 @@ describe('newsIngestHandler — happy path', () => {
       });
     });
 
-    it('nulls the outlet-triple when the mention is primary tier (no lean/group/type)', async () => {
+    it('omits the outlet-triple when the mention is primary tier (no lean/group/type)', async () => {
       const rpcCalls: Array<{ args: Record<string, unknown> }> = [];
       const supabase = {
         rpc(_fn: string, args: Record<string, unknown>) {
@@ -1359,13 +1359,17 @@ describe('newsIngestHandler — happy path', () => {
           isPaywallFreePreferred: false,
         },
       );
-      expect(rpcCalls[0]?.args).toMatchObject({
-        p_evidence_tier: 'primary',
-        p_outlet_lean: null,
-        p_outlet_group: null,
-        p_outlet_type: null,
-        p_is_paywall_free_preferred: false,
-      });
+      // After condition 3 fix (migration 20261017000000): outlet args
+      // have `default null` in the SQL function and `p_outlet_*?: T`
+      // in the generated types. The TS boundary now passes
+      // `undefined` (not `null`) when the mention is primary-tier —
+      // Postgres applies the SQL-level default, same end state.
+      const args = rpcCalls[0]?.args as Record<string, unknown> | undefined;
+      expect(args?.p_evidence_tier).toBe('primary');
+      expect(args?.p_is_paywall_free_preferred).toBe(false);
+      expect(args?.p_outlet_lean).toBeUndefined();
+      expect(args?.p_outlet_group).toBeUndefined();
+      expect(args?.p_outlet_type).toBeUndefined();
     });
 
     it('fire-and-forget: an RPC error is logged, not thrown', async () => {
