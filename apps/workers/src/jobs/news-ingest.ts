@@ -256,15 +256,19 @@ async function fetchAndParseRss(
   if (!response.ok) {
     throw new Error(`news_ingest: feed ${feedUrl} returned ${response.status}`);
   }
-  const xml = await response.text();
-  // Bound the feed body. Primary-source RSS feeds are tens-to-hundreds
-  // of KB; >10MB is either compromised or a billion-laughs probe.
-  // security-reviewer ask, 2026-06-16.
-  if (xml.length > MAX_FEED_BYTES) {
+  // #218 MED C: enforce the body cap DURING the read, not after. The
+  // prior shape was `await response.text()` → check length → throw.
+  // A hostile server shipping a 1 GB payload would allocate the full
+  // string into memory before the length check tripped. Switch to
+  // the chunk-streaming reader (same shape used for the GDELT
+  // mentions.CSV.zip download) so the first chunk that would exceed
+  // the cap aborts the reader and throws.
+  const bytes = await readBodyAsBytesWithSizeCap(response, MAX_FEED_BYTES).catch((err: unknown) => {
     throw new Error(
-      `news_ingest: feed ${feedUrl} body ${xml.length} exceeds ${MAX_FEED_BYTES}B cap`,
+      `news_ingest: feed ${feedUrl} ${scrubMessage(err instanceof Error ? err.message : String(err))}`,
     );
-  }
+  });
+  const xml = new TextDecoder('utf-8').decode(bytes);
   // rss-parser accepts a raw XML string via parseString.
   const parser = new Parser();
   const feed = await parser.parseString(xml);

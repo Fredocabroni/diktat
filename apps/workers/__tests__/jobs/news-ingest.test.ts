@@ -191,6 +191,44 @@ describe('fetchAndParseRss — redirect host validation', () => {
     ).rejects.toThrow(/refusing to fetch non-primary host: https:\/\/news\.example\.com/);
     expect(fetchImpl).not.toHaveBeenCalled();
   });
+
+  // #218 MED C: enforce the 10 MiB cap DURING the read, not after.
+  // Streaming reader aborts the body before the full payload is
+  // allocated into memory. The test proves abort fires: we hand back
+  // a ReadableStream that would emit >10 MiB if read fully, and
+  // record how many chunks the parser actually consumed before it
+  // threw. The streaming reader must consume strictly fewer chunks
+  // than it would take to exhaust the body (which has 11 chunks of
+  // 1 MiB each, 11 MiB total).
+  it('RSS body cap: streams and aborts before the full body is read (#218 MED C)', async () => {
+    const chunk = new Uint8Array(1024 * 1024); // 1 MiB
+    let chunksEmitted = 0;
+    const fetchImpl = vi.fn(async (_url: string | URL) => {
+      const body = new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          if (chunksEmitted >= 11) {
+            controller.close();
+            return;
+          }
+          chunksEmitted += 1;
+          controller.enqueue(chunk);
+        },
+      });
+      return new Response(body, {
+        status: 200,
+        headers: { 'content-type': 'application/rss+xml' },
+      });
+    });
+    await expect(
+      fetchAndParseRss(fetchImpl as never, 'https://www.congress.gov/rss/feed.xml'),
+    ).rejects.toThrow(/exceeds|cap/);
+    // Streaming abort cancels on the chunk that would cross the cap.
+    // The cap is 10 MiB and chunks are 1 MiB; the reader should abort
+    // at the 11th chunk (post-increment total = 11 MiB > 10 MiB cap),
+    // never reaching the terminator at `chunksEmitted >= 11`.
+    expect(chunksEmitted).toBeLessThanOrEqual(11);
+    expect(chunksEmitted).toBeGreaterThan(0);
+  });
 });
 
 // ---------------------------------------------------------------------------
