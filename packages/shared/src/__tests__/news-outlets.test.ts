@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   OUTLETS,
   PAYWALL_FREE_PREFERRED_HOSTS,
+  isApexHost,
   isExcludedPath,
   leanToGroup,
   lookupOutlet,
@@ -98,6 +99,71 @@ describe('lookupOutlet — host-suffix match', () => {
   it('returns null for unknown hosts', () => {
     expect(lookupOutlet('example.org')).toBeNull();
     expect(lookupOutlet('news.random.co')).toBeNull();
+  });
+
+  // BBC aliases — operator-approved 2026-10-14 after a 24h prod
+  // sample showed GDELT uses `bbc.co.uk` 25× more often than
+  // `bbc.com`. Both forms must resolve to the SAME outlet record.
+  it('resolves bbc.com AND bbc.co.uk to the same BBC outlet entry', () => {
+    const a = lookupOutlet('bbc.com');
+    const b = lookupOutlet('bbc.co.uk');
+    const c = lookupOutlet('www.bbc.co.uk');
+    const d = lookupOutlet('www.bbc.com');
+    expect(a?.domain).toBe('bbc.com');
+    expect(b?.domain).toBe('bbc.com');
+    expect(c?.domain).toBe('bbc.com');
+    expect(d?.domain).toBe('bbc.com');
+    // Same outlet record (not a second allowlist entry).
+    expect(b).toBe(a);
+    expect(c).toBe(a);
+  });
+
+  it('resolves subdomains of bbc.co.uk via suffix match (same outlet)', () => {
+    expect(lookupOutlet('news.bbc.co.uk')?.domain).toBe('bbc.com');
+    expect(lookupOutlet('sport.bbc.co.uk')?.domain).toBe('bbc.com');
+  });
+
+  it('does NOT confuse boundary-adjacent lookalikes of bbc.co.uk', () => {
+    expect(lookupOutlet('notbbc.co.uk')).toBeNull();
+    expect(lookupOutlet('bbc.co.uk.evil.com')).toBeNull();
+  });
+});
+
+describe('isApexHost — exact apex gate for body-consuming fetch', () => {
+  const bbc = lookupOutlet('bbc.com')!;
+  const cnn = lookupOutlet('cnn.com')!;
+
+  it('accepts the canonical apex host', () => {
+    expect(isApexHost(bbc, 'bbc.com')).toBe(true);
+    expect(isApexHost(cnn, 'cnn.com')).toBe(true);
+  });
+
+  it('accepts www.<apex>', () => {
+    expect(isApexHost(bbc, 'www.bbc.com')).toBe(true);
+    expect(isApexHost(cnn, 'www.cnn.com')).toBe(true);
+  });
+
+  it('accepts an alias apex AND www.<alias> (BBC bbc.co.uk)', () => {
+    expect(isApexHost(bbc, 'bbc.co.uk')).toBe(true);
+    expect(isApexHost(bbc, 'www.bbc.co.uk')).toBe(true);
+  });
+
+  it('rejects a deeper subdomain of either apex form (closes MED 7)', () => {
+    expect(isApexHost(bbc, 'news.bbc.com')).toBe(false);
+    expect(isApexHost(bbc, 'news.bbc.co.uk')).toBe(false);
+    expect(isApexHost(bbc, 'evil.subdomain.bbc.co.uk')).toBe(false);
+    expect(isApexHost(cnn, 'edition.cnn.com')).toBe(false);
+    expect(isApexHost(cnn, 'evil.subdomain.cnn.com')).toBe(false);
+  });
+
+  it('is case-insensitive and strips a single leading www. label only', () => {
+    expect(isApexHost(bbc, 'BBC.CO.UK')).toBe(true);
+    expect(isApexHost(bbc, 'WWW.BBC.CO.UK')).toBe(true);
+  });
+
+  it('returns false for an unrelated apex host', () => {
+    expect(isApexHost(bbc, 'cnn.com')).toBe(false);
+    expect(isApexHost(cnn, 'bbc.co.uk')).toBe(false);
   });
 });
 

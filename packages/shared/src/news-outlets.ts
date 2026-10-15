@@ -37,10 +37,19 @@ export type OutletGroup = 'left' | 'center' | 'right';
 export type OutletType = 'news' | 'commentary';
 
 export interface Outlet {
-  /** Lowercase host-suffix. Matched against `url.hostname` via
-   *  host-suffix equality (so `www.<domain>` and `edition.<domain>`
+  /** Lowercase canonical apex host. Matched against `url.hostname`
+   *  via host-suffix equality (so `www.<domain>` and `edition.<domain>`
    *  both match `<domain>`). */
   readonly domain: string;
+  /** Additional apex hosts that resolve to the SAME outlet entry.
+   *  For an outlet published under multiple TLDs (BBC: bbc.com +
+   *  bbc.co.uk), list the non-canonical form(s) here. Each alias is
+   *  treated the same as `domain` by `lookupOutlet` and `isApexHost`
+   *  — it is an apex, not a subdomain. 2026-10-14 prod read-only
+   *  observation: GDELT's mentions stream uses `bbc.co.uk` 25× more
+   *  often than `bbc.com`; without this alias the BBC entry would
+   *  miss ~96% of GDELT's BBC coverage. */
+  readonly aliases?: ReadonlyArray<string>;
   readonly lean: OutletLean;
   readonly group: OutletGroup;
   readonly type: OutletType;
@@ -206,6 +215,12 @@ export const OUTLETS: ReadonlyArray<Outlet> = [
   },
   {
     domain: 'bbc.com',
+    // GDELT's mentions stream overwhelmingly uses `bbc.co.uk` (25× more
+    // than `bbc.com` per 2026-10-14 prod sample). Keep both forms on
+    // the same outlet entry so lookupOutlet + isApexHost resolve them
+    // to one BBC record (not two allowlist entries competing for
+    // trend-score + S3-group bookkeeping).
+    aliases: ['bbc.co.uk'],
     lean: 'center',
     group: 'center',
     type: 'news',
@@ -396,15 +411,36 @@ export const OUTLETS: ReadonlyArray<Outlet> = [
  *  allowlisted host. */
 export function lookupOutlet(hostname: string): Outlet | null {
   const normalized = hostname.toLowerCase().replace(/^www\./, '');
-  // Direct match first (90% of real traffic).
+  // Direct match first (90% of real traffic). Checks the canonical
+  // `domain` AND every entry in `aliases` so a multi-TLD outlet
+  // (BBC) resolves to the single outlet record under either form.
   for (const o of OUTLETS) {
     if (o.domain === normalized) return o;
+    if (o.aliases?.includes(normalized)) return o;
   }
-  // Host-suffix match: `edition.cnn.com` → cnn.com.
+  // Host-suffix match: `edition.cnn.com` → cnn.com. Same alias
+  // handling — a mail/edition subdomain under an aliased apex host
+  // still resolves (e.g. `news.bbc.co.uk` → BBC outlet via alias).
   for (const o of OUTLETS) {
     if (normalized.endsWith('.' + o.domain)) return o;
+    if (o.aliases?.some((alias) => normalized.endsWith('.' + alias))) return o;
   }
   return null;
+}
+
+/** Returns true when `hostname` is EXACTLY the outlet's apex: the
+ *  canonical `domain`, any entry in `aliases`, or `www.<...>` for
+ *  either. A deeper subdomain (`news.bbc.co.uk`, `edition.cnn.com`,
+ *  `evil.subdomain.cnn.com`) returns FALSE. Used by `fetchOgText` to
+ *  gate the body-consuming fetch — a URL that resolves to an outlet
+ *  via `lookupOutlet`'s broader suffix match but is NOT at the apex
+ *  must not have its body consumed as evidence (round-2 reviewer
+ *  MED 7). */
+export function isApexHost(outlet: Outlet, hostname: string): boolean {
+  const normalized = hostname.toLowerCase().replace(/^www\./, '');
+  if (normalized === outlet.domain) return true;
+  if (outlet.aliases?.includes(normalized)) return true;
+  return false;
 }
 
 /** Returns true when `url`'s pathname begins with any of the outlet's

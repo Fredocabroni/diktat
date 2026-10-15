@@ -243,6 +243,35 @@ describe('fetchOgText — SSRF-safe single-URL fetch', () => {
     expect(edition).toBeNull();
   });
 
+  it('accepts both BBC apex forms (bbc.com AND bbc.co.uk, with and without www.)', async () => {
+    const html = `<title>BBC page</title>`;
+    const fetchImpl = vi.fn(async () => new Response(html, { status: 200 }));
+    // bbc.com
+    expect((await fetchOgText(fetchImpl as never, 'https://bbc.com/news/world/story'))?.host).toBe(
+      'bbc.com',
+    );
+    expect(
+      (await fetchOgText(fetchImpl as never, 'https://www.bbc.com/news/world/story'))?.host,
+    ).toBe('bbc.com');
+    // bbc.co.uk (new alias; GDELT's dominant form)
+    expect(
+      (await fetchOgText(fetchImpl as never, 'https://bbc.co.uk/news/world/story'))?.host,
+    ).toBe('bbc.co.uk');
+    expect(
+      (await fetchOgText(fetchImpl as never, 'https://www.bbc.co.uk/news/world/story'))?.host,
+    ).toBe('bbc.co.uk');
+  });
+
+  it('rejects a deep subdomain of either BBC apex form', async () => {
+    const fetchImpl = vi.fn();
+    // bbc.com deep subdomain
+    expect(await fetchOgText(fetchImpl as never, 'https://news.bbc.com/story')).toBeNull();
+    // bbc.co.uk deep subdomain (the common BBC regional/vertical pattern)
+    expect(await fetchOgText(fetchImpl as never, 'https://news.bbc.co.uk/story')).toBeNull();
+    expect(await fetchOgText(fetchImpl as never, 'https://sport.bbc.co.uk/live')).toBeNull();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it('rejects a redirect that lands on a deep subdomain of the same reputable host', async () => {
     const fetchImpl = vi.fn(async (input: string | URL) => {
       const url = String(input);
