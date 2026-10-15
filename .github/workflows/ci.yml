@@ -92,6 +92,22 @@ jobs:
       - name: Test
         run: pnpm turbo test
 
+      # Build the workers + api bundles with the exact command Railway
+      # runs on deploy. Catches `tsc -b` project-reference drift that
+      # CI typecheck (one-package `tsc --noEmit`) would miss — the gap
+      # that let #220 through #226 silently fail every Railway workers
+      # deploy from 2026-10-15 02:00 UTC until #242 landed the missing
+      # `@diktat/db` reference. CI must fail red here, not only at
+      # deploy time, so a Railway-shaped break shows up before merge.
+      #
+      # Scoped to `@diktat/workers` + `@diktat/api` only: those are
+      # the two services Railway builds; `@diktat/web` builds via
+      # Vercel and `packages/*` builds transitively. Keeping the scope
+      # tight prevents the step from quietly inflating CI time as new
+      # packages land.
+      - name: Build (Railway deploy parity)
+        run: pnpm turbo build --filter=@diktat/workers --filter=@diktat/api
+
       # Reviewer gate-integrity script test. Runs against fixtures of
       # real review bodies + every observed and likely upstream error
       # shape; needs no Anthropic credits. Proves both directions:
