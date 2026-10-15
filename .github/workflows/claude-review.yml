@@ -62,8 +62,13 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
       docs: ${{ steps.filter.outputs.docs }}
-      copy: ${{ steps.filter.outputs.copy }}
-      addiction: ${{ steps.filter.outputs.addiction }}
+      # copy / addiction come from the `scope` step, NOT dorny's own
+      # `copy` / `addiction` outputs. See the step for why: dorny's
+      # negated `!X` patterns are inert under its default
+      # predicate-quantifier (`some`), so test-exclusion has to happen
+      # downstream in shell.
+      copy: ${{ steps.scope.outputs.copy }}
+      addiction: ${{ steps.scope.outputs.addiction }}
     steps:
       # actions/checkout@v4.2.2 — SHA-pinned. The `changes` classifier
       # output gates whether the agent runs at all, so the checkout is
@@ -78,6 +83,12 @@ jobs:
         # rationale on this specific pin.
         uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
         with:
+          # `list-files: 'shell'` emits the matched-file list for every
+          # filter as `<name>_files` — shell-quoted, space-separated,
+          # suitable for `eval set --`. The `scope` step below reads
+          # these to perform real test-file exclusion (see that step
+          # for why `!X` patterns don't do it).
+          list-files: 'shell'
           filters: |
             code:
               - 'apps/**'
@@ -104,37 +115,31 @@ jobs:
             # generated types — has no user-facing copy for the linter
             # to review.
             #
-            # Cost cut 3 (test-only diff skip): exclude test files from the
-            # trigger set. Test files cannot ship user-facing copy by
-            # definition; a PR that touches only tests should not spend
-            # the advisory reviewer on a surface that will never render
-            # to a user. `!`-prefixed patterns in dorny/paths-filter are
-            # exclusions evaluated after includes — the last-matching
-            # rule wins. A PR that touches both a .tsx and a .test.tsx
-            # still fires copy-linter because the .tsx file is not
-            # excluded. A PR that touches only .test.tsx or files under
-            # __tests__/ does NOT fire copy-linter. security-reviewer's
-            # gate (via `changes.outputs.code`) is unchanged — test-only
-            # PRs still get security review.
+            # Test-file exclusion is NOT done here with `!`-prefixed
+            # patterns. dorny/paths-filter defaults to
+            # `predicate-quantifier: 'some'`, under which every pattern
+            # is OR'd independently; `!**/__tests__/**` then resolves
+            # to "there exists a changed file NOT in __tests__" — true
+            # for almost any non-test file, so the surrounding positive
+            # patterns are bypassed. (PR #227 shipped the inert `!`
+            # patterns; copy-linter then BLOCKed #239 which touched
+            # only `.claude/agents/` + `.github/workflows/` — neither
+            # in the positive allowlist — proving the exclusion was
+            # a no-op.) Test exclusion runs in the `scope` step below
+            # against `list-files: 'shell'` output.
             copy:
               - 'apps/web/**/*.tsx'
               - 'apps/web/**/*.ts'
               - 'apps/bots/**/templates/**'
               - 'packages/ai-fabric/src/prompts/**'
               - 'packages/ui/src/**/*.tsx'
-              - '!**/__tests__/**'
-              - '!**/*.test.ts'
-              - '!**/*.test.tsx'
             # Cost cut 2 (addiction-auditor): fire only on engagement-
             # mechanic surfaces. Trigger set matches the "engagement
             # mechanic" definition in .claude/agents/addiction-auditor.md
             # (notifications, streaks, matchmaking, loss/win flows,
             # onboarding hooks, retention loops, auto-play/auto-load).
-            #
-            # Cost cut 3 (test-only diff skip): same rationale as the
-            # `copy` filter — test files do not define engagement
-            # mechanics even when they live under paths this filter
-            # otherwise includes (e.g. apps/web/**).
+            # Test-file exclusion: same shape as `copy` — handled in
+            # the `scope` step below, not here.
             addiction:
               - 'apps/web/**'
               - 'apps/workers/src/jobs/matchmake.ts'
@@ -147,10 +152,27 @@ jobs:
               - 'packages/ap-engine/**'
               - 'packages/ai-fabric/src/prompts/**'
               - 'docs/ADDICTION_ARCHITECTURE.md'
-              - '!**/__tests__/**'
-              - '!**/*.test.ts'
-              - '!**/*.test.tsx'
-              - '!supabase/tests/**'
+
+      # Shell-based test-file exclusion. Reads dorny's `copy_files` and
+      # `addiction_files` outputs (shell-quoted via `list-files: 'shell'`
+      # above) and emits `copy` / `addiction` as "at least one non-test
+      # file matched the positive patterns". A file is "test" if its
+      # path has a /__tests__/ segment, its name ends .test.ts or
+      # .test.tsx, or it lives under supabase/tests/. The classifying
+      # logic is isolated in .github/scripts/filter-non-test-scope.sh
+      # with coverage in .github/scripts/__tests__/filter-non-test-scope.test.sh
+      # (wired into main CI).
+      - id: scope
+        name: Compute non-test scope for copy and addiction
+        env:
+          COPY_FILES: ${{ steps.filter.outputs.copy_files }}
+          ADDICTION_FILES: ${{ steps.filter.outputs.addiction_files }}
+        run: |
+          set -euo pipefail
+          copy=$(.github/scripts/filter-non-test-scope.sh "$COPY_FILES")
+          addiction=$(.github/scripts/filter-non-test-scope.sh "$ADDICTION_FILES")
+          echo "copy=$copy" >> "$GITHUB_OUTPUT"
+          echo "addiction=$addiction" >> "$GITHUB_OUTPUT"
 
   review:
     name: ${{ matrix.reviewer.name }}

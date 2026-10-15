@@ -117,6 +117,16 @@ jobs:
       - name: Verify reviewer gate-integrity script
         run: bash .github/scripts/__tests__/check-review-output.test.sh
 
+      # Paths-filter test-exclusion gate. Proves the shell step that
+      # replaces dorny/paths-filter's broken `!X` test-exclusion
+      # (default predicate-quantifier `'some'` makes `!X` match any
+      # non-X file, bypassing the surrounding positive patterns —
+      # discovered after copy-linter BLOCKed PR #239 for touching only
+      # paths outside the positive copy allowlist). The 5 cases from
+      # the fix-PR brief are explicit assertions here.
+      - name: Verify paths-filter non-test scope helper
+        run: bash .github/scripts/__tests__/filter-non-test-scope.test.sh
+
       # Activation-safety gate. Fails the build red when an ENABLE_*
       # deploy flag is set to 'true' on the repo while the corresponding
       # deploy workflow file regresses on its pin requirements (floating
