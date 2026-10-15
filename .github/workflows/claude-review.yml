@@ -39,11 +39,12 @@ permissions:
 jobs:
   # ----------------------------------------------------------------------
   # Docs-only guard + per-reviewer scope guard. Classifies the PR diff
-  # into four booleans: `code` (any code touched), `docs` (any docs
-  # touched), `copy` (any copy-linter-relevant path), and `addiction`
-  # (any addiction-auditor-relevant path). Reviewer matrix jobs gate
+  # into five booleans: `code` (any code touched), `docs` (any docs
+  # touched), `copy` (any copy-linter-relevant path), `addiction`
+  # (any addiction-auditor-relevant path), and `neutrality` (any
+  # fact-check-integrity-contract path). Reviewer matrix jobs gate
   # their agent-run + post steps on both `code == 'true'` AND (for
-  # copy/addiction) their per-reviewer output. Closes the recurring
+  # copy/addiction/neutrality) their per-reviewer output. Closes the recurring
   # docs-only context-bleed pattern (PRs #47, #49, #50, #54, #55, #57,
   # plus PR #56's final docs-commit cycle) and the "copy-linter reports
   # findings in files this PR didn't touch" pattern (PR #133).
@@ -62,13 +63,13 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
       docs: ${{ steps.filter.outputs.docs }}
-      # copy / addiction come from the `scope` step, NOT dorny's own
-      # `copy` / `addiction` outputs. See the step for why: dorny's
-      # negated `!X` patterns are inert under its default
-      # predicate-quantifier (`some`), so test-exclusion has to happen
-      # downstream in shell.
+      # copy / addiction / neutrality come from the `scope` step, NOT
+      # dorny's own outputs. See the step for why: dorny's negated
+      # `!X` patterns are inert under its default predicate-quantifier
+      # (`some`), so test-exclusion has to happen downstream in shell.
       copy: ${{ steps.scope.outputs.copy }}
       addiction: ${{ steps.scope.outputs.addiction }}
+      neutrality: ${{ steps.scope.outputs.neutrality }}
     steps:
       # actions/checkout@v4.2.2 — SHA-pinned. The `changes` classifier
       # output gates whether the agent runs at all, so the checkout is
@@ -130,7 +131,7 @@ jobs:
             # only `.claude/agents/` + `.github/workflows/` — neither
             # in the positive allowlist — proving the exclusion was
             # a no-op.) Test exclusion runs in the `scope` step below
-            # against `list-files: 'shell'` output.
+            # against `list-files: 'json'` output.
             copy:
               - 'apps/web/**/*.tsx'
               - 'apps/web/**/*.ts'
@@ -156,13 +157,27 @@ jobs:
               - 'packages/ap-engine/**'
               - 'packages/ai-fabric/src/prompts/**'
               - 'docs/ADDICTION_ARCHITECTURE.md'
+            # Cost cut (neutrality-auditor): fire only on the integrity
+            # contract surface for fact-check. The surface is three
+            # places: the prompt template, the FactCheckResultSchema
+            # verdict enum, and the user-facing verdict-rendering copy.
+            # Anything outside this list has no way to weaken the
+            # fact-check neutrality contract. Test-file exclusion:
+            # same shape as `copy` / `addiction` — handled in the
+            # `scope` step below, not here.
+            neutrality:
+              - 'packages/ai-fabric/src/prompts/fact-check.ts'
+              - 'packages/ai-fabric/src/types.ts'
+              - 'apps/web/components/drop/**/*.tsx'
+              - 'apps/web/components/factcheck/**'
 
-      # Shell-based test-file exclusion. Reads dorny's `copy_files` and
-      # `addiction_files` JSON-array outputs (via `list-files: 'json'`
-      # above) and emits `copy` / `addiction` as "at least one non-test
-      # file matched the positive patterns". A file is "test" if its
-      # path has a /__tests__/ segment, its name ends .test.ts or
-      # .test.tsx, or it lives under supabase/tests/.
+      # Shell-based test-file exclusion. Reads dorny's `copy_files`,
+      # `addiction_files`, and `neutrality_files` JSON-array outputs
+      # (via `list-files: 'json'` above) and emits `copy` / `addiction`
+      # / `neutrality` as "at least one non-test file matched the
+      # positive patterns". A file is "test" if its path has a
+      # /__tests__/ segment, its name ends .test.ts or .test.tsx, or
+      # it lives under supabase/tests/.
       #
       # Hardening posture (per the security-reviewer MEDIUM on PR #244):
       #   - dorny emits JSON, never a shell-escaped list → the script
@@ -181,16 +196,23 @@ jobs:
       # command-substitution, backtick, space) + a canary assertion.
       # Wired into main CI.
       - id: scope
-        name: Compute non-test scope for copy and addiction
+        name: Compute non-test scope for copy, addiction, and neutrality
         env:
           COPY_FILES_JSON: ${{ steps.filter.outputs.copy_files }}
           ADDICTION_FILES_JSON: ${{ steps.filter.outputs.addiction_files }}
+          NEUTRALITY_FILES_JSON: ${{ steps.filter.outputs.neutrality_files }}
         run: |
           set -euo pipefail
           copy=$(printf '%s' "$COPY_FILES_JSON" | .github/scripts/filter-non-test-scope.sh)
           addiction=$(printf '%s' "$ADDICTION_FILES_JSON" | .github/scripts/filter-non-test-scope.sh)
-          echo "copy=$copy" >> "$GITHUB_OUTPUT"
-          echo "addiction=$addiction" >> "$GITHUB_OUTPUT"
+          neutrality=$(printf '%s' "$NEUTRALITY_FILES_JSON" | .github/scripts/filter-non-test-scope.sh)
+          # Grouped redirect (shellcheck SC2129): one open/close of
+          # $GITHUB_OUTPUT instead of three; no behaviour change.
+          {
+            echo "copy=$copy"
+            echo "addiction=$addiction"
+            echo "neutrality=$neutrality"
+          } >> "$GITHUB_OUTPUT"
 
   review:
     name: ${{ matrix.reviewer.name }}
@@ -231,7 +253,8 @@ jobs:
       SHOULD_RUN: >-
         ${{ (matrix.reviewer.name == 'security-reviewer' && needs.changes.outputs.code == 'true')
             || (matrix.reviewer.name == 'copy-linter' && needs.changes.outputs.copy == 'true')
-            || (matrix.reviewer.name == 'addiction-auditor' && needs.changes.outputs.addiction == 'true') }}
+            || (matrix.reviewer.name == 'addiction-auditor' && needs.changes.outputs.addiction == 'true')
+            || (matrix.reviewer.name == 'neutrality-auditor' && needs.changes.outputs.neutrality == 'true') }}
     strategy:
       # One reviewer timing out must not cancel the other two.
       fail-fast: false
@@ -263,6 +286,19 @@ jobs:
             model: claude-sonnet-4-6
             scope: diff-only
             prompt: "Run the addiction-auditor subagent on engagement-mechanic changes in the PR diff at ./pr.diff. Report findings ONLY on lines added or modified in that diff — never on untouched surrounding code, never on files not in the diff. If a mechanic is defined on a line that appears in the diff hunk, audit it; if the mechanic is in a file the diff doesn't touch, omit it entirely. Output ONLY the review report in markdown. The VERY FIRST non-blank line of your output MUST be a markdown header (e.g. '# Addiction Audit') — do not precede it with any preamble, and do not follow the report with any closing summary, meta-comment, or note about the report itself. The report IS your entire output. Do NOT edit files, request write or file permissions, run shell commands, or take any tool action of any kind. You are a read-only reviewer: if the diff has defects, name them and recommend the fix IN THE REPORT — never apply or offer to apply changes yourself. A human approves every change."
+          # neutrality-auditor on Sonnet 4.6. Guards the fact-check
+          # integrity contract — the prompt template, the verdict
+          # enum, the retrieval_mode field, and verdict-rendering
+          # copy. The copy-linter guards voice but not epistemology;
+          # the security-reviewer guards secrets, not neutrality.
+          # Gated via `changes.outputs.neutrality` so it fires only
+          # on edits to the three fact-check surfaces (same cost
+          # posture as copy-linter / addiction-auditor).
+          # Diff-only: same constraint as the other advisory reviewers.
+          - name: neutrality-auditor
+            model: claude-sonnet-4-6
+            scope: diff-only
+            prompt: "Run the neutrality-auditor subagent on fact-check integrity-contract changes in the PR diff at ./pr.diff. Report findings ONLY on lines added or modified in that diff — never on untouched surrounding code, never on files not in the diff. You MAY read packages/ai-fabric/src/prompts/fact-check.ts, packages/ai-fabric/src/types.ts, and docs/MASTER_PLAN.md for context on the integrity contract; a finding on a file the diff doesn't touch must be omitted entirely. Output ONLY the review report in markdown. The VERY FIRST non-blank line of your output MUST be a markdown header (e.g. '# Neutrality Audit') — do not precede it with any preamble, and do not follow the report with any closing summary, meta-comment, or note about the report itself. The report IS your entire output. Do NOT edit files, request write or file permissions, run shell commands, or take any tool action of any kind. You are a read-only reviewer: if the diff weakens the integrity contract, name it and recommend the fix IN THE REPORT — never apply or offer to apply changes yourself. A human approves every change."
     steps:
       # actions/checkout@v4.2.2 — SHA-pinned. The agent runs against
       # whatever ends up in the working tree; a moved `v4` tag could
@@ -485,6 +521,7 @@ jobs:
         if: >-
           (matrix.reviewer.name == 'copy-linter' && needs.changes.outputs.copy != 'true')
           || (matrix.reviewer.name == 'addiction-auditor' && needs.changes.outputs.addiction != 'true')
+          || (matrix.reviewer.name == 'neutrality-auditor' && needs.changes.outputs.neutrality != 'true')
         env:
           REVIEWER_NAME: ${{ matrix.reviewer.name }}
         run: |
