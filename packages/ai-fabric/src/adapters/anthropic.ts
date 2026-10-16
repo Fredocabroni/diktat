@@ -85,8 +85,21 @@ export const anthropicAdapter = {
       ? { thinking: { type: 'enabled' as const, budget_tokens: DEFAULT_THINKING_BUDGET_TOKENS } }
       : {};
 
-    let response: Message;
     if (schema) {
+      // Structured path. One bounded retry on schema_parse failure.
+      // Rationale: Zod parse failures on tool_use.input are almost
+      // always a model-nondeterminism issue (the LLM emitted a shape
+      // close to the schema but missed a required field, enum value,
+      // etc.). A second attempt with the SAME params usually
+      // succeeds. The retry is NOT applied to `no_tool_use_block` —
+      // that indicates a structural API or prompt problem, not a
+      // transient parse glitch, so retrying would waste tokens with
+      // the same outcome.
+      //
+      // Billed spend accumulates across attempts. If the retry also
+      // fails, the thrown error carries the sum of both attempts'
+      // usd so the fabric cost ledger records real spend (CLAUDE.md
+      // "Deferred" item).
       const jsonSchema = toToolSchema(schema);
       // Anthropic API rejects `thinking` + forced `tool_choice` together.
       // Structured outputs always force the tool, so omit thinkingParam here.
@@ -101,108 +114,112 @@ export const anthropicAdapter = {
         ],
         tool_choice: { type: 'tool' as const, name: 'respond' },
       };
-      response = (await client().messages.create(toolParams as never)) as Message;
-    } else {
-      response = (await client().messages.create({
-        ...baseParams,
-        ...thinkingParam,
-      } as never)) as Message;
-    }
 
-    const latencyMs = Date.now() - start;
-    const usage = response.usage;
-    const usd = priceUsd(model, usage.input_tokens ?? 0, usage.output_tokens ?? 0);
+      const MAX_STRUCTURED_ATTEMPTS = 2;
+      let cumulativeUsd = 0;
+      let lastIssues: Array<{ path: string; code: string }> = [];
+      for (let attempt = 1; attempt <= MAX_STRUCTURED_ATTEMPTS; attempt += 1) {
+        const response = (await client().messages.create(toolParams as never)) as Message;
+        const usage = response.usage;
+        const usd = priceUsd(model, usage.input_tokens ?? 0, usage.output_tokens ?? 0);
+        cumulativeUsd += usd;
+        const toolUse = response.content.find((block) => block.type === 'tool_use');
+        const textBlockCount = response.content.filter((b) => b.type === 'text').length;
+        const safeUsage = {
+          input_tokens: usage.input_tokens ?? 0,
+          output_tokens: usage.output_tokens ?? 0,
+        };
 
-    if (schema) {
-      const toolUse = response.content.find((block) => block.type === 'tool_use');
-      const textBlockCount = response.content.filter((b) => b.type === 'text').length;
-      // `usage` object + `text_chars` were previously logged verbatim.
-      // Reduced to integer-only fields per security-reviewer PR #193
-      // Medium 1: future SDK field additions to `usage` (e.g. a `user_id`
-      // field) would otherwise silently start being logged; `text_chars`
-      // leaked the size of any text block the model returned alongside
-      // or instead of structured output, which can echo feed-derived
-      // content on a `no_tool_use_block` path.
-      const safeUsage = {
-        input_tokens: usage.input_tokens ?? 0,
-        output_tokens: usage.output_tokens ?? 0,
-      };
+        if (!toolUse || toolUse.type !== 'tool_use') {
+          // Not transient — don't retry.
+          console.warn(
+            JSON.stringify({
+              event: 'anthropic.structured.fail',
+              reason: 'no_tool_use_block',
+              model,
+              attempt,
+              stop_reason: response.stop_reason,
+              usage: safeUsage,
+              text_blocks: textBlockCount,
+              tool_use_present: false,
+            }),
+          );
+          throw stampBilledUsd(
+            new ProviderError('anthropic', 'expected tool_use block in structured response'),
+            cumulativeUsd,
+          );
+        }
 
-      if (!toolUse || toolUse.type !== 'tool_use') {
-        // Instrumentation: a structured call that returned no tool_use block.
+        const parseResult = schema.safeParse(toolUse.input);
+        if (parseResult.success) {
+          console.info(
+            JSON.stringify({
+              event: 'anthropic.structured.ok',
+              model,
+              attempt,
+              stop_reason: response.stop_reason,
+              usage: safeUsage,
+            }),
+          );
+          return {
+            output: parseResult.data as never,
+            usd: cumulativeUsd,
+            latencyMs: Date.now() - start,
+          };
+        }
+
+        // schema_parse failure path. Log the issues (PII-free: path +
+        // code only) and either retry or throw. The sanitized log
+        // posture is unchanged from the pre-retry shape — security-
+        // reviewer PR #193 Medium 2.
+        const issues = parseResult.error.issues.map((i) => ({
+          path: i.path.join('.'),
+          code: i.code,
+        }));
+        lastIssues = issues;
+        const toolInputKeys = Object.keys(toolUse.input ?? {});
+        const toolInputSize = (() => {
+          try {
+            return JSON.stringify(toolUse.input ?? {}).length;
+          } catch {
+            return -1;
+          }
+        })();
         console.warn(
           JSON.stringify({
             event: 'anthropic.structured.fail',
-            reason: 'no_tool_use_block',
+            reason: 'schema_parse',
             model,
+            attempt,
+            will_retry: attempt < MAX_STRUCTURED_ATTEMPTS,
             stop_reason: response.stop_reason,
             usage: safeUsage,
             text_blocks: textBlockCount,
-            tool_use_present: false,
+            tool_use_present: true,
+            raw_tool_input_keys: toolInputKeys,
+            raw_tool_input_size: toolInputSize,
+            parse_issues: issues,
           }),
         );
-        throw stampBilledUsd(
-          new ProviderError('anthropic', 'expected tool_use block in structured response'),
-          usd,
-        );
+        // If this was the last attempt, throw outside the loop.
       }
-
-      const parseResult = schema.safeParse(toolUse.input);
-      if (parseResult.success) {
-        // Instrumentation: stop_reason + usage on the structured success path.
-        console.info(
-          JSON.stringify({
-            event: 'anthropic.structured.ok',
-            model,
-            stop_reason: response.stop_reason,
-            usage: safeUsage,
-          }),
-        );
-        return { output: parseResult.data as never, usd, latencyMs };
-      }
-
-      // Instrumentation on parse failure: structured, PII-free. Each
-      // issue carries only { path, code } — Zod's own `message` field
-      // embeds the received value (`"Expected string, received 12345
-      // at path foo.bar"`) and is dropped here (security-reviewer
-      // PR #193 Medium 2). The outer thrown error carries the same
-      // path/code list so callers can log it the same way; see
-      // `safeParseIssuesForLog` in structured.ts.
-      const issues = parseResult.error.issues.map((i) => ({
-        path: i.path.join('.'),
-        code: i.code,
-      }));
-      const toolInputKeys = Object.keys(toolUse.input ?? {});
-      const toolInputSize = (() => {
-        try {
-          return JSON.stringify(toolUse.input ?? {}).length;
-        } catch {
-          return -1;
-        }
-      })();
-      console.warn(
-        JSON.stringify({
-          event: 'anthropic.structured.fail',
-          reason: 'schema_parse',
-          model,
-          stop_reason: response.stop_reason,
-          usage: safeUsage,
-          text_blocks: textBlockCount,
-          tool_use_present: true,
-          raw_tool_input_keys: toolInputKeys,
-          raw_tool_input_size: toolInputSize,
-          parse_issues: issues,
-        }),
-      );
       throw stampBilledUsd(
         new ValidationError(
-          `anthropic: structured output failed schema (${issues.length} issue${issues.length === 1 ? '' : 's'})`,
-          { issues },
+          `anthropic: structured output failed schema after ${MAX_STRUCTURED_ATTEMPTS} attempts (${lastIssues.length} issue${lastIssues.length === 1 ? '' : 's'})`,
+          { issues: lastIssues },
         ),
-        usd,
+        cumulativeUsd,
       );
     }
 
+    // No-schema path — single call, free-text output.
+    const response = (await client().messages.create({
+      ...baseParams,
+      ...thinkingParam,
+    } as never)) as Message;
+    const latencyMs = Date.now() - start;
+    const usage = response.usage;
+    const usd = priceUsd(model, usage.input_tokens ?? 0, usage.output_tokens ?? 0);
     const textBlocks = response.content
       .filter((b) => b.type === 'text')
       .map((b) => (b.type === 'text' ? b.text : ''));
