@@ -19,13 +19,18 @@
 --   failed to attach to a cluster. Same payload shape; separate table
 --   keeps the hot path (matched signals → composer) narrow.
 --
--- RLS: both tables are internal pipeline state. SELECT policies grant
--- transparency to authenticated users (same pattern as
--- gdelt_event_cluster from migration 20261016000000). INSERT/UPDATE/
--- DELETE have NO policy and no `*_insert_self` — the workers process
--- writes as service_role, which bypasses RLS. There is NO client-
--- driven write path (no PostgREST POST surface), so no SECURITY
--- DEFINER RPC is needed. NOT H3-shaped.
+-- RLS: both tables are internal pipeline state. RLS is enabled but
+-- there are NO policies — the workers process writes as service_role
+-- (which bypasses RLS), and no `authenticated`/`anon` select is
+-- granted. Rationale: (1) ranking inputs are not shown to app users;
+-- (2) X trend data arrives in a follow-up PR and X Developer Terms
+-- forbid redistributing X content to end users, so an app-visible
+-- SELECT path on this table would create a compliance surface we
+-- don't want. gdelt_event_cluster is public-readable because the
+-- outlet set IS the transparent-math §2 signal rendered on the Drop
+-- card; trend_signals is upstream heat scoring, not a user-facing
+-- transparency surface. INSERT/UPDATE/DELETE have NO policy and no
+-- `*_insert_self` — service_role is the only writer. NOT H3-shaped.
 --
 -- Retention: 72h sweep. The sweep worker lands in a follow-up PR; this
 -- migration does NOT create a retention function or pg_cron entry for
@@ -42,13 +47,14 @@
 --   create table public.trend_signals.
 --   create table public.trend_signals_unmatched.
 --   indexes + unique dedup index on trend_signals.
---   enable RLS; select-all policies for authenticated.
---   grants.
+--   enable RLS; NO policies (service_role writes bypass RLS; no
+--     authenticated/anon select — see RLS block below).
+--   NO grants to authenticated/anon.
 --   pg_cron: google_trends_poll every 15 min (first consumer).
 --
 -- Down:
---   drop pg_cron entry.
---   drop tables (CASCADE for policies / indexes).
+--   drop pg_cron entry (`select cron.unschedule('google_trends_poll');`).
+--   drop tables (CASCADE drops indexes / enable-RLS state).
 --   drop enum.
 
 begin;
@@ -195,34 +201,31 @@ comment on table public.trend_signals_unmatched is
   'Audit sink for signals the matcher failed to attach to a GDELT cluster. Not on the hot path; read ad-hoc by the operator-review digest to calibrate matcher thresholds. Same 72h retention as trend_signals.';
 
 -- =========================================================================
--- 4. RLS
+-- 4. RLS — no policies, no app-visible SELECT
 -- =========================================================================
 --
--- Same shape as gdelt_event_cluster (migration 20261016000000):
--- SELECT granted to authenticated for transparency; INSERT/UPDATE/
--- DELETE has no policy — the workers service_role bypasses RLS, and
--- there is no client write surface.
+-- RLS is enabled; NO policies are created. service_role bypasses RLS
+-- and is the only writer; authenticated/anon have no SELECT grant and
+-- no policy, so a RLS traversal from a user JWT returns zero rows.
+--
+-- Why this diverges from gdelt_event_cluster (which IS public-readable):
+--   - gdelt_event_cluster is the §2 transparent-math surface rendered
+--     on the Drop card. Users need to see which outlets covered a
+--     story.
+--   - trend_signals is upstream heat-score input. It is NOT shown to
+--     users and should not be queryable by them.
+--   - X trend data (follow-up PR) carries X Developer Terms
+--     obligations against redistributing to end users; an app-visible
+--     SELECT on this table would create a compliance surface we
+--     don't want.
 
 alter table public.trend_signals enable row level security;
 alter table public.trend_signals_unmatched enable row level security;
 
-create policy trend_signals_select_all
-  on public.trend_signals
-  for select to authenticated using (true);
-
-create policy trend_signals_unmatched_select_all
-  on public.trend_signals_unmatched
-  for select to authenticated using (true);
+-- No grants to authenticated/anon.
 
 -- =========================================================================
--- 5. Grants
--- =========================================================================
-
-grant select on public.trend_signals to authenticated;
-grant select on public.trend_signals_unmatched to authenticated;
-
--- =========================================================================
--- 6. pg_cron — google_trends_poll (first consumer)
+-- 5. pg_cron — google_trends_poll (first consumer)
 -- =========================================================================
 --
 -- Every 15 minutes. One row per tick; the handler fetches the Google

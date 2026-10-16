@@ -89,6 +89,24 @@ export interface GoogleTrendsItem {
 // Approx-traffic parsing
 // ---------------------------------------------------------------------------
 
+/** Format a Date as a UTC-hour bucket `YYYY-MM-DDTHH`. Used as the
+ *  time-bucket half of source_id so the same trend observed in two
+ *  different hours produces two rows (preserves the time series the
+ *  heat composer needs for the 12h decay term). Within one hour, the
+ *  four 15-min ticks collapse into a single row via upsert's
+ *  ignoreDuplicates on `(source, source_id)`. */
+export function toUtcHourBucket(d: Date): string {
+  return d.toISOString().slice(0, 13);
+}
+
+/** Normalize a trend title for use in `source_id`: lowercase + collapse
+ *  whitespace. Keeps cosmetic variants ("ABC Co.", "abc co.") in the
+ *  same hourly bucket. The display title (unnormalized) is preserved
+ *  in payload.title. */
+export function normalizeSourceIdTitle(title: string): string {
+  return title.trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
 /** Parse Google Trends' approx_traffic strings into integers.
  *  Examples observed on 2026-10-16: "200+", "2000+", "20000+",
  *  "200000+", occasionally plain "1000". Values are bucketed powers-
@@ -362,15 +380,24 @@ export function buildGoogleTrendsPollHandler(opts?: { readonly now?: () => Date 
       return;
     }
 
+    // source_id is `<normalized title>|<UTC hour bucket>` so the same
+    // trend observed in two different hours produces two rows
+    // (preserves the approx_traffic time series the heat composer's
+    // 12h decay needs). Within one hour, upsert's ignoreDuplicates
+    // collapses the four 15-min ticks into a single row (first-seen
+    // wins). normalizeSourceIdTitle collapses whitespace + lowercases
+    // so cosmetic variants of the same trend don't fork the bucket.
+    const bucket = toUtcHourBucket(startedAt);
     const rows: InsertRow[] = items.map((it) => ({
       source: 'google_trends',
-      source_id: it.title,
+      source_id: `${normalizeSourceIdTitle(it.title)}|${bucket}`,
       payload: {
         title: it.title,
         approx_traffic: it.approxTraffic,
         pub_date: it.pubDate,
         news_items: it.newsItems,
         collected_at: startedAt.toISOString(),
+        bucket_utc_hour: bucket,
       },
     }));
 

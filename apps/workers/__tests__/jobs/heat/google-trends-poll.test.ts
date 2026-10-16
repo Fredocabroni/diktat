@@ -3,8 +3,10 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   buildGoogleTrendsPollHandler,
   GOOGLE_TRENDS_RSS_URL,
+  normalizeSourceIdTitle,
   parseApproxTraffic,
   parseGoogleTrendsRss,
+  toUtcHourBucket,
 } from '../../../src/jobs/heat/google-trends-poll.js';
 import type { Logger } from '../../../src/logger.js';
 import type { ScheduledJobRow } from '../../../src/jobs/scheduler.js';
@@ -117,8 +119,7 @@ function buildSupabase(initial?: { insertError?: { message: string } | null }): 
             // so the inner `payload` column value is what the test
             // asserts on. Fallback for safety if a future caller
             // updates other columns.
-            const payload =
-              (updateArg.payload as Record<string, unknown> | undefined) ?? updateArg;
+            const payload = (updateArg.payload as Record<string, unknown> | undefined) ?? updateArg;
             state.stamped.push({ rowId, payload });
             return Promise.resolve({ error: null });
           },
@@ -286,9 +287,12 @@ describe('google_trends_poll handler', () => {
       ignoreDuplicates: true,
     });
     expect(insert.rows[0]!.source).toBe('google_trends');
-    expect(insert.rows[0]!.source_id).toBe('winter weather forecast');
+    expect(insert.rows[0]!.source_id).toBe('winter weather forecast|2026-10-16T19');
     expect((insert.rows[0]!.payload as Record<string, unknown>).approx_traffic).toBe(200000);
     expect((insert.rows[0]!.payload as Record<string, unknown>).news_items).toHaveLength(2);
+    expect((insert.rows[0]!.payload as Record<string, unknown>).bucket_utc_hour).toBe(
+      '2026-10-16T19',
+    );
 
     const completeLog = logger.calls.find((c) => c.obj.event === 'google_trends_poll.complete');
     expect(completeLog).toBeDefined();
@@ -382,6 +386,77 @@ describe('google_trends_poll handler', () => {
       ).rejects.toThrow(/no fetch implementation/i);
     } finally {
       globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// source_id time-bucket contract
+// ---------------------------------------------------------------------------
+
+describe('source_id time-bucket (UTC-hour)', () => {
+  it('toUtcHourBucket formats as YYYY-MM-DDTHH', () => {
+    expect(toUtcHourBucket(new Date('2026-10-16T19:00:00Z'))).toBe('2026-10-16T19');
+    expect(toUtcHourBucket(new Date('2026-10-16T19:14:59.999Z'))).toBe('2026-10-16T19');
+    expect(toUtcHourBucket(new Date('2026-10-16T20:00:00Z'))).toBe('2026-10-16T20');
+    expect(toUtcHourBucket(new Date('2026-01-01T00:00:00Z'))).toBe('2026-01-01T00');
+  });
+
+  it('normalizeSourceIdTitle lowercases + collapses whitespace', () => {
+    expect(normalizeSourceIdTitle('Winter Weather Forecast')).toBe('winter weather forecast');
+    expect(normalizeSourceIdTitle('  Winter   Weather\tForecast  ')).toBe(
+      'winter weather forecast',
+    );
+  });
+
+  it('same title in two different hours writes two rows; same hour writes one', async () => {
+    // Three ticks of the SAME two trending titles, at:
+    //   T1 = 19:00 UTC
+    //   T2 = 19:14 UTC (same hour as T1)
+    //   T3 = 20:00 UTC (next hour)
+    // Expected: T1 writes 2 rows (bucket …T19). T2 writes 2 rows into
+    // trend_signals, but the real DB would collapse them via the
+    // unique(source,source_id) index — the fake Supabase doesn't
+    // enforce the index, so this test asserts source_id EQUALITY
+    // between T1 and T2 rows (what the index collapses on) and
+    // INEQUALITY between T1/T2 and T3 rows (what forces new rows).
+
+    const supabase = buildSupabase();
+    const logger = buildLogger();
+    const fetchImpl = mockFetchWith(SAMPLE_FEED);
+
+    const tickAt = async (iso: string): Promise<void> => {
+      const handler = buildGoogleTrendsPollHandler({ now: () => new Date(iso) });
+      await handler(buildRow(`row-${iso}`), {
+        supabase: supabase.client,
+        logger,
+        fetch: fetchImpl,
+      });
+    };
+
+    await tickAt('2026-10-16T19:00:00Z');
+    await tickAt('2026-10-16T19:14:00Z');
+    await tickAt('2026-10-16T20:00:00Z');
+
+    expect(supabase.inserts).toHaveLength(3);
+    const idsAt = (tickIdx: number): string[] =>
+      supabase.inserts[tickIdx]!.rows.map((r) => r.source_id as string);
+
+    // T1 and T2 are in the same UTC hour → identical source_ids
+    // (the live unique index collapses them to one row apiece).
+    expect(idsAt(0)).toEqual(idsAt(1));
+    expect(idsAt(0)).toEqual([
+      'winter weather forecast|2026-10-16T19',
+      'power outage tacoma|2026-10-16T19',
+    ]);
+
+    // T3 crosses the hour → fresh source_ids, distinct from T1/T2.
+    expect(idsAt(2)).toEqual([
+      'winter weather forecast|2026-10-16T20',
+      'power outage tacoma|2026-10-16T20',
+    ]);
+    for (const id of idsAt(2)) {
+      expect(idsAt(0)).not.toContain(id);
     }
   });
 });
