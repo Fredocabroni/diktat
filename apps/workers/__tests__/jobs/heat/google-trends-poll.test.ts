@@ -253,6 +253,71 @@ describe('parseGoogleTrendsRss', () => {
     const items = await parseGoogleTrendsRss(empty);
     expect(items).toEqual([]);
   });
+
+  it('caps pubDate at 64 chars (hostile-feed defense)', async () => {
+    const longDate = 'A'.repeat(500);
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:ht="https://trends.google.com/trending/rss">
+  <channel>
+    <item>
+      <title>long date trend</title>
+      <ht:approx_traffic>100+</ht:approx_traffic>
+      <pubDate>${longDate}</pubDate>
+    </item>
+  </channel>
+</rss>`;
+    const items = await parseGoogleTrendsRss(xml);
+    expect(items).toHaveLength(1);
+    expect(items[0]!.pubDate).not.toBeNull();
+    expect(items[0]!.pubDate!.length).toBe(64);
+  });
+
+  it('skips news_items whose url is not http(s) (javascript:/data:/file:)', async () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:ht="https://trends.google.com/trending/rss">
+  <channel>
+    <item>
+      <title>scheme guard trend</title>
+      <ht:approx_traffic>500+</ht:approx_traffic>
+      <pubDate>Fri, 16 Oct 2026 15:00:00 -0400</pubDate>
+      <ht:news_item>
+        <ht:news_item_title>Hostile link</ht:news_item_title>
+        <ht:news_item_url>javascript:alert(1)</ht:news_item_url>
+        <ht:news_item_source>Attacker</ht:news_item_source>
+      </ht:news_item>
+      <ht:news_item>
+        <ht:news_item_title>Data URI</ht:news_item_title>
+        <ht:news_item_url>data:text/html,&lt;script&gt;x()&lt;/script&gt;</ht:news_item_url>
+        <ht:news_item_source>Attacker</ht:news_item_source>
+      </ht:news_item>
+      <ht:news_item>
+        <ht:news_item_title>File URI</ht:news_item_title>
+        <ht:news_item_url>file:///etc/passwd</ht:news_item_url>
+        <ht:news_item_source>Attacker</ht:news_item_source>
+      </ht:news_item>
+      <ht:news_item>
+        <ht:news_item_title>Protocol-relative</ht:news_item_title>
+        <ht:news_item_url>//example.com/x</ht:news_item_url>
+        <ht:news_item_source>Attacker</ht:news_item_source>
+      </ht:news_item>
+      <ht:news_item>
+        <ht:news_item_title>Legit https</ht:news_item_title>
+        <ht:news_item_url>https://www.apnews.com/legit</ht:news_item_url>
+        <ht:news_item_source>AP News</ht:news_item_source>
+      </ht:news_item>
+      <ht:news_item>
+        <ht:news_item_title>Legit http</ht:news_item_title>
+        <ht:news_item_url>http://plain.example.com/x</ht:news_item_url>
+        <ht:news_item_source>Plain</ht:news_item_source>
+      </ht:news_item>
+    </item>
+  </channel>
+</rss>`;
+    const items = await parseGoogleTrendsRss(xml);
+    expect(items).toHaveLength(1);
+    const urls = items[0]!.newsItems.map((n) => n.url);
+    expect(urls).toEqual(['https://www.apnews.com/legit', 'http://plain.example.com/x']);
+  });
 });
 
 // ---------------------------------------------------------------------------

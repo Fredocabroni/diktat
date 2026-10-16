@@ -67,6 +67,7 @@ const MAX_ITEMS_PER_TICK = 50;
 const MAX_TITLE_CHARS = 256;
 const MAX_URL_CHARS = 2048;
 const MAX_SOURCE_CHARS = 128;
+const MAX_PUB_DATE_CHARS = 64;
 
 // ---------------------------------------------------------------------------
 // Public types (exported so tests can type-check fixtures)
@@ -224,7 +225,10 @@ export async function parseGoogleTrendsRss(xml: string): Promise<GoogleTrendsIte
     const title = (raw.title ?? '').trim();
     if (title.length === 0) continue;
     const approxTraffic = parseApproxTraffic(firstString(raw.approxTraffic) || null);
-    const pubDate = raw.pubDate ? raw.pubDate.trim() : null;
+    // RFC 2822 dates are at most ~31 chars; 64 is generous. Caps a
+    // hostile feed shipping an arbitrarily long pubDate (CI
+    // security-reviewer LOW, PR #247 push-2).
+    const pubDate = raw.pubDate ? raw.pubDate.trim().slice(0, MAX_PUB_DATE_CHARS) : null;
     const newsItems: GoogleTrendsNewsItem[] = [];
     for (const n of raw.newsItems ?? []) {
       const nTitle = firstString(n['ht:news_item_title']).trim();
@@ -232,6 +236,12 @@ export async function parseGoogleTrendsRss(xml: string): Promise<GoogleTrendsIte
       const nSource = firstString(n['ht:news_item_source']).trim();
       if (nTitle.length === 0 || nUrl.length === 0) continue;
       if (nUrl.length > MAX_URL_CHARS) continue;
+      // Scheme guard: reject anything that isn't http(s). Defends
+      // against a hostile feed shipping javascript: / data: / file:
+      // URIs into payload.news_items[].url — the matcher PR will
+      // read these as fetch targets (CI security-reviewer LOW,
+      // PR #247 push-2).
+      if (!/^https?:\/\//i.test(nUrl)) continue;
       newsItems.push({
         title: nTitle.slice(0, MAX_TITLE_CHARS),
         url: nUrl,

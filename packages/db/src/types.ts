@@ -1036,6 +1036,69 @@ export type Database = {
         }
         Relationships: []
       }
+      trend_signals: {
+        Row: {
+          candidate_id: string | null
+          created_at: string
+          global_event_id: string | null
+          id: string
+          match_quality: Json | null
+          payload: Json
+          source: Database["public"]["Enums"]["trend_signal_source"]
+          source_id: string
+          updated_at: string
+        }
+        Insert: {
+          candidate_id?: string | null
+          created_at?: string
+          global_event_id?: string | null
+          id?: string
+          match_quality?: Json | null
+          payload?: Json
+          source: Database["public"]["Enums"]["trend_signal_source"]
+          source_id: string
+          updated_at?: string
+        }
+        Update: {
+          candidate_id?: string | null
+          created_at?: string
+          global_event_id?: string | null
+          id?: string
+          match_quality?: Json | null
+          payload?: Json
+          source?: Database["public"]["Enums"]["trend_signal_source"]
+          source_id?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      trend_signals_unmatched: {
+        Row: {
+          created_at: string
+          id: string
+          payload: Json
+          reason: string | null
+          source: Database["public"]["Enums"]["trend_signal_source"]
+          source_id: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          payload?: Json
+          reason?: string | null
+          source: Database["public"]["Enums"]["trend_signal_source"]
+          source_id: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          payload?: Json
+          reason?: string | null
+          source?: Database["public"]["Enums"]["trend_signal_source"]
+          source_id?: string
+        }
+        Relationships: []
+      }
       tribe_memberships: {
         Row: {
           is_primary: boolean
@@ -1598,6 +1661,12 @@ export type Database = {
       news_evidence_tier: "primary" | "direct" | "reputable"
       news_outlet_group: "left" | "center" | "right"
       news_outlet_type: "news" | "commentary"
+      trend_signal_source:
+        | "google_trends"
+        | "bluesky"
+        | "x_trends"
+        | "wikimedia_pageviews"
+        | "reddit"
     }
     CompositeTypes: {
       [_ in never]: never
@@ -2276,6 +2345,13 @@ export const Constants = {
       news_evidence_tier: ["primary", "direct", "reputable"],
       news_outlet_group: ["left", "center", "right"],
       news_outlet_type: ["news", "commentary"],
+      trend_signal_source: [
+        "google_trends",
+        "bluesky",
+        "x_trends",
+        "wikimedia_pageviews",
+        "reddit",
+      ],
     },
   },
   storage: {

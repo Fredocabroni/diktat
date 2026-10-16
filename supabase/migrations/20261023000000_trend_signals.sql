@@ -44,18 +44,26 @@
 --
 -- Up:
 --   create type trend_signal_source enum.
---   create table public.trend_signals.
---   create table public.trend_signals_unmatched.
+--   create table public.trend_signals (incl. updated_at + trigger —
+--     the matcher worker in a follow-up PR mutates the row to set
+--     global_event_id / candidate_id / match_quality, so updated_at
+--     is maintained via the shared set_updated_at() trigger, same
+--     pattern as gdelt_event_cluster from migration 20261016000000).
+--   create table public.trend_signals_unmatched (append-only sink;
+--     no updated_at — rows are written once by the matcher and
+--     never updated).
 --   indexes + unique dedup index on trend_signals.
 --   enable RLS; NO policies (service_role writes bypass RLS; no
 --     authenticated/anon select — see RLS block below).
 --   NO grants to authenticated/anon.
 --   pg_cron: google_trends_poll every 15 min (first consumer).
 --
--- Down:
+-- Down (strict reversal order — trigger before table):
+--   drop trigger trend_signals_set_updated_at on public.trend_signals.
 --   drop pg_cron entry (`select cron.unschedule('google_trends_poll');`).
---   drop tables (CASCADE drops indexes / enable-RLS state).
---   drop enum.
+--   drop table public.trend_signals cascade.
+--   drop table public.trend_signals_unmatched cascade.
+--   drop type public.trend_signal_source.
 
 begin;
 
@@ -129,8 +137,23 @@ create table public.trend_signals (
 
   created_at timestamptz not null default now(),
 
+  -- Mutated by the matcher worker in a follow-up PR (fills
+  -- global_event_id / candidate_id / match_quality). Maintained via
+  -- the shared public.set_updated_at() trigger below — same shape as
+  -- gdelt_event_cluster (migration 20261016000000). trend_signals_
+  -- unmatched is append-only and does NOT carry updated_at.
+  updated_at timestamptz not null default now(),
+
   constraint trend_signals_source_id_length check (char_length(source_id) between 1 and 512)
 );
+
+-- Auto-maintain updated_at on every row-level UPDATE. public.set_updated_at
+-- is the shared trigger function (first installed by migration
+-- 20260420090005; used by news_topics, predictions, fact_checks,
+-- gdelt_event_cluster).
+create trigger trend_signals_set_updated_at
+  before update on public.trend_signals
+  for each row execute function public.set_updated_at();
 
 -- Cross-tick dedup. Same signal arriving on a later poll tick updates
 -- nothing — we treat the first observation as canonical (matches the
