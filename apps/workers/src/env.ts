@@ -53,6 +53,12 @@ const envSchema = z.object({
   // candidates — is observable end to end).
   GDELT_ENABLED: boolFromString.default(false),
 
+  // Heat-signal collectors (plan v3). Each defaults OFF; the operator
+  // flips them one at a time behind HEAT_ENABLED=false. When off, each
+  // poller handler stamps outcome='disabled' and returns; the cron
+  // keeps emitting rows so the queue drains cleanly.
+  WIKIMEDIA_ENABLED: boolFromString.default(false),
+
   // Telegram alerting (optional). Missing = alerter disabled — NEVER a boot
   // failure. Kept lenient (plain optional strings, no regex, unlike the api's
   // chat-id validation) precisely because the alerter is what REPORTS a boot
