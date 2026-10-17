@@ -180,8 +180,12 @@ export function canonicalizeUrl(rawUrl: string): string {
     .filter(([k]) => !TRACKING_PREFIXES.some((p) => k.toLowerCase().startsWith(p)))
     .filter(([k]) => !TRACKING_EXACT.has(k.toLowerCase()))
     .sort(([a], [b]) => a.localeCompare(b));
-  const search =
-    cleanParams.length > 0 ? `?${cleanParams.map(([k, v]) => `${k}=${v}`).join('&')}` : '';
+  // Re-serialize via URLSearchParams so values are percent-encoded.
+  // The prior `${k}=${v}` form dropped encoding because `.entries()`
+  // yields already-decoded values; `?q=hello%20world` canonicalized
+  // to `?q=hello world` and could collide with semantically-different
+  // URLs in `dedup_url_canon`. Closes #218 MED A.
+  const search = cleanParams.length > 0 ? `?${new URLSearchParams(cleanParams).toString()}` : '';
   return `${u.protocol}//${host}${path}${search}`;
 }
 
