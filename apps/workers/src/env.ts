@@ -53,6 +53,18 @@ const envSchema = z.object({
   // candidates — is observable end to end).
   GDELT_ENABLED: boolFromString.default(false),
 
+  // Heat-signal collectors (plan v3). Each defaults OFF; the operator
+  // flips them one at a time behind HEAT_ENABLED=false (which also
+  // defaults OFF — the composer / walker-swap PR will add it). When
+  // off, each poller handler stamps outcome='disabled' and returns;
+  // the cron keeps emitting rows so the queue drains cleanly.
+  //
+  // X_TRENDS_ENABLED is additionally gated by X_BEARER_TOKEN presence
+  // because the X v2 API is pay-per-use. The handler fails closed with
+  // outcome='no_bearer' when the flag is on but the token is empty.
+  X_TRENDS_ENABLED: boolFromString.default(false),
+  X_BEARER_TOKEN: z.string().default(''),
+
   // Telegram alerting (optional). Missing = alerter disabled — NEVER a boot
   // failure. Kept lenient (plain optional strings, no regex, unlike the api's
   // chat-id validation) precisely because the alerter is what REPORTS a boot
