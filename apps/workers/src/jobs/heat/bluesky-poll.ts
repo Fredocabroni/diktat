@@ -130,6 +130,11 @@ function sanitizeLink(v: unknown): string | null {
   const t = v.trim();
   if (t.length === 0) return null;
   if (t.length > MAX_LINK_CHARS) return null;
+  // Protocol-relative URLs (`//evil.com/x`) resolve to the page's
+  // origin — a classic open-redirect vector when the stored value is
+  // later rendered as an `href`. Reject before any scheme check.
+  // CI security-reviewer MEDIUM finding on #252.
+  if (t.startsWith('//')) return null;
   // Bluesky serves these as path-only (`/profile/x`) OR fully-
   // qualified. Accept both; reject anything that looks like a
   // non-http(s) scheme or an attempt at URL injection.

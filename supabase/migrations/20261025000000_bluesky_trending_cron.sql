@@ -12,8 +12,12 @@
 -- 20261023000000). The Bluesky signal uses source='bluesky' —
 -- already a value of public.trend_signal_source.
 --
--- Prod max applied: 20261022000000. Earlier queued migrations
--- 20261023 (trend_signals) and 20261024 (matcher) sort before this.
+-- Prod max applied: 20261023000000 (trend_signals, M1). This
+-- migration (20261025) sorts strictly after. Note: 20261024
+-- (matcher indexes + cron) is a sibling PR not yet merged — the
+-- Supabase CLI treats missing-timestamp gaps as non-blocking, and
+-- when 20261024 lands it sorts between prod max and this file by
+-- the normal migration-order contract.
 --
 -- Up: cron.schedule('bluesky_trending_poll', '*/15 * * * *', ...)
 -- Down: select cron.unschedule('bluesky_trending_poll');

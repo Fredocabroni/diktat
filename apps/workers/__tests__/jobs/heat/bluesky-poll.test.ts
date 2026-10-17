@@ -202,6 +202,27 @@ describe('parseBlueskyTrendingBody', () => {
   it('missing topics key returns empty', () => {
     expect(parseBlueskyTrendingBody(JSON.stringify({ other: 1 }))).toEqual([]);
   });
+
+  it('rejects protocol-relative URLs in link (open-redirect guard)', () => {
+    const body = JSON.stringify({
+      topics: [
+        {
+          topic: 'protocol-relative',
+          displayName: 'oops',
+          link: '//evil.com/attack',
+        },
+        {
+          topic: 'bare-double-slash',
+          displayName: 'oops2',
+          link: '//',
+        },
+      ],
+    });
+    const items = parseBlueskyTrendingBody(body);
+    expect(items).toHaveLength(2);
+    expect(items[0]!.link).toBeNull();
+    expect(items[1]!.link).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------
