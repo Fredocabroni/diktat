@@ -167,6 +167,7 @@ describe('runSchedulerTick', () => {
           'gdelt_event_retention',
           'google_trends_poll',
           'heat_signal_match',
+          'heat_compose',
         ],
         p_worker_id: 'w1',
       },

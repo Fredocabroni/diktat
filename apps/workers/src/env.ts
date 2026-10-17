@@ -53,6 +53,11 @@ const envSchema = z.object({
   // candidates — is observable end to end).
   GDELT_ENABLED: boolFromString.default(false),
 
+  // Master heat-score gate. Defaults OFF. When off, every heat
+  // collector/composer stamps outcome='disabled' and returns; the
+  // walker's Drop-selection logic never reads heat_score.
+  HEAT_ENABLED: boolFromString.default(false),
+
   // Telegram alerting (optional). Missing = alerter disabled — NEVER a boot
   // failure. Kept lenient (plain optional strings, no regex, unlike the api's
   // chat-id validation) precisely because the alerter is what REPORTS a boot

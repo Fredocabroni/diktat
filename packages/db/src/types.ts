@@ -683,6 +683,8 @@ export type Database = {
           dedup_url_canon: string
           evidence_tier: Database["public"]["Enums"]["news_evidence_tier"]
           global_event_id: string | null
+          heat_components: Json | null
+          heat_score: number | null
           id: string
           outlet_group: Database["public"]["Enums"]["news_outlet_group"] | null
           outlet_lean: string | null
@@ -706,6 +708,8 @@ export type Database = {
           dedup_url_canon: string
           evidence_tier?: Database["public"]["Enums"]["news_evidence_tier"]
           global_event_id?: string | null
+          heat_components?: Json | null
+          heat_score?: number | null
           id?: string
           outlet_group?: Database["public"]["Enums"]["news_outlet_group"] | null
           outlet_lean?: string | null
@@ -729,6 +733,8 @@ export type Database = {
           dedup_url_canon?: string
           evidence_tier?: Database["public"]["Enums"]["news_evidence_tier"]
           global_event_id?: string | null
+          heat_components?: Json | null
+          heat_score?: number | null
           id?: string
           outlet_group?: Database["public"]["Enums"]["news_outlet_group"] | null
           outlet_lean?: string | null
