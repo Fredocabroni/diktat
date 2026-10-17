@@ -262,6 +262,11 @@ export async function parseGoogleTrendsRss(xml: string): Promise<GoogleTrendsIte
 // Insert
 // ---------------------------------------------------------------------------
 
+import type { Database } from '@diktat/db';
+
+type TrendSignalInsert = Database['public']['Tables']['trend_signals']['Insert'];
+type ScheduledJobsUpdate = Database['public']['Tables']['scheduled_jobs']['Update'];
+
 interface InsertRow {
   readonly source: 'google_trends';
   readonly source_id: string;
@@ -269,19 +274,22 @@ interface InsertRow {
 }
 
 /** Insert signals via upsert with ignoreDuplicates — cross-tick dedup
- *  via the unique(source,source_id) index from M1. */
+ *  via the unique(source,source_id) index from M1. The explicit
+ *  `TrendSignalInsert[]` cast at the call-site swaps the previous
+ *  `supabase as any` escape hatch for a typed path now that
+ *  packages/db/src/types.ts carries the trend_signals schema
+ *  (CI security-reviewer LOW on PR #247 push-2). */
 async function insertSignals(
   deps: Parameters<JobHandler>[1],
   rows: ReadonlyArray<InsertRow>,
 ): Promise<{ attempted: number; failed: number }> {
   if (rows.length === 0) return { attempted: 0, failed: 0 };
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { error } = (await (deps.supabase as any)
+  const { error } = await deps.supabase
     .from('trend_signals')
-    .upsert(rows as unknown as Record<string, unknown>[], {
+    .upsert(rows as unknown as TrendSignalInsert[], {
       onConflict: 'source,source_id',
       ignoreDuplicates: true,
-    })) as { error: { message: string } | null };
+    });
   if (error) {
     deps.logger.warn({
       event: 'google_trends_poll.insert_failed',
@@ -293,24 +301,47 @@ async function insertSignals(
   return { attempted: rows.length, failed: 0 };
 }
 
+/** Observable fields stamped into scheduled_jobs.payload. Closed-shape
+ *  interface — callers cannot spread an unvalidated bag of properties
+ *  into the stamp payload, which previously allowed a tampered
+ *  scheduled_jobs row's payload to leak back into the observability
+ *  record (CI security-reviewer LOW on PR #247 push-2). */
+interface StampPayload {
+  readonly emitted_at?: string;
+  readonly outcome: 'ok' | 'degraded_fetch' | 'degraded_parse';
+  readonly reason?: string;
+  readonly fetched?: number;
+  readonly inserted_attempted?: number;
+  readonly inserted_failed?: number;
+}
+
 /** Stamp the row's payload with the tick summary — same pattern as
  *  news-ingest. Observability for the operator-review digest. */
 async function stampPayload(
   deps: Parameters<JobHandler>[1],
   rowId: string,
-  payload: Record<string, unknown>,
+  payload: StampPayload,
 ): Promise<void> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { error } = (await (deps.supabase as any)
-    .from('scheduled_jobs')
-    .update({ payload })
-    .eq('id', rowId)) as { error: { message: string } | null };
+  // The Database["public"]["Tables"]["scheduled_jobs"]["Update"] type
+  // declares `payload` as `Json`, which accepts the closed StampPayload
+  // shape via the shared JSON object subtype.
+  const update: ScheduledJobsUpdate = {
+    payload: payload as unknown as ScheduledJobsUpdate['payload'],
+  };
+  const { error } = await deps.supabase.from('scheduled_jobs').update(update).eq('id', rowId);
   if (error) {
     deps.logger.debug({
       event: 'google_trends_poll.stamp_payload_failed',
       message: scrubMessage(error.message),
     });
   }
+}
+
+/** Pull the one field we read from the pg_cron-emitted payload. Any
+ *  other property is dropped by design; see StampPayload rationale. */
+function emittedAtFromRow(row: ScheduledJobRow): string | undefined {
+  const v = row.payload.emitted_at;
+  return typeof v === 'string' ? v : undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -365,7 +396,7 @@ export function buildGoogleTrendsPollHandler(opts?: { readonly now?: () => Date 
       });
       await recordDegrade(deps, `fetch_failed: ${message}`, tickMinute);
       await stampPayload(deps, row.id, {
-        ...row.payload,
+        emitted_at: emittedAtFromRow(row),
         outcome: 'degraded_fetch',
         reason: message.slice(0, 256),
       });
@@ -383,7 +414,7 @@ export function buildGoogleTrendsPollHandler(opts?: { readonly now?: () => Date 
       });
       await recordDegrade(deps, `parse_failed: ${message}`, tickMinute);
       await stampPayload(deps, row.id, {
-        ...row.payload,
+        emitted_at: emittedAtFromRow(row),
         outcome: 'degraded_parse',
         reason: message.slice(0, 256),
       });
@@ -414,7 +445,7 @@ export function buildGoogleTrendsPollHandler(opts?: { readonly now?: () => Date 
     const insertResult = await insertSignals(deps, rows);
 
     await stampPayload(deps, row.id, {
-      ...row.payload,
+      emitted_at: emittedAtFromRow(row),
       outcome: 'ok',
       fetched: items.length,
       inserted_attempted: insertResult.attempted,
