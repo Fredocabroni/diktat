@@ -81,6 +81,26 @@ describe('canonicalizeUrl', () => {
     const b = canonicalizeUrl('https://bls.gov/news.release');
     expect(a).toBe(b);
   });
+
+  it('round-trips percent-encoded query values (fixes #218 MED A)', () => {
+    // Space in a value: must survive canonicalization as %20, not a
+    // literal space. The prior `${k}=${v}` join dropped the encoding
+    // because .entries() yields already-decoded values. Collisions in
+    // dedup_url_canon between encoded + raw forms would cause two
+    // semantically-different URLs to collapse.
+    expect(canonicalizeUrl('https://congress.gov/bill/1?q=hello%20world')).toBe(
+      'https://congress.gov/bill/1?q=hello+world',
+    );
+    // Ampersand inside a value: must survive as %26, not literal '&'
+    // (which would split into two params).
+    expect(canonicalizeUrl('https://congress.gov/bill/1?q=a%26b&id=1')).toBe(
+      'https://congress.gov/bill/1?id=1&q=a%26b',
+    );
+    // Equals inside a value: survives as %3D.
+    expect(canonicalizeUrl('https://congress.gov/bill/1?q=x%3Dy')).toBe(
+      'https://congress.gov/bill/1?q=x%3Dy',
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
