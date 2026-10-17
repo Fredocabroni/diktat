@@ -1,0 +1,13 @@
+{
+  "recommendations": [
+    "dbaeumer.vscode-eslint",
+    "esbenp.prettier-vscode",
+    "bradlc.vscode-tailwindcss",
+    "vitest.explorer",
+    "mtxr.sqltools",
+    "mtxr.sqltools-driver-pg",
+    "github.vscode-github-actions",
+    "usernamehw.errorlens",
+    "editorconfig.editorconfig"
+  ]
+}
