@@ -166,6 +166,7 @@ describe('runSchedulerTick', () => {
           'drop_publish',
           'gdelt_event_retention',
           'google_trends_poll',
+          'x_trends_poll',
         ],
         p_worker_id: 'w1',
       },
