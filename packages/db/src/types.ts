@@ -358,6 +358,42 @@ export type Database = {
           },
         ]
       }
+      drop_shadow_log: {
+        Row: {
+          created_at: string
+          drop_date: string
+          operator_notes: string | null
+          operator_pick_candidate_id: string | null
+          operator_picked_at: string | null
+          real_drop_topic_id: string | null
+          shadow_top_5: Json
+          updated_at: string
+          weights_snapshot: Json | null
+        }
+        Insert: {
+          created_at?: string
+          drop_date: string
+          operator_notes?: string | null
+          operator_pick_candidate_id?: string | null
+          operator_picked_at?: string | null
+          real_drop_topic_id?: string | null
+          shadow_top_5?: Json
+          updated_at?: string
+          weights_snapshot?: Json | null
+        }
+        Update: {
+          created_at?: string
+          drop_date?: string
+          operator_notes?: string | null
+          operator_pick_candidate_id?: string | null
+          operator_picked_at?: string | null
+          real_drop_topic_id?: string | null
+          shadow_top_5?: Json
+          updated_at?: string
+          weights_snapshot?: Json | null
+        }
+        Relationships: []
+      }
       fact_check_claims: {
         Row: {
           claim_context: string
@@ -1605,6 +1641,23 @@ export type Database = {
           p_topic_id: string
         }
         Returns: string
+      }
+      record_drop_shadow_log: {
+        Args: {
+          p_drop_date: string
+          p_real_drop_topic_id: string | null
+          p_shadow_top_5: Json
+          p_weights_snapshot: Json | null
+        }
+        Returns: undefined
+      }
+      record_drop_shadow_operator_pick: {
+        Args: {
+          p_drop_date: string
+          p_candidate_id: string | null
+          p_notes: string | null
+        }
+        Returns: undefined
       }
       record_opinion_shift: {
         Args: {

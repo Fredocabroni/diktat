@@ -168,6 +168,7 @@ describe('runSchedulerTick', () => {
           'google_trends_poll',
           'heat_signal_match',
           'heat_compose',
+          'drop_shadow_digest',
         ],
         p_worker_id: 'w1',
       },
