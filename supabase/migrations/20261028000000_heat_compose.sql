@@ -47,6 +47,16 @@ alter table public.news_topics_candidates
   add column heat_score numeric,
   add column heat_components jsonb;
 
+-- Range guard on heat_score: all composer formulas produce non-
+-- negative values (log1p of non-negatives, non-negative weights,
+-- 0 ≤ decay ≤ 1, cross_bonus added not subtracted). A null row
+-- stays "unscored"; a scored row must be ≥ 0. Catches a weight-
+-- arithmetic bug before HEAT_ENABLED flips and the column becomes
+-- load-bearing. CI security-reviewer LOW on #255.
+alter table public.news_topics_candidates
+  add constraint news_topics_candidates_heat_score_nonneg
+    check (heat_score is null or heat_score >= 0);
+
 comment on column public.news_topics_candidates.heat_score is
   'Shadow-mode heat score computed by the heat composer worker. Higher = more under-50 / Gen Z audience heat. Not read by Drop-selection logic until HEAT_ENABLED flips in a later PR.';
 comment on column public.news_topics_candidates.heat_components is

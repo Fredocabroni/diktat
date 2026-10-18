@@ -44,6 +44,15 @@ const CANDIDATE_WINDOW_HOURS = 48;
 /** Per-tick batch cap. Protects the loop against a backlog spike. */
 const MAX_CANDIDATES_PER_TICK = 500;
 
+/** Cap on the number of distinct cluster IDs passed into the three
+ *  downstream `.in(...)` queries. 500 UUIDs in a single `.in(...)`
+ *  can serialise past PostgREST's comfortable query-string budget
+ *  (~8 KB per request). We dedupe candidate.global_event_id first,
+ *  so this is only a cap on *distinct* clusters — a tick that scans
+ *  500 candidates with only 50 distinct clusters is unaffected.
+ *  Covers the CI security-reviewer LOW on #255. */
+const MAX_CLUSTER_IDS_PER_TICK = 200;
+
 type CandidateUpdate = Database['public']['Tables']['news_topics_candidates']['Update'];
 type ScheduledJobsUpdate = Database['public']['Tables']['scheduled_jobs']['Update'];
 type TrendSignalSource = Database['public']['Enums']['trend_signal_source'];
@@ -285,10 +294,23 @@ export function buildHeatComposeHandler(opts?: {
 
     // 2. Load clusters for these candidates (where global_event_id is
     //    non-null — primary-source candidates stay heat-less because
-    //    their value is already in the rank_score path).
-    const clusterIds = Array.from(
+    //    their value is already in the rank_score path). Distinct
+    //    cluster set is capped so the downstream `.in(...)` queries
+    //    don't exceed PostgREST's query-string budget — see
+    //    MAX_CLUSTER_IDS_PER_TICK. Overflow is logged + processed on
+    //    the next tick; the composer is idempotent so no row is lost.
+    const allClusterIds = Array.from(
       new Set(candidates.map((c) => c.global_event_id).filter((v): v is string => v !== null)),
     );
+    const clusterIds = allClusterIds.slice(0, MAX_CLUSTER_IDS_PER_TICK);
+    if (allClusterIds.length > MAX_CLUSTER_IDS_PER_TICK) {
+      deps.logger.warn({
+        event: 'heat_compose.cluster_ids_capped',
+        distinct_cluster_ids: allClusterIds.length,
+        cap: MAX_CLUSTER_IDS_PER_TICK,
+        note: 'overflow processed on next tick',
+      });
+    }
     const clustersByGid = new Map<string, { last_seen_at_ms: number; distinct_outlets: number }>();
     if (clusterIds.length > 0) {
       const { data: clusters, error: clErr } = await deps.supabase
