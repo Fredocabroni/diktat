@@ -26,6 +26,7 @@ import { scrubMessage, type Alerter } from '@diktat/shared/alerts';
 import { dropPublishHandler } from './drop-publish.js';
 import { factCheckOrchestratorHandler } from './fact-check-orchestrator.js';
 import { gdeltEventRetentionHandler } from './gdelt-event-retention.js';
+import { blueskyTrendingPollHandler } from './heat/bluesky-poll.js';
 import { googleTrendsPollHandler } from './heat/google-trends-poll.js';
 import { heatSignalMatchHandler } from './heat/match.js';
 import { localBoundarySweepHandler } from './local-boundary-sweep.js';
@@ -403,6 +404,7 @@ export const defaultHandlers: Readonly<Record<string, JobHandler>> = Object.free
   gdelt_event_retention: gdeltEventRetentionHandler,
   google_trends_poll: googleTrendsPollHandler,
   heat_signal_match: heatSignalMatchHandler,
+  bluesky_trending_poll: blueskyTrendingPollHandler,
 });
 
 /** Build the runtime registry. The push_deliver handler is a factory because
