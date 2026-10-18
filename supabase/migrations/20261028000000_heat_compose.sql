@@ -20,9 +20,12 @@
 -- Both nullable, no default — pre-existing rows stay null until a
 -- composer tick picks them up. No breaking change on readers.
 --
--- Prod max applied: 20261022000000. Predecessors (sibling PRs,
--- unmerged): 20261023 (M1), 20261024 (matcher), 20261025 (Bluesky),
--- 20261026 (X), 20261027 (Wikimedia). This file sorts after all.
+-- Prod max applied: 20261024000000 (matcher, PR #251). This
+-- migration (20261028) sorts strictly after. 20261025 (Bluesky),
+-- 20261026 (X), 20261027 (Wikimedia) are sibling PRs that may or
+-- may not be merged ahead of this one; none is a hard dependency
+-- of this file (the composer only needs trend_signals from
+-- 20261023 + news_topics_candidates from pre-existing migrations).
 --
 -- Up:
 --   alter table public.news_topics_candidates
