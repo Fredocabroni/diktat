@@ -53,6 +53,13 @@ const envSchema = z.object({
   // candidates — is observable end to end).
   GDELT_ENABLED: boolFromString.default(false),
 
+  // X v2 Trends-by-WOEID collector. Pay-per-use ($0.010/request).
+  // Defaults OFF; handler fails closed with outcome='no_bearer' if
+  // the flag is on but X_BEARER_TOKEN is empty. No live call tonight
+  // — fixtures only per operator rules.
+  X_TRENDS_ENABLED: boolFromString.default(false),
+  X_BEARER_TOKEN: z.string().default(''),
+
   // Heat-signal collectors (plan v3). Each defaults OFF; the operator
   // flips them one at a time behind HEAT_ENABLED=false. When off, each
   // poller handler stamps outcome='disabled' and returns; the cron
