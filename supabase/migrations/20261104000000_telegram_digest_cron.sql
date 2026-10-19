@@ -12,22 +12,26 @@
 -- next morning. 05 UTC = 1 AM ET post-DST / 2 AM ET pre-DST, which
 -- the operator is not awake for.
 --
--- The timing shift uses `cron.unschedule` + `cron.schedule`
--- because the applied 20261103000000 row cannot be edited in
--- place from a new migration — rescheduling by job name is the
--- supported pattern. `cron.schedule` itself upserts by name, so
--- the unschedule+schedule pair is explicit about intent.
+-- The timing shift uses `delete from cron.job where jobname = …`
+-- + `cron.schedule` because the applied 20261103000000 row cannot
+-- be edited in place from a new migration — rescheduling by job
+-- name is the supported pattern. `cron.unschedule('name')` is
+-- NOT idempotent (raises if the job does not exist), which breaks
+-- any fresh-DB apply where the predecessor's cron entry is
+-- absent (e.g. CI re-runs under an older pg_cron, out-of-band
+-- manual cleanup). A direct `delete from cron.job` is zero-row-
+-- safe and semantically identical for our use.
 --
 -- Prod max applied at author time: 20261103000000 (drop_shadow_log).
 -- This file sorts strictly after.
 --
 -- Up:
---   select cron.unschedule('drop_shadow_digest');
+--   delete from cron.job where jobname = 'drop_shadow_digest';
 --   select cron.schedule('drop_shadow_digest', '10 1 * * *', ...)
 --   select cron.schedule('telegram_digest_send', '15 1 * * *', ...)
 -- Down (restore 20261103000000's original 06:00 UTC schedule):
---   select cron.unschedule('telegram_digest_send');
---   select cron.unschedule('drop_shadow_digest');
+--   delete from cron.job where jobname = 'telegram_digest_send';
+--   delete from cron.job where jobname = 'drop_shadow_digest';
 --   select cron.schedule('drop_shadow_digest', '0 6 * * *', ...)
 
 begin;
@@ -43,7 +47,7 @@ begin;
 -- re-fires within a UTC day, the latter is the ET-day review
 -- label the operator reads.
 
-select cron.unschedule('drop_shadow_digest');
+delete from cron.job where jobname = 'drop_shadow_digest';
 
 select cron.schedule(
   'drop_shadow_digest',
@@ -60,8 +64,12 @@ select cron.schedule(
   $cron$
 );
 
--- Telegram delivery cron: 5 minutes after the generator (same
--- UTC-day idempotency key as every other heat-pipeline cron).
+-- Telegram delivery cron: 5 minutes after the generator. Same
+-- UTC-day idempotency key as every other heat-pipeline cron;
+-- the worker handler resolves the drop_shadow_log row to deliver
+-- by computing the America/New_York date of the firing moment
+-- (NOT the UTC-based idempotency key), matching the generator's
+-- row-write calendar documented in the generator block above.
 
 select cron.schedule(
   'telegram_digest_send',
