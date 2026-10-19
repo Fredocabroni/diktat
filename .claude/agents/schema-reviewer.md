@@ -13,7 +13,7 @@ Any new file in `supabase/migrations/`. Any change to `packages/db/src/`.
 # Checklist (every item is a hard pass/fail)
 
 1. **Naming.** File `NNNN_snake_case_description.sql`. `NNNN` is exactly 1 greater than the previous file.
-2. **Wrapper.** `BEGIN;` on first non-comment line, `COMMIT;` on last. No `ROLLBACK` left in.
+2. **Wrapper.** A transaction block wraps the migration: a `begin;` on the first non-comment line and a matching `commit;` on the last. Case-insensitive — the repo convention is lowercase `begin;` / `commit;` (all 55 migrations on `main` as of 2026-10-18 use lowercase), but uppercase is semantically identical and MUST NOT be flagged. No `rollback` left in the body.
 3. **Header comment.** `-- Migration: <name>`, `-- Up: <intent>`, `-- Down: <how to reverse>` all present.
 4. **Timestamps.** Every new table has `created_at TIMESTAMPTZ DEFAULT now() NOT NULL`. If the entity is mutable: also `updated_at` with default.
 5. **Foreign keys.** Every FK has `REFERENCES … ON DELETE …` explicit. Every FK column has an index in the same migration.
