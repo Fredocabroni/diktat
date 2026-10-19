@@ -210,6 +210,135 @@ describe('computeHeat', () => {
 // Handler disabled path
 // ---------------------------------------------------------------------------
 
+describe('computeHeat — non-finite guard', () => {
+  it('a pathological weight (NaN) produces NaN heat_score', () => {
+    const now = Date.parse('2026-10-16T19:00:00Z');
+    const r = computeHeat({
+      cluster: { distinct_outlets: 5, last_seen_at_ms: now },
+      signals: [],
+      nowMs: now,
+      weights: { ...DEFAULT_HEAT_WEIGHTS, w_g: Number.NaN },
+    });
+    expect(Number.isFinite(r.heat_score)).toBe(false);
+  });
+
+  it('an +Infinity weight produces +Infinity heat_score', () => {
+    const now = Date.parse('2026-10-16T19:00:00Z');
+    const r = computeHeat({
+      cluster: { distinct_outlets: 5, last_seen_at_ms: now },
+      signals: [],
+      nowMs: now,
+      weights: { ...DEFAULT_HEAT_WEIGHTS, w_g: Number.POSITIVE_INFINITY },
+    });
+    expect(Number.isFinite(r.heat_score)).toBe(false);
+  });
+});
+
+describe('heat_compose handler — non-finite guard (handler-level)', () => {
+  it('skips the candidate update when heat_score is non-finite', async () => {
+    // Build a full mocked supabase: one candidate, one cluster, no
+    // outlets, no signals. computeHeat gets `w_g=NaN` via the handler
+    // option so heat_score is NaN; the handler must stamp outcome=ok
+    // scored=0 skipped=1 and NEVER call .update on news_topics_candidates.
+    const candUpdates: Record<string, unknown>[] = [];
+    const stamped: { rowId: string; payload: Record<string, unknown> }[] = [];
+    const fromImpl = (table: string) => {
+      if (table === 'news_topics_candidates') {
+        return {
+          // select → one row.
+          select: (_cols: string) => ({
+            is: (_c: string, _v: null) => ({
+              gt: (_c2: string, _v2: string) => ({
+                order: (_c3: string, _o: Record<string, unknown>) => ({
+                  limit: (_n: number) =>
+                    Promise.resolve({
+                      data: [
+                        {
+                          id: 'cand-1',
+                          global_event_id: 'gid-1',
+                          created_at: '2026-10-16T18:00:00Z',
+                        },
+                      ],
+                      error: null,
+                    }),
+                }),
+              }),
+            }),
+          }),
+          // update → MUST NOT be called.
+          update: (updateArg: Record<string, unknown>) => {
+            candUpdates.push(updateArg);
+            return {
+              eq: (_c: string, _v: string) => ({
+                is: (_c2: string, _v2: null) => Promise.resolve({ error: null }),
+              }),
+            };
+          },
+        };
+      }
+      if (table === 'gdelt_event_cluster') {
+        return {
+          select: (_cols: string) => ({
+            in: (_c: string, _ids: string[]) =>
+              Promise.resolve({
+                data: [{ global_event_id: 'gid-1', last_seen_at: '2026-10-16T19:00:00Z' }],
+                error: null,
+              }),
+          }),
+        };
+      }
+      if (table === 'gdelt_event_cluster_outlet') {
+        return {
+          select: (_cols: string) => ({
+            in: (_c: string, _ids: string[]) => Promise.resolve({ data: [], error: null }),
+          }),
+        };
+      }
+      if (table === 'trend_signals') {
+        return {
+          select: (_cols: string) => ({
+            in: (_c: string, _ids: string[]) => Promise.resolve({ data: [], error: null }),
+          }),
+        };
+      }
+      if (table === 'scheduled_jobs') {
+        return {
+          update: (updateArg: Record<string, unknown>) => ({
+            eq: (_c: string, rowId: string) => {
+              const payload =
+                (updateArg.payload as Record<string, unknown> | undefined) ?? updateArg;
+              stamped.push({ rowId, payload });
+              return Promise.resolve({ error: null });
+            },
+          }),
+        };
+      }
+      throw new Error(`fake: unexpected table ${table}`);
+    };
+    const client = { from: fromImpl } as unknown as ServiceClient;
+    const logger = buildLogger();
+    const handler = buildHeatComposeHandler({
+      now: () => new Date('2026-10-16T19:00:00Z'),
+      envProvider: () => env({ HEAT_ENABLED: true }),
+      weights: { ...DEFAULT_HEAT_WEIGHTS, w_g: Number.NaN },
+    });
+    await handler(buildRow(), { supabase: client, logger });
+
+    // The non-finite result MUST NOT have been persisted.
+    expect(candUpdates).toHaveLength(0);
+    // Stamp exists and reports zero scored.
+    expect(stamped).toHaveLength(1);
+    expect(stamped[0]!.payload.outcome).toBe('ok');
+    expect(stamped[0]!.payload.scored).toBe(0);
+    // A warn log carries the non-finite event.
+    expect(
+      logger.calls.some(
+        (c) => (c.obj as { event?: string }).event === 'heat_compose.non_finite_score',
+      ),
+    ).toBe(true);
+  });
+});
+
 describe('heat_compose handler (shadow gates)', () => {
   it('HEAT_ENABLED=false: no DB reads, stamps disabled', async () => {
     const stamped: { rowId: string; payload: Record<string, unknown> }[] = [];

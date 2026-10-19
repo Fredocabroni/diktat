@@ -1,7 +1,9 @@
 // heat_compose — scheduler-spine worker that computes per-candidate
 // heat_score from matched trend_signals + the GDELT distinct-outlet
 // count. Writes `heat_score` + `heat_components` to
-// public.news_topics_candidates (migration 20261028000000).
+// public.news_topics_candidates (migration 20261101000000; the
+// 20261028 timestamp originally queued for this feature was
+// renumbered forward when 20261024/20261025/20261030 landed first).
 //
 // SHADOW ONLY. HEAT_ENABLED=false by default. The walker's Drop-
 // selection logic never reads these columns in this PR; the flip
@@ -408,6 +410,22 @@ export function buildHeatComposeHandler(opts?: {
         nowMs,
         weights,
       });
+      // Defensive guard: never persist NaN / ±Infinity to heat_score.
+      // computeHeat's inputs are bounded (log1p of non-negative counts
+      // + bounded weights) so this is unreachable today, but a future
+      // weight edit or an upstream signal shape change that produces
+      // non-finite math would otherwise silently poison the ranking
+      // column — numeric_jsonb columns accept the SQL `nan` token.
+      if (!Number.isFinite(heat_score)) {
+        deps.logger.warn({
+          event: 'heat_compose.non_finite_score',
+          candidate_id: c.id,
+          global_event_id: c.global_event_id,
+          heat_score,
+        });
+        skipped += 1;
+        continue;
+      }
       const update: CandidateUpdate = {
         heat_score,
         heat_components: components as unknown as CandidateUpdate['heat_components'],
