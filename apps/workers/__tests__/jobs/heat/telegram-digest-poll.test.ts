@@ -35,7 +35,8 @@ function env(overrides: Partial<Env> = {}): Env {
     BLUESKY_ENABLED: false,
     TELEGRAM_DIGEST_ENABLED: true,
     TELEGRAM_BOT_TOKEN: 'bot-token',
-    TELEGRAM_OPERATOR_CHAT_ID: '42',
+    TELEGRAM_CHAT_ID: '42',
+    TELEGRAM_OPERATOR_USER_ID: '',
     ...overrides,
   } as Env;
 }
@@ -111,36 +112,84 @@ describe('parseCallbackData', () => {
 // isFromOperator
 // ---------------------------------------------------------------------------
 
-describe('isFromOperator', () => {
+describe('isFromOperator — DM mode (positive numeric TELEGRAM_CHAT_ID)', () => {
   const q = (fromId: number, chatId?: number): TelegramCallbackQuery => ({
     id: 'cbq-1',
     from: { id: fromId },
     message: chatId === undefined ? undefined : { chat: { id: chatId } },
     data: `skip:v1:2026-10-19`,
   });
+  const auth = { chatId: '42', operatorUserId: '' };
 
-  it('matches operator from.id (1:1 DM, no message.chat passed)', () => {
-    expect(isFromOperator(q(42), '42')).toBe(true);
+  it('matches operator from.id with no message.chat', () => {
+    expect(isFromOperator(q(42), auth)).toBe(true);
   });
 
   it('matches when both from.id and chat.id are operator', () => {
-    expect(isFromOperator(q(42, 42), '42')).toBe(true);
+    expect(isFromOperator(q(42, 42), auth)).toBe(true);
   });
 
   it('rejects non-operator from.id', () => {
-    expect(isFromOperator(q(999), '42')).toBe(false);
+    expect(isFromOperator(q(999), auth)).toBe(false);
   });
 
-  it('rejects when chat.id disagrees with operator (group chat case)', () => {
-    expect(isFromOperator(q(42, 999), '42')).toBe(false);
+  it('rejects when chat.id disagrees with operator (hostile group chat)', () => {
+    expect(isFromOperator(q(42, 999), auth)).toBe(false);
   });
 
-  it('rejects empty operator chat id', () => {
-    expect(isFromOperator(q(42), '')).toBe(false);
+  it('rejects empty chat id', () => {
+    expect(isFromOperator(q(42), { chatId: '', operatorUserId: '' })).toBe(false);
   });
 
-  it('rejects non-numeric operator chat id', () => {
-    expect(isFromOperator(q(42), 'oops')).toBe(false);
+  it('non-DM chat id with no operator_user_id rejects all taps (fail-closed)', () => {
+    // chat id "-100…" is a supergroup; the operator user id is required
+    // to authorise taps and is empty here.
+    expect(
+      isFromOperator(q(42, -1001234567890), { chatId: '-1001234567890', operatorUserId: '' }),
+    ).toBe(false);
+  });
+});
+
+describe('isFromOperator — group / channel mode (requires TELEGRAM_OPERATOR_USER_ID)', () => {
+  const q = (fromId: number, chatId: number): TelegramCallbackQuery => ({
+    id: 'cbq-g',
+    from: { id: fromId },
+    message: { chat: { id: chatId } },
+    data: `skip:v1:2026-10-19`,
+  });
+  const auth = { chatId: '-1001234567890', operatorUserId: '99' };
+
+  it('operator user_id in configured group → authorised', () => {
+    expect(isFromOperator(q(99, -1001234567890), auth)).toBe(true);
+  });
+
+  it('non-operator user in configured group → rejected', () => {
+    expect(isFromOperator(q(55, -1001234567890), auth)).toBe(false);
+  });
+
+  it('operator user in a DIFFERENT group → rejected (chat.id must match)', () => {
+    expect(isFromOperator(q(99, -1009999999999), auth)).toBe(false);
+  });
+
+  it('missing message.chat → rejected (group mode requires chat.id)', () => {
+    const noChat: TelegramCallbackQuery = {
+      id: 'cbq-nc',
+      from: { id: 99 },
+      data: 'skip:v1:2026-10-19',
+    };
+    expect(isFromOperator(noChat, auth)).toBe(false);
+  });
+
+  it('non-numeric chat id (channel @slug) → rejected (parseInt returns NaN)', () => {
+    expect(
+      isFromOperator(q(99, -1001234567890), { chatId: '@diktat_ops', operatorUserId: '99' }),
+    ).toBe(false);
+  });
+
+  it('operator_user_id non-positive → rejected', () => {
+    expect(
+      isFromOperator(q(99, -1001234567890), { chatId: '-1001234567890', operatorUserId: '-1' }),
+    ).toBe(false);
   });
 });
 

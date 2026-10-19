@@ -101,14 +101,19 @@ function fmtScore(n: number): string {
   return (Math.round(n * 100) / 100).toFixed(2).replace(/\.?0+$/, '');
 }
 
-/** The UTC day the digest cron fires on. The scheduler runs at
- *  06:05 UTC so subtracting 6h pins to that same UTC date, same shape
- *  as the generator's `digestDate()`. */
+/** The ET date of the Drop that this digest reviews. The send
+ *  cron fires at 01:15 UTC — 9:15 PM EDT / 8:15 PM EST — so the
+ *  firing moment's America/New_York date is the ET date of
+ *  tonight's 8 PM ET Drop. Must match the generator's digestDate()
+ *  one-for-one; both use the same Intl API so DST transitions
+ *  stay aligned. */
 export function digestDate(now: Date): string {
-  const t = new Date(now.getTime() - 6 * 60 * 60 * 1000);
-  return `${t.getUTCFullYear()}-${String(t.getUTCMonth() + 1).padStart(2, '0')}-${String(
-    t.getUTCDate(),
-  ).padStart(2, '0')}`;
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/New_York',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(now);
 }
 
 export function buildMessageText(
@@ -324,7 +329,7 @@ export function buildTelegramDigestSendHandler(opts?: {
         fetchImpl,
         url,
         {
-          chat_id: env.TELEGRAM_OPERATOR_CHAT_ID,
+          chat_id: env.TELEGRAM_CHAT_ID,
           text,
           parse_mode: 'HTML',
           disable_web_page_preview: true,

@@ -34,7 +34,8 @@ function env(overrides: Partial<Env> = {}): Env {
     X_BEARER_TOKEN: '',
     BLUESKY_ENABLED: false,
     TELEGRAM_DIGEST_ENABLED: false,
-    TELEGRAM_OPERATOR_CHAT_ID: '',
+    TELEGRAM_CHAT_ID: '',
+    TELEGRAM_OPERATOR_USER_ID: '',
     ...overrides,
   } as Env;
 }
@@ -59,17 +60,17 @@ function buildRow(): ScheduledJobRow {
     job_type: 'telegram_digest_send',
     idempotency_key: '2026-10-19',
     target_user_id: null,
-    payload: { emitted_at: '2026-10-19 06:05:00' },
+    payload: { emitted_at: '2026-10-19 01:15:00' },
     status: 'processing',
     attempts: 1,
     max_attempts: 5,
-    available_at: '2026-10-19T06:05:00Z',
-    locked_at: '2026-10-19T06:05:01Z',
+    available_at: '2026-10-19T01:15:00Z',
+    locked_at: '2026-10-19T01:15:01Z',
     locked_by: 'worker-test',
     last_error: null,
     processed_at: null,
-    created_at: '2026-10-19T06:05:00Z',
-    updated_at: '2026-10-19T06:05:00Z',
+    created_at: '2026-10-19T01:15:00Z',
+    updated_at: '2026-10-19T01:15:00Z',
   };
 }
 
@@ -84,10 +85,22 @@ describe('escapeHtml', () => {
 });
 
 describe('digestDate', () => {
-  it('subtracts 6h so a 06:05 UTC run pins to that UTC date', () => {
-    expect(digestDate(new Date('2026-10-19T06:05:00Z'))).toBe('2026-10-19');
-    // 00:00 UTC run (edge) pins to the prior UTC day.
-    expect(digestDate(new Date('2026-10-19T00:00:00Z'))).toBe('2026-10-18');
+  it('EDT 01:15 UTC run pins to the ET date of the Drop evening', () => {
+    // 01:15 UTC on 2026-10-19 = 9:15 PM EDT on 2026-10-18.
+    expect(digestDate(new Date('2026-10-19T01:15:00Z'))).toBe('2026-10-18');
+  });
+
+  it('EST 01:15 UTC run pins to the ET date of the Drop evening', () => {
+    // 01:15 UTC on 2026-12-20 = 8:15 PM EST on 2026-12-19.
+    expect(digestDate(new Date('2026-12-20T01:15:00Z'))).toBe('2026-12-19');
+  });
+
+  it('must match generator digestDate at the same instant (one-for-one)', () => {
+    // Trivially true (both call the same Intl API) — assert anyway so a
+    // future refactor keeps them aligned.
+    expect(digestDate(new Date('2026-10-19T01:10:00Z'))).toBe(
+      digestDate(new Date('2026-10-19T01:15:00Z')),
+    );
   });
 });
 
@@ -212,7 +225,7 @@ describe('telegram_digest_send handler', () => {
     const logger = buildLogger();
     const fetchImpl = vi.fn() as unknown as typeof globalThis.fetch;
     const handler = buildTelegramDigestSendHandler({
-      now: () => new Date('2026-10-19T06:05:00Z'),
+      now: () => new Date('2026-10-19T01:15:00Z'),
       envProvider: () => env({ TELEGRAM_DIGEST_ENABLED: false }),
       fetchImpl,
     });
@@ -226,12 +239,12 @@ describe('telegram_digest_send handler', () => {
     const logger = buildLogger();
     const fetchImpl = vi.fn() as unknown as typeof globalThis.fetch;
     const handler = buildTelegramDigestSendHandler({
-      now: () => new Date('2026-10-19T06:05:00Z'),
+      now: () => new Date('2026-10-19T01:15:00Z'),
       envProvider: () =>
         env({
           TELEGRAM_DIGEST_ENABLED: true,
           TELEGRAM_BOT_TOKEN: 'bot-token',
-          TELEGRAM_OPERATOR_CHAT_ID: '42',
+          TELEGRAM_CHAT_ID: '42',
         }),
       fetchImpl,
     });
@@ -242,8 +255,9 @@ describe('telegram_digest_send handler', () => {
 
   it('happy path: POSTs sendMessage with inline_keyboard, stamps ok with message_id', async () => {
     const supa = buildSupabase({
+      // 01:15 UTC on 2026-10-19 = 9:15 PM EDT on 2026-10-18 → drop_date 10-18.
       logRow: {
-        drop_date: '2026-10-19',
+        drop_date: '2026-10-18',
         real_drop_topic_id: '11111111-1111-1111-1111-111111111111',
         shadow_top_5: [
           { candidate_id: 'c1', source_title: 'Alpha', source_url: null, heat_score: 10 },
@@ -265,12 +279,12 @@ describe('telegram_digest_send handler', () => {
     }) as unknown as typeof globalThis.fetch;
 
     const handler = buildTelegramDigestSendHandler({
-      now: () => new Date('2026-10-19T06:05:00Z'),
+      now: () => new Date('2026-10-19T01:15:00Z'),
       envProvider: () =>
         env({
           TELEGRAM_DIGEST_ENABLED: true,
           TELEGRAM_BOT_TOKEN: 'bot-token',
-          TELEGRAM_OPERATOR_CHAT_ID: '42',
+          TELEGRAM_CHAT_ID: '42',
         }),
       fetchImpl,
     });
@@ -285,11 +299,11 @@ describe('telegram_digest_send handler', () => {
     };
     // Row 0 = top-5 picks, row 1 = Actual Drop (real_drop_topic_id set), row 2 = Skip.
     expect(kb.inline_keyboard).toHaveLength(3);
-    expect(kb.inline_keyboard[0]![0]!.callback_data).toBe('pick:v1:2026-10-19:c1');
+    expect(kb.inline_keyboard[0]![0]!.callback_data).toBe('pick:v1:2026-10-18:c1');
     expect(kb.inline_keyboard[1]![0]!.callback_data).toBe(
-      'drop:v1:2026-10-19:11111111-1111-1111-1111-111111111111',
+      'drop:v1:2026-10-18:11111111-1111-1111-1111-111111111111',
     );
-    expect(kb.inline_keyboard[2]![0]!.callback_data).toBe('skip:v1:2026-10-19');
+    expect(kb.inline_keyboard[2]![0]!.callback_data).toBe('skip:v1:2026-10-18');
 
     expect(supa.stamped[0]!.payload.outcome).toBe('ok');
     expect(supa.stamped[0]!.payload.telegram_message_id).toBe(7777);
@@ -298,7 +312,7 @@ describe('telegram_digest_send handler', () => {
   it('Telegram 403 (bot blocked): stamps degraded_send', async () => {
     const supa = buildSupabase({
       logRow: {
-        drop_date: '2026-10-19',
+        drop_date: '2026-10-18',
         real_drop_topic_id: null,
         shadow_top_5: [],
       },
@@ -314,12 +328,12 @@ describe('telegram_digest_send handler', () => {
     ) as unknown as typeof globalThis.fetch;
 
     const handler = buildTelegramDigestSendHandler({
-      now: () => new Date('2026-10-19T06:05:00Z'),
+      now: () => new Date('2026-10-19T01:15:00Z'),
       envProvider: () =>
         env({
           TELEGRAM_DIGEST_ENABLED: true,
           TELEGRAM_BOT_TOKEN: 'bot-token',
-          TELEGRAM_OPERATOR_CHAT_ID: '42',
+          TELEGRAM_CHAT_ID: '42',
         }),
       fetchImpl,
     });

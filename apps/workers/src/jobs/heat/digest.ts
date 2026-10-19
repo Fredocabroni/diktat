@@ -40,21 +40,20 @@ const CANDIDATE_WINDOW_HOURS = 48;
 // Pure helpers (exported for tests)
 // ---------------------------------------------------------------------------
 
-/** Compute "yesterday's ET date" at the point the digest fires. The
- *  digest fires at 06:00 UTC, by which time the day's Drop (20:00 ET)
- *  has published for the ET-day currently 2–3 hours in the past (00:00
- *  or 01:00 UTC depending on DST). We encode as a UTC date here —
- *  simplest key and good enough for one-row-per-day. The admin UI can
- *  render the ET-day equivalent for operator readability. */
+/** Compute the ET date of the Drop that the current digest run
+ *  reviews. The generator cron fires at 01:10 UTC — that's
+ *  9:10 PM EDT / 8:10 PM EST, i.e., shortly after the 8 PM ET Drop
+ *  on the ET date that just closed. The row's drop_date is the
+ *  America/New_York date of the firing moment; `Intl.DateTime
+ *  Format('en-CA', { timeZone: 'America/New_York' })` returns
+ *  YYYY-MM-DD and handles the EDT↔EST transition automatically. */
 export function digestDate(now: Date): string {
-  // Use the UTC date of "now minus 6 hours" so a 06:00 UTC fire pins
-  // to that UTC day. For later fires in the same calendar window it
-  // still produces the same date; the primary-key upsert handles
-  // re-fires idempotently anyway.
-  const t = new Date(now.getTime() - 6 * 60 * 60 * 1000);
-  return `${t.getUTCFullYear()}-${String(t.getUTCMonth() + 1).padStart(2, '0')}-${String(
-    t.getUTCDate(),
-  ).padStart(2, '0')}`;
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/New_York',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(now);
 }
 
 /** Shape of a single row in the shadow_top_5 jsonb array.

@@ -6,9 +6,15 @@
 // TELEGRAM_DIGEST_ENABLED. On each tick we call
 // GET /bot<token>/getUpdates?timeout=25&offset=<n>&allowed_updates=["callback_query"]
 // — a 25-second long poll — then dispatch each callback_query to
-// handleCallbackQuery(). Updates whose chat.id does NOT match
-// TELEGRAM_OPERATOR_CHAT_ID are IGNORED and logged (operator-only
-// — the whole point of this UI).
+// handleCallbackQuery(). Tap authorisation:
+//   - DM chat (positive-numeric TELEGRAM_CHAT_ID): the chat.id IS
+//     the operator's user id — require callback_query.from.id to
+//     match TELEGRAM_CHAT_ID.
+//   - Group / channel (anything else): require the optional
+//     TELEGRAM_OPERATOR_USER_ID — reject every tap when unset,
+//     match callback_query.from.id against it.
+// Non-authorised callbacks are IGNORED and logged (no answer-
+// CallbackQuery — don't echo text into unexpected chats).
 //
 // Offset state is in-memory only. On restart the loop resumes from
 // the HIGHEST update_id Telegram still has in its 24h buffer; this
@@ -90,17 +96,50 @@ export function parseCallbackData(raw: string | undefined): ParsedCallback {
   return { kind: 'invalid', reason: 'unknown_kind' };
 }
 
-/** Check whether an incoming callback originates from the operator
- *  chat. Both the message's chat and the clicking user must match
- *  the configured operator chat_id (for a 1:1 bot DM they're the
- *  same; for a group chat they'd differ). */
-export function isFromOperator(q: TelegramCallbackQuery, operatorChatId: string): boolean {
-  if (operatorChatId.length === 0) return false;
-  const operatorId = Number.parseInt(operatorChatId, 10);
-  if (!Number.isFinite(operatorId)) return false;
-  if (q.from.id !== operatorId) return false;
+export interface AuthConfig {
+  readonly chatId: string;
+  readonly operatorUserId: string;
+}
+
+/** Parse the configured chat_id as a positive integer whose
+ *  canonical string form matches the input exactly. True = this
+ *  chat_id is a user DM id (where chat.id === from.id === user id).
+ *  False = group/supergroup/channel id (negative or non-integer). */
+function isDmChatId(chatId: string): boolean {
+  const n = Number.parseInt(chatId, 10);
+  return Number.isFinite(n) && n > 0 && String(n) === chatId.trim();
+}
+
+/** Check whether an incoming callback is authorised. Two shapes:
+ *
+ *  - DM: TELEGRAM_CHAT_ID is a positive int. The operator's user id
+ *    equals the chat id; require from.id to match it, and if
+ *    message.chat.id is present it must also match.
+ *  - Group/channel: TELEGRAM_CHAT_ID is non-positive-numeric (e.g.
+ *    a supergroup id like -1001234567890). Authorisation is a
+ *    separate TELEGRAM_OPERATOR_USER_ID — require from.id to match
+ *    it, and require message.chat.id to match the configured
+ *    chat id (so taps in some OTHER group with the same operator
+ *    user are refused). Reject every tap if OPERATOR_USER_ID is
+ *    unset — safer than guessing. */
+export function isFromOperator(q: TelegramCallbackQuery, auth: AuthConfig): boolean {
+  if (auth.chatId.length === 0) return false;
+  if (isDmChatId(auth.chatId)) {
+    const operatorId = Number.parseInt(auth.chatId, 10);
+    if (q.from.id !== operatorId) return false;
+    const chatId = q.message?.chat?.id;
+    if (chatId !== undefined && chatId !== operatorId) return false;
+    return true;
+  }
+  // Group / channel path.
+  if (auth.operatorUserId.length === 0) return false;
+  const operatorUserId = Number.parseInt(auth.operatorUserId, 10);
+  if (!Number.isFinite(operatorUserId) || operatorUserId <= 0) return false;
+  if (q.from.id !== operatorUserId) return false;
+  const configuredChat = Number.parseInt(auth.chatId, 10);
+  if (!Number.isFinite(configuredChat)) return false;
   const chatId = q.message?.chat?.id;
-  if (chatId !== undefined && chatId !== operatorId) return false;
+  if (chatId === undefined || chatId !== configuredChat) return false;
   return true;
 }
 
@@ -251,7 +290,12 @@ export async function pollOnce(
     nextOffset = Math.max(nextOffset, u.update_id + 1);
     const q = u.callback_query;
     if (!q) continue;
-    if (!isFromOperator(q, deps.env.TELEGRAM_OPERATOR_CHAT_ID)) {
+    if (
+      !isFromOperator(q, {
+        chatId: deps.env.TELEGRAM_CHAT_ID ?? '',
+        operatorUserId: deps.env.TELEGRAM_OPERATOR_USER_ID,
+      })
+    ) {
       deps.logger.warn({
         event: 'telegram_digest_poll.ignored_non_operator',
         from_id: q.from.id,
