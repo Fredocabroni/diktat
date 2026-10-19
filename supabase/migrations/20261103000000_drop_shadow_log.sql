@@ -11,13 +11,15 @@
 -- deferred to a follow-up PR; the generator writes the row and the
 -- follow-up consumes it. See PR description for delivery options.
 --
--- RLS: service_role is the only writer. Reads are granted to
--- `authenticated` for admins + the eventual /admin/shadow-review
--- UI; this is operator-review surface, not political-content
--- surface, so public read is acceptable per the "transparent-math
--- §2" posture used by gdelt_event_cluster. If future digest rows
--- carry X trend text we revisit (today's shadow log carries
--- candidate IDs + heat_score only, no third-party trend text).
+-- RLS: service_role is the only reader AND writer. No app role
+-- (anon / authenticated) can read this table — it holds internal
+-- heat-pipeline ranking data derived in part from X trends, and
+-- the shape of what the composer would have picked is competitive
+-- signal that must never leak to app users. The eventual
+-- /admin/shadow-review UI reads through a trusted server-side
+-- path (service_role) rather than directly from the browser,
+-- matching the pattern used by every other heat-pipeline table
+-- (trend_signals, drop_candidates, heat_compose_runs).
 --
 -- Prod max applied at author time: 20261102000000 (Wikimedia
 -- validator). Heat pipeline predecessors (all merged): 20261023
@@ -27,10 +29,10 @@
 --
 -- Up:
 --   create table public.drop_shadow_log (…).
---   enable RLS; select to authenticated; service_role writer.
+--   enable RLS; no app-role SELECT policy — service_role only.
 --   SECURITY DEFINER RPC record_drop_shadow_log(…).
 --   SECURITY DEFINER RPC record_drop_shadow_operator_pick(…) for
---     admin UI write path.
+--     admin UI write path; NOT FOUND guard; notes length check.
 --   pg_cron: drop_shadow_digest daily at 06:00 UTC (post-Drop).
 --
 -- Down (strict reversal order):
@@ -77,22 +79,21 @@ create trigger drop_shadow_log_set_updated_at
   before update on public.drop_shadow_log
   for each row execute function public.set_updated_at();
 
--- Reverse-chrono scan for the admin UI "last 14 days".
-create index drop_shadow_log_drop_date_desc_idx
-  on public.drop_shadow_log (drop_date desc);
+-- No secondary index: the admin UI's "last 14 days" reverse-chrono
+-- scan uses a backward scan of the drop_date PK index (btree
+-- indexes support both directions); at ≤366 rows/year a dedicated
+-- (drop_date desc) index is redundant.
 
 comment on table public.drop_shadow_log is
   'Nightly shadow-run audit: top-5 heat picks vs the walker''s real Drop pick + operator manual pick, one row per UTC day. HEAT_ENABLED=false path. Used by /admin/shadow-review and the eventual digest-delivery job.';
 
 alter table public.drop_shadow_log enable row level security;
 
--- Public read: this is operator-review state; no user PII; no X
--- Developer Agreement surface (candidate IDs + heat_score only).
-create policy drop_shadow_log_select_authenticated
-  on public.drop_shadow_log
-  for select to authenticated using (true);
-
-grant select on public.drop_shadow_log to authenticated;
+-- No SELECT policy for anon / authenticated: this is internal
+-- heat-pipeline state (X-trends-derived ranking data + what the
+-- composer would have picked). RLS enabled + no policy = default
+-- deny for every app role. service_role bypasses RLS by role, and
+-- the eventual admin UI reads through a trusted server path.
 
 -- =========================================================================
 -- SECURITY DEFINER RPCs
@@ -159,12 +160,30 @@ security definer
 set search_path = ''
 as $$
 begin
+  -- Belt-and-braces length check inside the RPC. The column has an
+  -- identical CHECK constraint; this surfaces a clearer error at the
+  -- RPC boundary (same errcode class) rather than a generic
+  -- constraint-violation deep in the UPDATE.
+  if p_notes is not null and char_length(p_notes) not between 1 and 4096 then
+    raise exception 'drop_shadow_log.operator_notes length out of range (1..4096): got %', char_length(p_notes)
+      using errcode = 'check_violation';
+  end if;
+
   update public.drop_shadow_log
     set operator_pick_candidate_id = p_candidate_id,
         operator_notes = p_notes,
         operator_picked_at = now(),
         updated_at = now()
     where drop_date = p_drop_date;
+
+  -- NOT FOUND guard: a bare UPDATE on a missing row silently
+  -- discards the operator pick. Convert that invisible failure
+  -- into a surfaced error so the admin UI can message the operator
+  -- (e.g. "generator has not run yet for this date").
+  if not found then
+    raise exception 'drop_shadow_log: no row found for drop_date=%', p_drop_date
+      using errcode = 'no_data_found';
+  end if;
 end;
 $$;
 

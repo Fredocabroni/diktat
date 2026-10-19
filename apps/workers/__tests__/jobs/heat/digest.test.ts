@@ -116,6 +116,63 @@ describe('buildShadowTop5', () => {
     expect(out[0]!.heat_components).toEqual({ gdelt_term: 1 });
     expect(out[1]!.candidate_id).toBe('d');
   });
+
+  it('nulls source_url when it is not a well-formed http(s) URL', () => {
+    const rows = [
+      // Valid http
+      {
+        id: 'ok-http',
+        source_title: 'OK HTTP',
+        source_url: 'http://example.com/a',
+        heat_score: 10,
+        heat_components: null,
+        global_event_id: null,
+      },
+      // Valid https
+      {
+        id: 'ok-https',
+        source_title: 'OK HTTPS',
+        source_url: 'https://example.com/b',
+        heat_score: 9,
+        heat_components: null,
+        global_event_id: null,
+      },
+      // Non-http(s) scheme: dropped from URL field, row kept
+      {
+        id: 'js-scheme',
+        source_title: 'JS',
+        source_url: 'javascript:alert(1)',
+        heat_score: 8,
+        heat_components: null,
+        global_event_id: null,
+      },
+      // Unparseable garbage
+      {
+        id: 'garbage',
+        source_title: 'Garbage',
+        source_url: 'not a url',
+        heat_score: 7,
+        heat_components: null,
+        global_event_id: null,
+      },
+      // Missing url entirely
+      {
+        id: 'nullish',
+        source_title: 'Nullish',
+        source_url: null,
+        heat_score: 6,
+        heat_components: null,
+        global_event_id: null,
+      },
+    ];
+    const out = buildShadowTop5(rows);
+    expect(out).toHaveLength(5);
+    expect(out[0]!.source_url).toBe('http://example.com/a');
+    expect(out[1]!.source_url).toBe('https://example.com/b');
+    expect(out[2]!.source_url).toBeNull();
+    expect(out[3]!.source_url).toBeNull();
+    expect(out[4]!.source_url).toBeNull();
+  });
 });
 
 describe('drop_shadow_digest handler', () => {

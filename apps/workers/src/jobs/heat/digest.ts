@@ -57,14 +57,32 @@ export function digestDate(now: Date): string {
   ).padStart(2, '0')}`;
 }
 
-/** Shape of a single row in the shadow_top_5 jsonb array. */
+/** Shape of a single row in the shadow_top_5 jsonb array.
+ *  `source_url` is nullable — a malformed URL in the upstream
+ *  candidate row is nulled out rather than embedded verbatim, so
+ *  the shadow log never carries a non-http(s) scheme. */
 export interface ShadowTopEntry {
   readonly candidate_id: string;
   readonly source_title: string;
-  readonly source_url: string;
+  readonly source_url: string | null;
   readonly heat_score: number;
   readonly heat_components: Record<string, unknown> | null;
   readonly global_event_id: string | null;
+}
+
+/** Return the input only if it parses as a well-formed http(s) URL,
+ *  else null. Defence-in-depth: the source table (news_topics
+ *  _candidates) is service-role-write-only, but a corrupt row would
+ *  otherwise be embedded verbatim into the shadow log jsonb. */
+function sanitizeSourceUrl(raw: string | null): string | null {
+  if (!raw) return null;
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    return raw;
+  } catch {
+    return null;
+  }
 }
 
 export function buildShadowTop5(
@@ -79,12 +97,12 @@ export function buildShadowTop5(
 ): ShadowTopEntry[] {
   const out: ShadowTopEntry[] = [];
   for (const r of rows) {
-    if (!r.source_title || !r.source_url) continue;
+    if (!r.source_title) continue;
     if (typeof r.heat_score !== 'number' || !Number.isFinite(r.heat_score)) continue;
     out.push({
       candidate_id: r.id,
       source_title: r.source_title,
-      source_url: r.source_url,
+      source_url: sanitizeSourceUrl(r.source_url),
       heat_score: r.heat_score,
       heat_components:
         r.heat_components && typeof r.heat_components === 'object'
