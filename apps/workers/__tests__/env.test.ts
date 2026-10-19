@@ -31,3 +31,28 @@ describe('workers loadEnv — empty-string == unset', () => {
     expect(() => loadEnv({ ...base, DATABASE_URL: '' })).toThrow(/DATABASE_URL/);
   });
 });
+
+describe('workers loadEnv — X_TRENDS_ENABLED requires X_BEARER_TOKEN', () => {
+  it('X_TRENDS_ENABLED=true with blank X_BEARER_TOKEN hard-fails at parse', () => {
+    expect(() => loadEnv({ ...base, X_TRENDS_ENABLED: 'true' })).toThrow(/X_BEARER_TOKEN/);
+    expect(() => loadEnv({ ...base, X_TRENDS_ENABLED: 'true', X_BEARER_TOKEN: '' })).toThrow(
+      /X_BEARER_TOKEN/,
+    );
+  });
+
+  it('X_TRENDS_ENABLED=true with non-empty X_BEARER_TOKEN parses cleanly', () => {
+    const env = loadEnv({
+      ...base,
+      X_TRENDS_ENABLED: 'true',
+      X_BEARER_TOKEN: 'bearer-abc',
+    });
+    expect(env.X_TRENDS_ENABLED).toBe(true);
+    expect(env.X_BEARER_TOKEN).toBe('bearer-abc');
+  });
+
+  it('X_TRENDS_ENABLED=false with blank X_BEARER_TOKEN is still fine (the default shape)', () => {
+    const env = loadEnv(base);
+    expect(env.X_TRENDS_ENABLED).toBe(false);
+    expect(env.X_BEARER_TOKEN).toBe('');
+  });
+});

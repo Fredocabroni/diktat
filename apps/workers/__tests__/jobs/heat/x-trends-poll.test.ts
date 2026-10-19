@@ -259,6 +259,60 @@ describe('x_trends_poll handler', () => {
     expect(supa.stamped[0]!.payload.outcome).toBe('ok');
   });
 
+  it('countCallsToday DB error: fail CLOSED with outcome=degraded_count, no fetch', async () => {
+    // scheduled_jobs.select returns an error. Build a minimal fake
+    // supabase whose stamp path still works (so we can read the
+    // outcome back) but whose select rejects with an error.
+    const stamped: FakeStamp[] = [];
+    const inserts: FakeInsert[] = [];
+    const fromImpl = (table: string) => {
+      if (table === 'trend_signals') {
+        return {
+          upsert: (rows: ReadonlyArray<Record<string, unknown>>) => {
+            inserts.push({ rows });
+            return Promise.resolve({ error: null });
+          },
+        };
+      }
+      if (table === 'scheduled_jobs') {
+        return {
+          update: (updateArg: Record<string, unknown>) => ({
+            eq: (_col: string, rowId: string) => {
+              const payload =
+                (updateArg.payload as Record<string, unknown> | undefined) ?? updateArg;
+              stamped.push({ rowId, payload });
+              return Promise.resolve({ error: null });
+            },
+          }),
+          select: (_cols: string) => ({
+            eq: (_c1: string, _v1: string) => ({
+              gte: (_c2: string, _v2: string) => ({
+                lte: (_c3: string, _v3: string) =>
+                  Promise.resolve({
+                    data: null,
+                    error: { message: 'simulated DB failure' },
+                  }),
+              }),
+            }),
+          }),
+        };
+      }
+      throw new Error(`fake: unexpected table ${table}`);
+    };
+    const client = { from: fromImpl } as unknown as ServiceClient;
+    const logger = buildLogger();
+    const fetchImpl = vi.fn() as unknown as typeof globalThis.fetch;
+    const handler = buildXTrendsPollHandler({
+      now: () => new Date('2026-10-16T19:00:00Z'),
+      envProvider: () => env({ X_TRENDS_ENABLED: true, X_BEARER_TOKEN: 'x' }),
+    });
+    await handler(buildRow(), { supabase: client, logger, fetch: fetchImpl });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(inserts).toHaveLength(0);
+    expect(stamped).toHaveLength(1);
+    expect(stamped[0]!.payload.outcome).toBe('degraded_count');
+  });
+
   it('daily cap trips when 48 ok calls already recorded', async () => {
     const supa = buildSupabase({ callsToday: 48 });
     const logger = buildLogger();

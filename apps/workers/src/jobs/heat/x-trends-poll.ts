@@ -201,6 +201,7 @@ interface StampPayload {
     | 'disabled'
     | 'no_bearer'
     | 'daily_cap_hit'
+    | 'degraded_count'
     | 'degraded_fetch'
     | 'degraded_parse';
   readonly reason?: string;
@@ -234,8 +235,18 @@ async function stampPayload(
 /** Count observed x_trends_poll `scheduled_jobs` done-rows for today
  *  (UTC). The cap compares against this count — a conservative read:
  *  rows with outcome='ok' that already landed. 'disabled' rows don't
- *  consume calls. */
-async function countCallsToday(deps: Parameters<JobHandler>[1], dayUtc: string): Promise<number> {
+ *  consume calls.
+ *
+ *  Returns `null` on DB error so the caller can fail CLOSED (skip the
+ *  live call for this tick). The X v2 Trends endpoint is pay-per-call
+ *  — an unknown-count tick that proceeds would risk running the daily
+ *  cap over on repeated transient DB failures. The cost of a skipped
+ *  tick is one missed 30-minute bucket; the cost of running over is
+ *  real USD. */
+async function countCallsToday(
+  deps: Parameters<JobHandler>[1],
+  dayUtc: string,
+): Promise<number | null> {
   // Date boundaries at midnight UTC.
   const start = `${dayUtc}T00:00:00Z`;
   const end = `${dayUtc}T23:59:59Z`;
@@ -250,14 +261,11 @@ async function countCallsToday(deps: Parameters<JobHandler>[1], dayUtc: string):
     .gte('created_at', start)
     .lte('created_at', end);
   if (error) {
-    deps.logger.debug({
+    deps.logger.warn({
       event: 'x_trends_poll.count_failed',
       message: scrubMessage(error.message),
     });
-    // Fail OPEN on count errors — the fetch below is still gated by
-    // the per-request 24h-dedup on X's side. Returning 0 risks going
-    // one call over on error; acceptable given the 2x safety margin.
-    return 0;
+    return null;
   }
   let n = 0;
   for (const r of data ?? []) {
@@ -301,6 +309,18 @@ export function buildXTrendsPollHandler(opts?: {
     }
 
     const callsToday = await countCallsToday(deps, day);
+    if (callsToday === null) {
+      // Fail CLOSED on count DB error: skip the paid X call for this
+      // tick rather than risk running the daily cap over on repeated
+      // transient failures. Cost of skip = one missed 30-minute bucket;
+      // cost of a wrong-count overshoot = real USD.
+      await stampPayload(deps, row.id, {
+        emitted_at: emittedAtFromRow(row),
+        outcome: 'degraded_count',
+      });
+      deps.logger.warn({ event: 'x_trends_poll.degraded_count', jobId: row.id });
+      return;
+    }
     if (callsToday >= MAX_CALLS_PER_UTC_DAY) {
       await stampPayload(deps, row.id, {
         emitted_at: emittedAtFromRow(row),
