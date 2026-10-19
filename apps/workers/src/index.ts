@@ -33,6 +33,7 @@ import {
   type TickResult,
 } from './jobs/matchmake.js';
 import { startPrivyProvisionListener, type PrivyWalletProvider } from './jobs/privy-provision.js';
+import { startTelegramDigestLongPoll } from './jobs/heat/telegram-digest-poll.js';
 import type { SendOutcome, WebPushSender } from './jobs/push-deliver.js';
 import { buildDefaultHandlers, runSchedulerTick } from './jobs/scheduler.js';
 import { buildLogger } from './logger.js';
@@ -109,6 +110,15 @@ async function main(): Promise<void> {
     privy,
     logger,
     buildPgClient: () => new PgClient({ connectionString: env.DATABASE_URL }),
+  });
+
+  // Telegram shadow-digest long-poll loop. Fire-and-forget: when
+  // TELEGRAM_DIGEST_ENABLED=false the loop logs a disabled event
+  // and resolves immediately so this call is a cheap no-op in dev.
+  const telegramLongPoll = startTelegramDigestLongPoll({
+    supabase,
+    logger,
+    envProvider: () => env,
   });
 
   // Matchmaking polling loop — single-instance assumption keeps races
@@ -293,7 +303,8 @@ async function main(): Promise<void> {
         )
         .finally(() => process.exit(0));
     }, SHUTDOWN_MAX_MS);
-    void Promise.all([battlePoller.stop(), listener.stop()]).finally(() => {
+    telegramLongPoll.stop();
+    void Promise.all([battlePoller.stop(), listener.stop(), telegramLongPoll.done]).finally(() => {
       clearTimeout(force);
       process.exit(0);
     });

@@ -85,6 +85,16 @@ const envSchema = z
     // other var); they are listed here for completeness + documentation.
     TELEGRAM_BOT_TOKEN: z.string().optional(),
     TELEGRAM_CHAT_ID: z.string().optional(),
+
+    // Nightly shadow-digest delivery to Telegram. Shadow-only; the
+    // operator reviews top-5 heat picks vs the walker's real Drop pick
+    // via inline buttons, callback writes land in drop_shadow_log. The
+    // long-poll loop (getUpdates) ignores every chat except
+    // TELEGRAM_OPERATOR_CHAT_ID. Defaults OFF; the superRefine below
+    // requires TELEGRAM_BOT_TOKEN + TELEGRAM_OPERATOR_CHAT_ID when
+    // enabled so a misconfigured boot fails immediately.
+    TELEGRAM_DIGEST_ENABLED: boolFromString.default(false),
+    TELEGRAM_OPERATOR_CHAT_ID: z.string().default(''),
   })
   .superRefine((env, ctx) => {
     // X_TRENDS_ENABLED=true without X_BEARER_TOKEN is a misconfiguration:
@@ -98,6 +108,27 @@ const envSchema = z
         path: ['X_BEARER_TOKEN'],
         message: 'X_TRENDS_ENABLED=true requires a non-empty X_BEARER_TOKEN',
       });
+    }
+    // TELEGRAM_DIGEST_ENABLED=true demands BOTH credentials: the send
+    // handler fetches https://api.telegram.org/bot<token>/... and the
+    // long-poll loop refuses every message whose chat.id does not match
+    // TELEGRAM_OPERATOR_CHAT_ID. A missing chat id would silently drop
+    // every callback — enforce at boot.
+    if (env.TELEGRAM_DIGEST_ENABLED) {
+      if (!env.TELEGRAM_BOT_TOKEN || env.TELEGRAM_BOT_TOKEN.length === 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['TELEGRAM_BOT_TOKEN'],
+          message: 'TELEGRAM_DIGEST_ENABLED=true requires a non-empty TELEGRAM_BOT_TOKEN',
+        });
+      }
+      if (env.TELEGRAM_OPERATOR_CHAT_ID.length === 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['TELEGRAM_OPERATOR_CHAT_ID'],
+          message: 'TELEGRAM_DIGEST_ENABLED=true requires a non-empty TELEGRAM_OPERATOR_CHAT_ID',
+        });
+      }
     }
   });
 

@@ -56,3 +56,38 @@ describe('workers loadEnv — X_TRENDS_ENABLED requires X_BEARER_TOKEN', () => {
     expect(env.X_BEARER_TOKEN).toBe('');
   });
 });
+
+describe('workers loadEnv — TELEGRAM_DIGEST_ENABLED requires token + operator chat id', () => {
+  it('enabled with no bot token fails parse', () => {
+    expect(() =>
+      loadEnv({ ...base, TELEGRAM_DIGEST_ENABLED: 'true', TELEGRAM_OPERATOR_CHAT_ID: '123' }),
+    ).toThrow(/TELEGRAM_BOT_TOKEN/);
+  });
+
+  it('enabled with no operator chat id fails parse', () => {
+    expect(() =>
+      loadEnv({
+        ...base,
+        TELEGRAM_DIGEST_ENABLED: 'true',
+        TELEGRAM_BOT_TOKEN: 'bot-token',
+      }),
+    ).toThrow(/TELEGRAM_OPERATOR_CHAT_ID/);
+  });
+
+  it('enabled with both set parses cleanly', () => {
+    const env = loadEnv({
+      ...base,
+      TELEGRAM_DIGEST_ENABLED: 'true',
+      TELEGRAM_BOT_TOKEN: 'bot-token',
+      TELEGRAM_OPERATOR_CHAT_ID: '42',
+    });
+    expect(env.TELEGRAM_DIGEST_ENABLED).toBe(true);
+    expect(env.TELEGRAM_OPERATOR_CHAT_ID).toBe('42');
+  });
+
+  it('disabled with everything blank is the default-shape', () => {
+    const env = loadEnv(base);
+    expect(env.TELEGRAM_DIGEST_ENABLED).toBe(false);
+    expect(env.TELEGRAM_OPERATOR_CHAT_ID).toBe('');
+  });
+});
