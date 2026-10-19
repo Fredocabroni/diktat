@@ -32,7 +32,11 @@ begin
 end$$;
 
 -- ---------------------------------------------------------------------------
--- A1. NOT FOUND: no row for drop_date, RPC raises no_data_found (02000).
+-- A1. NOT FOUND: no row for drop_date, RPC raises no_data_found. In
+-- PL/pgSQL `raise exception ... using errcode = 'no_data_found'` maps
+-- to sqlstate P0002 (plpgsql's no_data_found), not SQL-standard 02000
+-- which is 'no_data' — the two are different condition names in
+-- postgres and condition_name_to_sqlstate() picks the plpgsql one.
 -- ---------------------------------------------------------------------------
 select pg_temp.expect_sqlstate(
   $sql$ select public.record_drop_shadow_operator_pick(
@@ -40,7 +44,7 @@ select pg_temp.expect_sqlstate(
           'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'::uuid,
           'notes'
         ) $sql$,
-  '02000',
+  'P0002',
   'operator_pick: NOT FOUND on missing drop_date'
 );
 
