@@ -56,3 +56,73 @@ describe('workers loadEnv — X_TRENDS_ENABLED requires X_BEARER_TOKEN', () => {
     expect(env.X_BEARER_TOKEN).toBe('');
   });
 });
+
+describe('workers loadEnv — TELEGRAM_DIGEST_ENABLED authorisation requirements', () => {
+  it('enabled with no bot token fails parse', () => {
+    expect(() =>
+      loadEnv({ ...base, TELEGRAM_DIGEST_ENABLED: 'true', TELEGRAM_CHAT_ID: '123' }),
+    ).toThrow(/TELEGRAM_BOT_TOKEN/);
+  });
+
+  it('enabled with no chat id fails parse', () => {
+    expect(() =>
+      loadEnv({
+        ...base,
+        TELEGRAM_DIGEST_ENABLED: 'true',
+        TELEGRAM_BOT_TOKEN: 'bot-token',
+      }),
+    ).toThrow(/TELEGRAM_CHAT_ID/);
+  });
+
+  it('enabled with DM chat id (positive numeric) parses cleanly without OPERATOR_USER_ID', () => {
+    const env = loadEnv({
+      ...base,
+      TELEGRAM_DIGEST_ENABLED: 'true',
+      TELEGRAM_BOT_TOKEN: 'bot-token',
+      TELEGRAM_CHAT_ID: '42',
+    });
+    expect(env.TELEGRAM_DIGEST_ENABLED).toBe(true);
+    expect(env.TELEGRAM_CHAT_ID).toBe('42');
+    expect(env.TELEGRAM_OPERATOR_USER_ID).toBe('');
+  });
+
+  it('enabled with group chat id (negative supergroup) without OPERATOR_USER_ID fails parse', () => {
+    expect(() =>
+      loadEnv({
+        ...base,
+        TELEGRAM_DIGEST_ENABLED: 'true',
+        TELEGRAM_BOT_TOKEN: 'bot-token',
+        TELEGRAM_CHAT_ID: '-1001234567890',
+      }),
+    ).toThrow(/TELEGRAM_OPERATOR_USER_ID/);
+  });
+
+  it('enabled with group chat id + OPERATOR_USER_ID parses cleanly', () => {
+    const env = loadEnv({
+      ...base,
+      TELEGRAM_DIGEST_ENABLED: 'true',
+      TELEGRAM_BOT_TOKEN: 'bot-token',
+      TELEGRAM_CHAT_ID: '-1001234567890',
+      TELEGRAM_OPERATOR_USER_ID: '99',
+    });
+    expect(env.TELEGRAM_CHAT_ID).toBe('-1001234567890');
+    expect(env.TELEGRAM_OPERATOR_USER_ID).toBe('99');
+  });
+
+  it('enabled with non-numeric chat id (channel @slug) without OPERATOR_USER_ID fails parse', () => {
+    expect(() =>
+      loadEnv({
+        ...base,
+        TELEGRAM_DIGEST_ENABLED: 'true',
+        TELEGRAM_BOT_TOKEN: 'bot-token',
+        TELEGRAM_CHAT_ID: '@diktat_ops',
+      }),
+    ).toThrow(/TELEGRAM_OPERATOR_USER_ID/);
+  });
+
+  it('disabled with everything blank is the default-shape', () => {
+    const env = loadEnv(base);
+    expect(env.TELEGRAM_DIGEST_ENABLED).toBe(false);
+    expect(env.TELEGRAM_OPERATOR_USER_ID).toBe('');
+  });
+});

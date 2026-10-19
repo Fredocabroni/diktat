@@ -172,6 +172,7 @@ describe('runSchedulerTick', () => {
           'heat_compose',
           'wikimedia_pageviews_validate',
           'drop_shadow_digest',
+          'telegram_digest_send',
         ],
         p_worker_id: 'w1',
       },
