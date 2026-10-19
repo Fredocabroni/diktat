@@ -169,6 +169,7 @@ describe('runSchedulerTick', () => {
           'heat_signal_match',
           'bluesky_trending_poll',
           'x_trends_poll',
+          'heat_compose',
         ],
         p_worker_id: 'w1',
       },
