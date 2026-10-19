@@ -205,6 +205,26 @@ run_case "no verdict in body + non-trivial content → ambiguous (fail-closed)" 
   "${FIX}/real-review-ambiguous-no-verdict.md" 0 0 ambiguous
 
 echo
+echo "=== Group F2: 'Summary ' / 'Final ' verdict prefixes (addresses #255 push 3/3 security-reviewer body) ==="
+# Channel A — inline "Summary verdict: PASS".
+run_case "channel A: 'Summary verdict: PASS' inline → ok" \
+  "${FIX}/real-review-summary-verdict-pass-inline.md" 0 0 ok
+# Channel A — inline "Summary verdict: BLOCK".
+run_case "channel A: 'Summary verdict: BLOCK' inline → ok_block" \
+  "${FIX}/real-review-summary-verdict-block-inline.md" 0 0 ok_block
+# Channel C — "## Summary verdict\n\n**PASS**\n[prose]" shape (the
+# literal #255 push 3/3 body shape; without the Summary prefix the
+# gate fell through to ambiguous and failed the check).
+run_case "channel C: '## Summary verdict\\n\\n**PASS**\\n[prose]' → ok" \
+  "${FIX}/real-review-summary-verdict-pass-multiline.md" 0 0 ok
+# Channel C — same shape with BLOCK value.
+run_case "channel C: '## Summary verdict\\n\\n**BLOCK**\\n[prose]' → ok_block" \
+  "${FIX}/real-review-summary-verdict-block-multiline.md" 0 0 ok_block
+# Channel A — 'Final verdict: PASS' alternate prefix shape.
+run_case "channel A: 'Final verdict: PASS' inline → ok" \
+  "${FIX}/real-review-final-verdict-pass-inline.md" 0 0 ok
+
+echo
 echo "=== Group G: NEEDS-USER-DECISION fails closed like BLOCK (exit 0, stdout 'ok_block') ==="
 # A verdict that needs a human decision must not merge on a green
 # check. Until 2026-10-14 the gate grouped NEEDS-USER-DECISION with
