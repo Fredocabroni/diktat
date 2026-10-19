@@ -28,6 +28,7 @@ import { factCheckOrchestratorHandler } from './fact-check-orchestrator.js';
 import { gdeltEventRetentionHandler } from './gdelt-event-retention.js';
 import { blueskyTrendingPollHandler } from './heat/bluesky-poll.js';
 import { heatComposeHandler } from './heat/compose.js';
+import { dropShadowDigestHandler } from './heat/digest.js';
 import { googleTrendsPollHandler } from './heat/google-trends-poll.js';
 import { heatSignalMatchHandler } from './heat/match.js';
 import { wikimediaValidateHandler } from './heat/wikimedia-validate.js';
@@ -411,6 +412,7 @@ export const defaultHandlers: Readonly<Record<string, JobHandler>> = Object.free
   x_trends_poll: xTrendsPollHandler,
   heat_compose: heatComposeHandler,
   wikimedia_pageviews_validate: wikimediaValidateHandler,
+  drop_shadow_digest: dropShadowDigestHandler,
 });
 
 /** Build the runtime registry. The push_deliver handler is a factory because

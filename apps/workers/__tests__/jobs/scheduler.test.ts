@@ -171,6 +171,7 @@ describe('runSchedulerTick', () => {
           'x_trends_poll',
           'heat_compose',
           'wikimedia_pageviews_validate',
+          'drop_shadow_digest',
         ],
         p_worker_id: 'w1',
       },
