@@ -53,6 +53,11 @@ const envSchema = z.object({
   // candidates — is observable end to end).
   GDELT_ENABLED: boolFromString.default(false),
 
+  // Wikimedia pageviews validation collector. Public endpoint, no
+  // auth; validation input only (never a primary heat source).
+  // Defaults OFF.
+  WIKIMEDIA_ENABLED: boolFromString.default(false),
+
   // Master heat-score gate. Defaults OFF. When off, every heat
   // collector/composer stamps outcome='disabled' and returns; the
   // walker's Drop-selection logic never reads heat_score.
