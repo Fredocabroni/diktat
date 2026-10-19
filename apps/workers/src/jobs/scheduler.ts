@@ -29,6 +29,7 @@ import { gdeltEventRetentionHandler } from './gdelt-event-retention.js';
 import { blueskyTrendingPollHandler } from './heat/bluesky-poll.js';
 import { googleTrendsPollHandler } from './heat/google-trends-poll.js';
 import { heatSignalMatchHandler } from './heat/match.js';
+import { xTrendsPollHandler } from './heat/x-trends-poll.js';
 import { localBoundarySweepHandler } from './local-boundary-sweep.js';
 import { newsDedupRankHandler } from './news-dedup-rank.js';
 import { buildNewsIngestHandler } from './news-ingest.js';
@@ -405,6 +406,7 @@ export const defaultHandlers: Readonly<Record<string, JobHandler>> = Object.free
   google_trends_poll: googleTrendsPollHandler,
   heat_signal_match: heatSignalMatchHandler,
   bluesky_trending_poll: blueskyTrendingPollHandler,
+  x_trends_poll: xTrendsPollHandler,
 });
 
 /** Build the runtime registry. The push_deliver handler is a factory because

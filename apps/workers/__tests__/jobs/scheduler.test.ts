@@ -168,6 +168,7 @@ describe('runSchedulerTick', () => {
           'google_trends_poll',
           'heat_signal_match',
           'bluesky_trending_poll',
+          'x_trends_poll',
         ],
         p_worker_id: 'w1',
       },
