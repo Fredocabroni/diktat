@@ -77,10 +77,12 @@
 # which let a "needs a human decision" verdict merge on a green check):
 #
 #   (A) Explicit single-line verdict:
-#         `[**##_]*(Overall )?Verdict[: ]*[**_]*(BLOCK|PASS|APPROVE|NEEDS-USER-DECISION)`
-#       The verdict word and value are on the SAME line. This is the
-#       addiction-auditor convention ("Overall verdict: BLOCK") and the
-#       occasional security-reviewer shape ("**Verdict: BLOCK on H1.**").
+#         `[**##_]*(Overall |Summary |Final )?Verdict[: ]*[**_]*(BLOCK|PASS|APPROVE|NEEDS-USER-DECISION)`
+#       The verdict word and value are on the SAME line. Covers the
+#       addiction-auditor convention ("Overall verdict: BLOCK"), the
+#       security-reviewer "**Verdict: BLOCK on H1.**" shape, and the
+#       "**Summary verdict** PASS" / "Final verdict: BLOCK" shapes some
+#       reviewer bodies produce (observed on #255 push 3/3).
 #
 #   (B) Trailing-line verdict:
 #         The LAST non-blank line of the review is bare BLOCK / PASS /
@@ -92,11 +94,11 @@
 #   (C) Multi-line verdict (added in fix/reviewer-gate-multiline-block
 #       after #198 slipped a BLOCK verdict past the gate):
 #         A line that is JUST the word "Verdict" (optionally header-
-#         decorated, optionally "Overall "-prefixed), followed within 5
-#         non-blank lines by a VALUE line beginning with BLOCK / PASS /
-#         APPROVE / NEEDS-USER-DECISION. The copy-linter and security-
-#         reviewer agents sometimes emit this shape under some LLM
-#         temperatures:
+#         decorated, optionally "Overall "/"Summary "/"Final "-
+#         prefixed), followed within 5 non-blank lines by a VALUE line
+#         beginning with BLOCK / PASS / APPROVE / NEEDS-USER-DECISION.
+#         The copy-linter and security-reviewer agents sometimes emit
+#         this shape under some LLM temperatures:
 #
 #           ## OVERALL VERDICT
 #
@@ -265,19 +267,23 @@ trailing_line=$(awk 'NF {last=$0} END {print last}' "$file" | tr -d '[:space:]')
 full_nonblank=$(awk 'NF' "$file")
 
 # --- Channel (A): explicit single-line verdict -------------------------
-# Match `(**|##|_)*(Overall )?Verdict[: ]*(**|_)*VALUE`. Case-insensitive.
+# Match `(**|##|_)*(Overall |Summary |Final )?Verdict[: ]*(**|_)*VALUE`.
+# Case-insensitive. The three prefixes are the reviewer-agent dialects
+# in use today: `Overall ` (addiction-auditor), `Summary ` (observed on
+# security-reviewer bodies — #255 push 3/3), `Final ` (occasional
+# copy-linter shape). Omitted-prefix is the plain `Verdict: BLOCK` form.
 # BLOCK family: BLOCK, plus NEEDS-USER-DECISION. A verdict that needs a
 # human decision must not merge on a green check, so it fails closed
 # exactly like BLOCK (operator decision 2026-10-14; matches the
 # addiction-auditor's own mapping "NEEDS-USER-DECISION → Verdict: BLOCK").
-if printf '%s\n' "$tail_body" | grep -iqE '^[[:space:]]*(\*\*|##? ?|_)*(overall[[:space:]]+)?verdict[[:space:]]*:?[[:space:]]*(\*\*|_)*[[:space:]]*(BLOCK|NEEDS-USER-DECISION)\b'; then
+if printf '%s\n' "$tail_body" | grep -iqE '^[[:space:]]*(\*\*|##? ?|_)*((overall|summary|final)[[:space:]]+)?verdict[[:space:]]*:?[[:space:]]*(\*\*|_)*[[:space:]]*(BLOCK|NEEDS-USER-DECISION)\b'; then
   explicit_block="yes"
 else
   explicit_block=""
 fi
 # PASS family — PASS and APPROVE only. `APPROVE WITH NOTES` matches
 # `APPROVE\b` because `\b` is satisfied by the space after APPROVE.
-if printf '%s\n' "$tail_body" | grep -iqE '^[[:space:]]*(\*\*|##? ?|_)*(overall[[:space:]]+)?verdict[[:space:]]*:?[[:space:]]*(\*\*|_)*[[:space:]]*(PASS|APPROVE)\b'; then
+if printf '%s\n' "$tail_body" | grep -iqE '^[[:space:]]*(\*\*|##? ?|_)*((overall|summary|final)[[:space:]]+)?verdict[[:space:]]*:?[[:space:]]*(\*\*|_)*[[:space:]]*(PASS|APPROVE)\b'; then
   explicit_pass="yes"
 else
   explicit_pass=""
@@ -340,7 +346,7 @@ full_nonblank_lower=$(printf '%s' "$full_nonblank" | tr '[:upper:]' '[:lower:]')
 # bodies that number their sections.
 multiline_block=$(printf '%s\n' "$full_nonblank_lower" | awk -v lookahead="$MULTILINE_LOOKAHEAD" '
   BEGIN { waiting = 0 }
-  /^[[:space:]]*(#{1,6}[[:space:]]+)?([0-9]+\.[[:space:]]+)?(\*\*|_)*(overall[[:space:]]+)?verdict(\*\*|_)*[[:space:]]*$/ {
+  /^[[:space:]]*(#{1,6}[[:space:]]+)?([0-9]+\.[[:space:]]+)?(\*\*|_)*((overall|summary|final)[[:space:]]+)?verdict(\*\*|_)*[[:space:]]*$/ {
     waiting = lookahead
     next
   }
@@ -354,7 +360,7 @@ multiline_block=$(printf '%s\n' "$full_nonblank_lower" | awk -v lookahead="$MULT
 ')
 multiline_pass=$(printf '%s\n' "$full_nonblank_lower" | awk -v lookahead="$MULTILINE_LOOKAHEAD" '
   BEGIN { waiting = 0 }
-  /^[[:space:]]*(#{1,6}[[:space:]]+)?([0-9]+\.[[:space:]]+)?(\*\*|_)*(overall[[:space:]]+)?verdict(\*\*|_)*[[:space:]]*$/ {
+  /^[[:space:]]*(#{1,6}[[:space:]]+)?([0-9]+\.[[:space:]]+)?(\*\*|_)*((overall|summary|final)[[:space:]]+)?verdict(\*\*|_)*[[:space:]]*$/ {
     waiting = lookahead
     next
   }
