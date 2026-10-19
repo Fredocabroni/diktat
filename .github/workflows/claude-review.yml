@@ -419,9 +419,21 @@ jobs:
         # `claude -p`'s own argument parser.
         run: |
           set +e
+          # security-reviewer caps at 25 turns (operator decision after
+          # the credit-exhaustion incident on 2026-10-19 — the reviewer
+          # was burning tokens on exploratory tool-use loops without
+          # improving the verdict quality). Other matrix reviewers
+          # (copy-linter, addiction-auditor, neutrality-auditor) keep
+          # the 50 ceiling because their checks are categorically
+          # smaller-surface and have never hit it.
+          if [ "${{ matrix.reviewer.name }}" = "security-reviewer" ]; then
+            MAX_TURNS=25
+          else
+            MAX_TURNS=50
+          fi
           claude -p "$REVIEW_PROMPT" \
             --model "$REVIEW_MODEL" \
-            --max-turns 50 \
+            --max-turns "$MAX_TURNS" \
             --output-format text > review_output.md
           echo "$?" > review_exit_code
           set -e
