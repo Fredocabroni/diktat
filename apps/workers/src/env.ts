@@ -53,6 +53,11 @@ const envSchema = z.object({
   // candidates — is observable end to end).
   GDELT_ENABLED: boolFromString.default(false),
 
+  // Master heat-score gate. Defaults OFF. When off, every heat
+  // collector/composer stamps outcome='disabled' and returns; the
+  // walker's Drop-selection logic never reads heat_score.
+  HEAT_ENABLED: boolFromString.default(false),
+
   // X v2 Trends-by-WOEID collector. Pay-per-use ($0.010/request).
   // Defaults OFF; handler fails closed with outcome='no_bearer' if
   // the flag is on but X_BEARER_TOKEN is empty. No live call tonight
