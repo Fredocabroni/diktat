@@ -30,6 +30,7 @@ import { blueskyTrendingPollHandler } from './heat/bluesky-poll.js';
 import { heatComposeHandler } from './heat/compose.js';
 import { googleTrendsPollHandler } from './heat/google-trends-poll.js';
 import { heatSignalMatchHandler } from './heat/match.js';
+import { wikimediaValidateHandler } from './heat/wikimedia-validate.js';
 import { xTrendsPollHandler } from './heat/x-trends-poll.js';
 import { localBoundarySweepHandler } from './local-boundary-sweep.js';
 import { newsDedupRankHandler } from './news-dedup-rank.js';
@@ -409,6 +410,7 @@ export const defaultHandlers: Readonly<Record<string, JobHandler>> = Object.free
   bluesky_trending_poll: blueskyTrendingPollHandler,
   x_trends_poll: xTrendsPollHandler,
   heat_compose: heatComposeHandler,
+  wikimedia_pageviews_validate: wikimediaValidateHandler,
 });
 
 /** Build the runtime registry. The push_deliver handler is a factory because

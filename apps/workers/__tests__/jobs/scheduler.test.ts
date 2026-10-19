@@ -170,6 +170,7 @@ describe('runSchedulerTick', () => {
           'bluesky_trending_poll',
           'x_trends_poll',
           'heat_compose',
+          'wikimedia_pageviews_validate',
         ],
         p_worker_id: 'w1',
       },
