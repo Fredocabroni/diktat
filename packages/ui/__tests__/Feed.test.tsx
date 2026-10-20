@@ -109,33 +109,68 @@ describe('BattleThisCta', () => {
 describe('SessionNudgeSheet', () => {
   it('renders nothing when open is false', () => {
     const { container } = render(
-      <SessionNudgeSheet
-        open={false}
-        minutesElapsed={30}
-        onContinue={() => {}}
-        onLater={() => {}}
-      />,
+      <SessionNudgeSheet open={false} onContinue={() => {}} onLater={() => {}} />,
     );
     expect(container.firstChild).toBeNull();
   });
 
-  it('uses the §12 wording when open', () => {
-    render(<SessionNudgeSheet open minutesElapsed={30} onContinue={() => {}} onLater={() => {}} />);
-    expect(screen.getByRole('dialog')).toHaveAttribute('aria-modal', 'true');
-    expect(screen.getByText(/30 minutes\. Want to take a break\?/)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Just 5 more minutes/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /come back later/ })).toBeInTheDocument();
+  it('shows the §12 operator-contract copy when open', () => {
+    // Exact wording from the P4 pre-launch batch spec:
+    //   "You've been here 30 minutes. Take a break?"
+    //   Buttons: "Keep going" / "Close for now"
+    // Any drift here fails copy-linter + addiction-auditor regression.
+    render(<SessionNudgeSheet open onContinue={() => {}} onLater={() => {}} />);
+    expect(
+      screen.getByText(/You.{1,2}ve been here 30 minutes\. Take a break\?/),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Keep going$/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Close for now$/ })).toBeInTheDocument();
+  });
+
+  it('is NON-blocking (no aria-modal, no full-screen backdrop)', () => {
+    // Per operator contract: "never blocks content". The dialog has
+    // dialog role for a11y, but NOT aria-modal, and the backdrop is
+    // omitted entirely (positioned above the bottom tab bar, the rest
+    // of the page stays interactive).
+    render(<SessionNudgeSheet open onContinue={() => {}} onLater={() => {}} />);
+    const dialog = screen.getByRole('dialog');
+    expect(dialog).not.toHaveAttribute('aria-modal');
+    // The outer container has `pointer-events: none` so taps outside
+    // the inner card pass through to the content behind it.
+    expect(dialog.getAttribute('style') ?? '').toContain('pointer-events: none');
+  });
+
+  it('carries no urgency, scarcity, or come-back-tomorrow phrasing', () => {
+    // Copy-linter guardrail pin. The subtitle was deliberately removed
+    // (previous version carried "We'd rather you come back tomorrow
+    // than burn out tonight.") — any regression that re-adds urgency
+    // or scare framing fails this.
+    const { container } = render(
+      <SessionNudgeSheet open onContinue={() => {}} onLater={() => {}} />,
+    );
+    const text = container.textContent ?? '';
+    const forbidden = [
+      'come back tomorrow',
+      'burn out',
+      'miss out',
+      "don't miss",
+      'last chance',
+      'running out',
+      'almost gone',
+      'limited',
+    ];
+    for (const bad of forbidden) {
+      expect(text.toLowerCase()).not.toContain(bad.toLowerCase());
+    }
   });
 
   it('emits the right callbacks on each button', () => {
     const onContinue = vi.fn();
     const onLater = vi.fn();
-    render(
-      <SessionNudgeSheet open minutesElapsed={32} onContinue={onContinue} onLater={onLater} />,
-    );
-    screen.getByRole('button', { name: /come back later/ }).click();
-    screen.getByRole('button', { name: /Just 5 more minutes/ }).click();
-    expect(onLater).toHaveBeenCalledTimes(1);
+    render(<SessionNudgeSheet open onContinue={onContinue} onLater={onLater} />);
+    screen.getByRole('button', { name: /^Keep going$/ }).click();
+    screen.getByRole('button', { name: /^Close for now$/ }).click();
     expect(onContinue).toHaveBeenCalledTimes(1);
+    expect(onLater).toHaveBeenCalledTimes(1);
   });
 });

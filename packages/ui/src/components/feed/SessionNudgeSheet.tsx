@@ -2,23 +2,34 @@ import * as React from 'react';
 
 export interface SessionNudgeSheetProps {
   readonly open: boolean;
-  readonly minutesElapsed: number;
   readonly onContinue: () => void;
   readonly onLater: () => void;
   readonly className?: string;
 }
 
 /**
- * The 30-minute session-length nudge sheet, per
- * `docs/ADDICTION_ARCHITECTURE.md` §12. The wording is the trust-up
- * framing — phrased as a check, not a wall. Two buttons: stay (5 more
- * minutes), or come back later (close the app).
+ * 30-minute session-length nudge per `docs/ADDICTION_ARCHITECTURE.md`
+ * §12. Trust-up framing: a quiet check-in, never a wall.
  *
- * Visual primitive. The wrapper that tracks elapsed minutes via
- * `localStorage` and decides when to mount this lives in apps/web.
+ * Design contract (P4 pre-launch batch):
+ *   - **Never blocks content.** No full-screen backdrop, no
+ *     `aria-modal`. The sheet is positioned above the bottom tab bar
+ *     and the rest of the page remains interactive. A user who wants
+ *     to keep reading past the nudge simply ignores it.
+ *   - **One gentle, dismissible banner.** `role="dialog"` without
+ *     modal semantics; an explicit "Keep going" button closes it
+ *     with no state change, "Close for now" closes it AND signals
+ *     the operator-recommended off-ramp.
+ *   - **At most once per session.** The wrapper in apps/web uses
+ *     sessionStorage so the banner fires exactly once per tab
+ *     lifetime. No snooze loop — if the user picks "Keep going"
+ *     the banner stays closed for the rest of the session.
+ *   - **No urgency, no scarcity, no "come back tomorrow".** The
+ *     body is a check-in, not a scare. The subtitle is intentionally
+ *     omitted: the question + two buttons is the whole thing.
  */
 export function SessionNudgeSheet(props: SessionNudgeSheetProps): React.ReactElement | null {
-  const { open, minutesElapsed, onContinue, onLater, className } = props;
+  const { open, onContinue, onLater, className } = props;
 
   const labelId = React.useId();
 
@@ -27,96 +38,87 @@ export function SessionNudgeSheet(props: SessionNudgeSheetProps): React.ReactEle
   return (
     <div
       role="dialog"
-      aria-modal="true"
       aria-labelledby={labelId}
       data-component="SessionNudgeSheet"
       className={className}
       style={{
         position: 'fixed',
-        inset: 0,
+        left: 0,
+        right: 0,
+        bottom: 'calc(env(safe-area-inset-bottom) + 72px)',
         display: 'flex',
-        alignItems: 'flex-end',
         justifyContent: 'center',
-        background: 'rgba(8,8,12,0.6)',
-        zIndex: 60,
-        padding: 'env(safe-area-inset-top) 16px env(safe-area-inset-bottom)',
+        pointerEvents: 'none',
+        zIndex: 40,
+        padding: '0 16px',
       }}
     >
       <div
         style={{
+          pointerEvents: 'auto',
           width: '100%',
           maxWidth: 480,
           background: 'var(--color-surface-card, #1c1c1f)',
           color: 'var(--color-text-primary, #f2f2f7)',
-          borderRadius: 24,
-          padding: 24,
+          borderRadius: 20,
+          padding: 20,
           display: 'flex',
           flexDirection: 'column',
-          gap: 16,
-          boxShadow: '0 -12px 40px rgba(0,0,0,0.5)',
+          gap: 14,
+          border: '1px solid var(--color-ink-300, rgba(255,255,255,0.14))',
+          boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
         }}
       >
         <h2
           id={labelId}
           style={{
             fontFamily: 'var(--font-display, var(--font-sans, system-ui))',
-            fontWeight: 700,
-            fontSize: 20,
+            fontWeight: 600,
+            fontSize: 17,
             margin: 0,
             lineHeight: 1.3,
           }}
         >
-          You&rsquo;ve been here {Math.round(minutesElapsed)} minutes. Want to take a break?
+          You&rsquo;ve been here 30 minutes. Take a break?
         </h2>
-        <p
-          style={{
-            fontFamily: 'var(--font-sans, system-ui)',
-            fontSize: 14,
-            lineHeight: 1.5,
-            margin: 0,
-            color: 'var(--color-text-secondary, #c7c7cc)',
-          }}
-        >
-          We&rsquo;d rather you come back tomorrow than burn out tonight.
-        </p>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-          <button
-            type="button"
-            onClick={onLater}
-            data-action="later"
-            style={{
-              appearance: 'none',
-              border: '1px solid var(--color-ink-300, rgba(255,255,255,0.18))',
-              borderRadius: 16,
-              padding: '14px 12px',
-              background: 'transparent',
-              color: 'var(--color-text-primary, #f2f2f7)',
-              fontFamily: 'var(--font-sans, system-ui)',
-              fontWeight: 600,
-              fontSize: 15,
-              cursor: 'pointer',
-            }}
-          >
-            I&rsquo;ll come back later
-          </button>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
           <button
             type="button"
             onClick={onContinue}
             data-action="continue"
             style={{
               appearance: 'none',
-              border: 'none',
-              borderRadius: 16,
-              padding: '14px 12px',
-              background: 'var(--color-accent-primary, #ff5ea5)',
-              color: '#0b0612',
+              border: '1px solid var(--color-ink-300, rgba(255,255,255,0.18))',
+              borderRadius: 14,
+              padding: '12px 10px',
+              background: 'transparent',
+              color: 'var(--color-text-primary, #f2f2f7)',
               fontFamily: 'var(--font-sans, system-ui)',
-              fontWeight: 700,
-              fontSize: 15,
+              fontWeight: 600,
+              fontSize: 14,
               cursor: 'pointer',
             }}
           >
-            Just 5 more minutes
+            Keep going
+          </button>
+          <button
+            type="button"
+            onClick={onLater}
+            data-action="later"
+            style={{
+              appearance: 'none',
+              border: 'none',
+              borderRadius: 14,
+              padding: '12px 10px',
+              background: 'var(--color-accent-primary, #ff5ea5)',
+              color: '#0b0612',
+              fontFamily: 'var(--font-sans, system-ui)',
+              fontWeight: 600,
+              fontSize: 14,
+              cursor: 'pointer',
+            }}
+          >
+            Close for now
           </button>
         </div>
       </div>

@@ -1,82 +1,100 @@
-// Mounts the §12 "you've been here 30 min, take a break?" sheet on the
-// (app) shell. Tracks the session start time in localStorage so a
-// hard-refresh inside the same continuous session preserves the
-// elapsed counter, and a fresh tab after a 5-minute idle resets it.
+// Mounts the §12 "you've been here 30 minutes, take a break?" nudge
+// on the (app) shell.
 //
-// Per ADDICTION_ARCHITECTURE.md §12: this is the trust-up framing.
-// The buttons are "I'll come back later" (closes the sheet AND resets
-// the timer so we don't immediately re-trigger) and "Just 5 more
-// minutes" (closes the sheet, sets a 5-minute extension before the
-// next prompt).
+// Contract (P4 pre-launch batch, matches docs/ADDICTION_ARCHITECTURE
+// §11.5 + §12):
+//   - After 30 minutes of continuous active use, show ONE gentle,
+//     dismissible banner above the bottom tab bar. The rest of the
+//     page stays interactive — the banner never blocks content.
+//   - At most ONCE per tab session. `sessionStorage` scopes the
+//     "already shown" flag to the current tab lifetime so a tab close
+//     (or a hard refresh after one) resets the budget. There is no
+//     snooze loop — picking "Keep going" closes the banner for the
+//     rest of the session.
+//   - "Close for now" ALSO closes for the rest of the session; the
+//     label difference is intent, not timer-state. Both buttons stamp
+//     the shown-flag.
+//   - No urgency, no scarcity, no "come back tomorrow" copy. The
+//     visual primitive owns the strings; this wrapper only decides
+//     when it mounts.
 
 'use client';
 
 import { SessionNudgeSheet } from '@diktat/ui';
 import { useEffect, useState } from 'react';
 
-const STORAGE_KEY = 'diktat:session-nudge:start-ts';
+const START_KEY = 'diktat:session-nudge:start-ts';
+const SHOWN_KEY = 'diktat:session-nudge:shown';
 const NUDGE_THRESHOLD_MIN = 30;
-const SNOOZE_EXTENSION_MIN = 5;
+/** Reset the session window if the tab was hidden for this long or
+ *  longer. A user who left the tab open overnight and comes back the
+ *  next day should get a fresh 30-minute window, not an instant nudge. */
 const IDLE_RESET_MS = 5 * 60 * 1000;
 const POLL_INTERVAL_MS = 30 * 1000;
 
-interface SessionState {
-  startTs: number;
-  /** Effective offset added to the nudge threshold by snoozes. */
-  snoozeMinutes: number;
-}
-
-function readState(): SessionState | null {
+function readStartTs(): number | null {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = sessionStorage.getItem(START_KEY);
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as Partial<SessionState>;
-    if (typeof parsed.startTs !== 'number') return null;
-    return {
-      startTs: parsed.startTs,
-      snoozeMinutes: typeof parsed.snoozeMinutes === 'number' ? parsed.snoozeMinutes : 0,
-    };
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
   } catch {
     return null;
   }
 }
 
-function writeState(state: SessionState | null): void {
+function writeStartTs(ts: number): void {
   try {
-    if (state === null) {
-      localStorage.removeItem(STORAGE_KEY);
-    } else {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-    }
+    sessionStorage.setItem(START_KEY, String(ts));
   } catch {
-    // Private browsing — degrade silently. The nudge will run from the
+    // Private browsing — degrade silently. The nudge runs from the
     // current mount instead of persisting across reloads.
+  }
+}
+
+function readShown(): boolean {
+  try {
+    return sessionStorage.getItem(SHOWN_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function writeShown(): void {
+  try {
+    sessionStorage.setItem(SHOWN_KEY, '1');
+  } catch {
+    // Private browsing — fallthrough; the in-memory `shown` state keeps
+    // the once-per-mount guarantee for this tab.
   }
 }
 
 export function SessionLengthNudge(): React.JSX.Element | null {
   const [open, setOpen] = useState(false);
-  const [minutesElapsed, setMinutesElapsed] = useState(0);
+  const [shown, setShown] = useState(false);
 
   useEffect(() => {
-    // Initialize or resume the session timer. If the last seen
-    // timestamp is older than IDLE_RESET_MS in the past, treat it as a
-    // new session.
+    // Initialise or resume the session timer and shown-flag.
     const now = Date.now();
-    const existing = readState();
-    let state: SessionState;
-    if (existing === null || now - existing.startTs > 24 * 60 * 60 * 1000) {
-      state = { startTs: now, snoozeMinutes: 0 };
-      writeState(state);
-    } else {
-      state = existing;
+    let startTs = readStartTs();
+    if (startTs === null) {
+      startTs = now;
+      writeStartTs(startTs);
+    }
+    if (readShown()) {
+      setShown(true);
     }
 
     function tick(): void {
-      const elapsedMin = (Date.now() - state.startTs) / 60_000;
-      setMinutesElapsed(elapsedMin);
-      if (!open && elapsedMin >= NUDGE_THRESHOLD_MIN + state.snoozeMinutes) {
+      if (readShown()) {
+        setShown(true);
+        return;
+      }
+      const elapsedMin = (Date.now() - startTs!) / 60_000;
+      if (elapsedMin >= NUDGE_THRESHOLD_MIN) {
         setOpen(true);
+        writeShown();
+        setShown(true);
       }
     }
 
@@ -85,18 +103,12 @@ export function SessionLengthNudge(): React.JSX.Element | null {
 
     function onVisibility(): void {
       if (document.visibilityState !== 'visible') return;
-      const stored = readState();
-      if (stored === null) return;
-      // If the tab was hidden long enough that the session is stale,
-      // reset to a fresh session window.
-      const lastTouch = Date.now();
-      if (
-        lastTouch - stored.startTs > IDLE_RESET_MS &&
-        elapsedSince(stored) > NUDGE_THRESHOLD_MIN
-      ) {
-        state = { startTs: lastTouch, snoozeMinutes: 0 };
-        writeState(state);
-        setOpen(false);
+      // A long tab-hidden interval resets the session window — a user
+      // returning after >5 minutes of inactivity gets a fresh counter.
+      const resumedAt = Date.now();
+      if (startTs !== null && resumedAt - startTs > IDLE_RESET_MS) {
+        startTs = resumedAt;
+        writeStartTs(startTs);
       }
       tick();
     }
@@ -105,37 +117,28 @@ export function SessionLengthNudge(): React.JSX.Element | null {
       window.clearInterval(interval);
       document.removeEventListener('visibilitychange', onVisibility);
     };
-  }, [open]);
+  }, []);
 
   function handleContinue(): void {
+    // "Keep going" — close the sheet, stamp shown, no re-fire this
+    // session. No snooze loop.
     setOpen(false);
-    const existing = readState();
-    if (existing) {
-      writeState({
-        ...existing,
-        snoozeMinutes: existing.snoozeMinutes + SNOOZE_EXTENSION_MIN,
-      });
-    }
+    writeShown();
+    setShown(true);
   }
 
   function handleLater(): void {
+    // "Close for now" — close the sheet, stamp shown, no re-fire this
+    // session. The label difference from "Keep going" is intent, not
+    // timer-state.
     setOpen(false);
-    // Reset the session window so the nudge doesn't re-fire on the
-    // user's next keystroke. They've expressed an intent to leave.
-    writeState({ startTs: Date.now(), snoozeMinutes: 0 });
-    setMinutesElapsed(0);
+    writeShown();
+    setShown(true);
   }
 
-  return (
-    <SessionNudgeSheet
-      open={open}
-      minutesElapsed={minutesElapsed}
-      onContinue={handleContinue}
-      onLater={handleLater}
-    />
-  );
-}
+  // Once-per-session guarantee: after the shown flag flips, the
+  // component renders null for the rest of the tab's lifetime.
+  if (shown && !open) return null;
 
-function elapsedSince(state: SessionState): number {
-  return (Date.now() - state.startTs) / 60_000;
+  return <SessionNudgeSheet open={open} onContinue={handleContinue} onLater={handleLater} />;
 }
