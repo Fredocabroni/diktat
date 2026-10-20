@@ -1078,6 +1078,55 @@ export type Database = {
         }
         Relationships: []
       }
+      take5_sessions: {
+        Row: {
+          created_at: string
+          et_day: string
+          id: string
+          shift_id: string
+          topic_id: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          et_day: string
+          id?: string
+          shift_id: string
+          topic_id: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          et_day?: string
+          id?: string
+          shift_id?: string
+          topic_id?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "take5_sessions_shift_id_fkey"
+            columns: ["shift_id"]
+            isOneToOne: false
+            referencedRelation: "opinion_shifts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "take5_sessions_topic_id_fkey"
+            columns: ["topic_id"]
+            isOneToOne: false
+            referencedRelation: "news_topics"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "take5_sessions_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "users"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       trend_signals: {
         Row: {
           candidate_id: string | null
@@ -1680,6 +1729,19 @@ export type Database = {
           isOneToOne: true
           isSetofReturn: false
         }
+      }
+      record_take5_shift: {
+        Args: {
+          p_after_position: number
+          p_client_key?: string
+          p_topic_id: string
+        }
+        Returns: {
+          shift_id: string
+          topic_id: string
+          et_day: string
+          cards_today: number
+        }[]
       }
       set_user_timezone: { Args: { p_tz: string }; Returns: string }
       stamp_cluster_drop_published: {
