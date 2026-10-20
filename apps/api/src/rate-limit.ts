@@ -449,6 +449,12 @@ const QUERY_FAN_OUT: Record<string, number> = {
   'wallet.balance': 2, // wallets + users in parallel
   'wallet.transactions': 1, // single keyset seek (index-only)
   'wallet.ghostEarnings': 1, // single SECURITY INVOKER aggregate RPC
+  // 2 sequential queries: news_topics archive scan (bounded to 25 rows)
+  // + opinion_shifts stance join (bounded to the ≤25 topicIds). Encoded
+  // as the real procedure count so a Redis-down fail-open window
+  // surfaces honest pool pressure rather than the default `1`.
+  // (security-reviewer PR #272 INFO.)
+  'take5.getStack': 2,
 };
 
 function classifyPoolRisk(fanOut: number): 'low' | 'medium' | 'high' {

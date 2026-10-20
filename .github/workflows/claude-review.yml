@@ -367,9 +367,25 @@ jobs:
         env:
           REVIEWER_NAME: ${{ matrix.reviewer.name }}
         run: |
-          echo "::error::${REVIEWER_NAME}: this PR must carry the 'ready-for-review' label to run the AI reviewer. Add it when free checks (lint/typecheck/test) + local reviewers are green."
+          # Sanitise REVIEWER_NAME before embedding in a `::error::`
+          # workflow-command annotation or in $GITHUB_STEP_SUMMARY
+          # (follow-up from PR #271 CI security-reviewer LOW-1 / LOW-2).
+          # matrix.reviewer.name is checked-in YAML today, but keeping
+          # every `::error::` interpolation sanitised closes the class
+          # of "future edit sources the name from a PR-controlled
+          # field" regressions at the pattern level:
+          #   - `tr -d '\r\n'` strips line terminators so a crafted
+          #     name cannot synthesise additional workflow commands.
+          #   - `head -c 80` caps length so a runaway name cannot
+          #     flood the step-summary panel.
+          # $GITHUB_STEP_SUMMARY is a markdown file (not a workflow-
+          # command sink), so there is no code-execution path through
+          # it — just unexpected markdown rendering if the name
+          # contained control characters.
+          safe_name=$(printf '%s' "${REVIEWER_NAME}" | tr -d '\r\n' | head -c 80)
+          echo "::error::${safe_name}: this PR must carry the 'ready-for-review' label to run the AI reviewer. Add it when free checks (lint/typecheck/test) + local reviewers are green."
           {
-            echo "### ${REVIEWER_NAME}: label gate"
+            echo "### ${safe_name}: label gate"
             echo ""
             echo "PR does not carry the \`ready-for-review\` label. Add the label to run this reviewer; the merge-gate check will stay RED until the label is present AND the reviewer returns PASS."
           } >> "$GITHUB_STEP_SUMMARY"
