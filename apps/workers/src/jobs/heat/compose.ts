@@ -5,9 +5,13 @@
 // 20261028 timestamp originally queued for this feature was
 // renumbered forward when 20261024/20261025/20261030 landed first).
 //
-// SHADOW ONLY. HEAT_ENABLED=false by default. The walker's Drop-
-// selection logic never reads these columns in this PR; the flip
-// is a separate plan v3 PR gated on P4 landing.
+// SHADOW ONLY. Gated by HEAT_SHADOW_ENABLED (default false).
+// HEAT_ENABLED is reserved for the eventual "heat picks the Drop"
+// switch and must not be reused here — the operator may want
+// shadow scoring (and nightly digest calibration) long before
+// flipping heat live. The walker's Drop-selection logic never
+// reads these columns in this PR; the flip is a separate plan
+// v3 PR gated on P4 landing.
 //
 // Formula (shadow starting weights in weights.ts; refit after
 // nightly digest run):
@@ -243,12 +247,14 @@ export function buildHeatComposeHandler(opts?: {
     const env = envProvider();
     const startedAt = now();
 
-    // Composer is itself behind HEAT_ENABLED (not just the walker).
-    // When off, the job completes with outcome='disabled' and the
-    // existing rank_score path remains authoritative. Operator flips
-    // HEAT_ENABLED=true after P4 lands and the shadow digest is
-    // calibrated.
-    if (!env.HEAT_ENABLED) {
+    // Composer is behind HEAT_SHADOW_ENABLED — the shadow-pipeline
+    // flag. When off, the job completes with outcome='disabled'
+    // and the existing rank_score path remains authoritative. The
+    // separate HEAT_ENABLED flag governs whether the walker reads
+    // heat_score when picking the Drop; it is NOT a prerequisite
+    // for shadow scoring, and the operator flips HEAT_ENABLED only
+    // after the shadow digest is calibrated and P4 lands.
+    if (!env.HEAT_SHADOW_ENABLED) {
       await stampPayload(deps, row.id, {
         emitted_at: emittedAtFromRow(row),
         outcome: 'disabled',

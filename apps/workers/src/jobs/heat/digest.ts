@@ -12,9 +12,12 @@
 // DELIVERY is explicitly deferred — this worker only generates the
 // row. See the PR description for the proposed delivery channel.
 //
-// HEAT_ENABLED gates the generator at the handler level: when the
-// composer is off, heat_score is NULL across the board and the
-// shadow_top_5 is meaningless. Short-circuit to outcome='disabled'.
+// HEAT_SHADOW_ENABLED gates the generator at the handler level —
+// NOT HEAT_ENABLED. HEAT_ENABLED is reserved for the future
+// walker-flip ("heat picks the Drop"). When the shadow flag is
+// off the composer skips too, so heat_score is NULL across the
+// board and shadow_top_5 would be meaningless — short-circuit to
+// outcome='disabled'.
 
 import { scrubMessage } from '@diktat/shared/alerts';
 
@@ -160,7 +163,7 @@ export function buildDropShadowDigestHandler(opts?: {
     const startedAt = now();
     const dropDate = digestDate(startedAt);
 
-    if (!env.HEAT_ENABLED) {
+    if (!env.HEAT_SHADOW_ENABLED) {
       await stampPayload(deps, row.id, {
         emitted_at: emittedAtFromRow(row),
         outcome: 'disabled',
