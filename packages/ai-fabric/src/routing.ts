@@ -16,7 +16,13 @@ const MODELS = {
   openai_gpt5_mini: 'gpt-5-mini',
   google_gemini_25_pro: 'gemini-2.5-pro',
   xai_grok: 'grok-2-latest',
-  perplexity_sonar: 'sonar-large',
+  // Perplexity's current model id for the base Sonar tier. The
+  // historical `sonar-large` name was deprecated when Perplexity
+  // consolidated to `sonar` / `sonar-pro` / `sonar-reasoning`. We use
+  // `sonar` as the sourced_factcheck primary — pricing is ~$1/M in,
+  // ~$1/M out plus a per-request search fee (see adapters/perplexity.ts
+  // for the per-call USD calculation).
+  perplexity_sonar: 'sonar',
 } as const;
 
 interface RawDecision {

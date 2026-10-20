@@ -186,7 +186,12 @@ describe('factCheckOrchestratorHandler', () => {
     });
     expect(invokeCount).toBe(0);
     expect(state.rpcCalls).toEqual([
-      { fn: 'fact_check_dedup_lookup', args: { p_claim_id: CLAIM_ID } },
+      {
+        fn: 'fact_check_dedup_lookup',
+        // p_force_miss defaults to false; the orchestrator forwards it
+        // from scheduled_jobs payload (unset here → false).
+        args: { p_claim_id: CLAIM_ID, p_force_miss: false },
+      },
     ]);
     expect(state.updates).toHaveLength(1);
     const patch = state.updates[0]?.patch as { payload: Record<string, unknown> };
@@ -338,6 +343,168 @@ describe('factCheckOrchestratorHandler', () => {
     };
     expect(persistArgs.p_verdict.retrieval_mode).toBe('perplexity');
     expect(persistArgs.p_verdict.model).toBe('sonar-large-online');
+  });
+
+  // --------------------------------------------------------------------
+  // P4 batch — Perplexity grounding
+  // --------------------------------------------------------------------
+
+  it('today\'s behaviour exactly: no PERPLEXITY_API_KEY → fabric fallback to Sonnet, retrieval_mode="none", authoritative=false', async () => {
+    // Simulates the state on main: perplexityAvailable=false in
+    // providerEnv so routing hands sourced_factcheck to Sonnet 4.6.
+    // Orchestrator stamps retrieval_mode='none' (from the provider on
+    // the invokeResult), and authoritative=false falls out even if
+    // the model listed .gov URLs — the Sonnet-from-memory path cannot
+    // ground.
+    const state: FakeState = {
+      rpcCalls: [],
+      rpcResults: new Map([
+        ['fact_check_dedup_lookup', { data: { hit: false }, error: null }],
+        ['fact_check_persist_verdict', { data: 'v', error: null }],
+      ]),
+      selects: [],
+      updates: [],
+      updateError: null,
+    };
+    const supabase = buildSupabase(state, {
+      id: CLAIM_ID,
+      claim_text: 'A claim about a thing.',
+      claim_context: '',
+    });
+    const logger = buildLogger();
+    await factCheckOrchestratorHandler(row(), {
+      supabase,
+      logger,
+      invoke: fakeInvoke({
+        verdict: 'supported',
+        provider: 'anthropic', // fabric fell back to Sonnet
+        model: 'claude-sonnet-4-6',
+        sources: [{ url: 'https://supremecourt.gov/opinions/x.pdf', label: 's', snippet: null }],
+      }) as never,
+      providerEnv: { xaiAvailable: false, perplexityAvailable: false },
+      fetch: FAKE_FETCH,
+    });
+    const persistArgs = state.rpcCalls.find((c) => c.fn === 'fact_check_persist_verdict')!.args as {
+      p_verdict: { retrieval_mode: string; authoritative: boolean };
+    };
+    expect(persistArgs.p_verdict.retrieval_mode).toBe('none');
+    expect(persistArgs.p_verdict.authoritative).toBe(false);
+  });
+
+  it('authoritative=true when provider=perplexity AND at least one source is .gov', async () => {
+    const state: FakeState = {
+      rpcCalls: [],
+      rpcResults: new Map([
+        ['fact_check_dedup_lookup', { data: { hit: false }, error: null }],
+        ['fact_check_persist_verdict', { data: 'v', error: null }],
+      ]),
+      selects: [],
+      updates: [],
+      updateError: null,
+    };
+    const supabase = buildSupabase(state, {
+      id: CLAIM_ID,
+      claim_text: 'claim',
+      claim_context: '',
+    });
+    const logger = buildLogger();
+    await factCheckOrchestratorHandler(row(), {
+      supabase,
+      logger,
+      invoke: fakeInvoke({
+        verdict: 'supported',
+        provider: 'perplexity',
+        model: 'sonar',
+        sources: [
+          { url: 'https://bls.gov/x.htm', label: 'bls', snippet: null },
+          { url: 'https://random-blog.example/post', label: 'blog', snippet: null },
+        ],
+      }) as never,
+      providerEnv: { xaiAvailable: false, perplexityAvailable: true },
+      fetch: FAKE_FETCH,
+    });
+    const persistArgs = state.rpcCalls.find((c) => c.fn === 'fact_check_persist_verdict')!.args as {
+      p_verdict: { retrieval_mode: string; authoritative: boolean };
+      p_sources: Array<{ url: string; source_quality: string }>;
+    };
+    expect(persistArgs.p_verdict.retrieval_mode).toBe('perplexity');
+    expect(persistArgs.p_verdict.authoritative).toBe(true);
+    // Each source carries the server-derived source_quality (never
+    // trusted from the model).
+    expect(persistArgs.p_sources[0]?.source_quality).toBe('primary');
+    expect(persistArgs.p_sources[1]?.source_quality).toBe('other');
+  });
+
+  it('authoritative=false when provider=perplexity but EVERY source is other (operator contract)', async () => {
+    const state: FakeState = {
+      rpcCalls: [],
+      rpcResults: new Map([
+        ['fact_check_dedup_lookup', { data: { hit: false }, error: null }],
+        ['fact_check_persist_verdict', { data: 'v', error: null }],
+      ]),
+      selects: [],
+      updates: [],
+      updateError: null,
+    };
+    const supabase = buildSupabase(state, {
+      id: CLAIM_ID,
+      claim_text: 'claim',
+      claim_context: '',
+    });
+    const logger = buildLogger();
+    await factCheckOrchestratorHandler(row(), {
+      supabase,
+      logger,
+      invoke: fakeInvoke({
+        verdict: 'supported',
+        provider: 'perplexity',
+        model: 'sonar',
+        sources: [
+          { url: 'https://random-blog.example/a', label: 'a', snippet: null },
+          { url: 'https://commercial-case-law.example/b', label: 'b', snippet: null },
+        ],
+      }) as never,
+      providerEnv: { xaiAvailable: false, perplexityAvailable: true },
+      fetch: FAKE_FETCH,
+    });
+    const persistArgs = state.rpcCalls.find((c) => c.fn === 'fact_check_persist_verdict')!.args as {
+      p_verdict: { retrieval_mode: string; authoritative: boolean };
+    };
+    expect(persistArgs.p_verdict.retrieval_mode).toBe('perplexity');
+    expect(persistArgs.p_verdict.authoritative).toBe(false);
+  });
+
+  it('force_miss=true in payload forwards to fact_check_dedup_lookup (recheck sweep path)', async () => {
+    const state: FakeState = {
+      rpcCalls: [],
+      rpcResults: new Map([
+        ['fact_check_dedup_lookup', { data: { hit: false }, error: null }],
+        ['fact_check_persist_verdict', { data: 'v', error: null }],
+      ]),
+      selects: [],
+      updates: [],
+      updateError: null,
+    };
+    const supabase = buildSupabase(state, {
+      id: CLAIM_ID,
+      claim_text: 'claim',
+      claim_context: '',
+    });
+    const logger = buildLogger();
+    await factCheckOrchestratorHandler(
+      row({
+        payload: { claim_id: CLAIM_ID, force_miss: true },
+      }),
+      {
+        supabase,
+        logger,
+        invoke: fakeInvoke({ verdict: 'supported', provider: 'perplexity' }) as never,
+        providerEnv: { xaiAvailable: false, perplexityAvailable: true },
+        fetch: FAKE_FETCH,
+      },
+    );
+    const dedupCall = state.rpcCalls.find((c) => c.fn === 'fact_check_dedup_lookup');
+    expect(dedupCall?.args).toEqual({ p_claim_id: CLAIM_ID, p_force_miss: true });
   });
 
   it('dedup RPC error → throws so the scheduler retries with backoff', async () => {

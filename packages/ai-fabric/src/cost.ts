@@ -4,12 +4,15 @@ import { logCall } from './logging.js';
 import type { CostSink } from './redis-cost-sink.js';
 
 /**
- * Per-task daily caps. Sum equals the global ceiling exactly ($30/day).
+ * Per-task daily caps. Sum equals the global ceiling exactly ($76/day).
  *
  * Allocation rationale:
  * - code_gen $8: most expensive (Opus 4.7 + extended thinking on coding work)
  * - debate_score $5: live battle scoring volume
- * - sourced_factcheck $4: long Perplexity Sonar contexts
+ * - sourced_factcheck $50: Perplexity Sonar grounding at launch volume.
+ *   Operator-chosen pre-launch band (P4 batch): assumes ~2.5k claim-
+ *   fact-checks/day at ~$0.02/call, with the dedup cache collapsing
+ *   same-text repeats. Tighten post-launch once real volume data lands.
  * - live_factcheck $4: Grok burst usage
  * - trivia_gen $3: batch generation, can throttle
  * - news_rank $2: Haiku is cheap; covers high request count
@@ -24,7 +27,7 @@ import type { CostSink } from './redis-cost-sink.js';
 export const PER_TASK_CAPS_USD: Record<Task, number> = {
   code_gen: 8,
   debate_score: 5,
-  sourced_factcheck: 4,
+  sourced_factcheck: 50,
   live_factcheck: 4,
   trivia_gen: 3,
   news_rank: 2,
@@ -35,11 +38,12 @@ export const PER_TASK_CAPS_USD: Record<Task, number> = {
   fingerprint: 1,
 };
 
-/** $30/day hard ceiling — sum of per-task caps. */
+/** $78/day hard ceiling — sum of per-task caps. Verify against the
+ *  pin in `__tests__/cost.test.ts` whenever a cap changes. */
 export const GLOBAL_CAP_USD = Object.values(PER_TASK_CAPS_USD).reduce((a, b) => a + b, 0);
 
-/** Warn-level alert threshold. */
-export const ALERT_AT_USD = 22;
+/** Warn-level alert threshold. ~75% of the global ceiling. */
+export const ALERT_AT_USD = 57;
 
 const ZERO_BY_TASK = (): Record<Task, number> => ({
   code_gen: 0,

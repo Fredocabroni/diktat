@@ -14,6 +14,7 @@
     "test": "vitest run",
     "seed:trivia": "tsx scripts/seed-trivia.ts",
     "heat:refit": "tsx scripts/heat-refit.ts",
+    "factcheck:recheck": "tsx scripts/factcheck-recheck.ts",
     "clean": "rm -rf dist .turbo"
   },
   "dependencies": {

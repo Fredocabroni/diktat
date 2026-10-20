@@ -12,6 +12,7 @@ export * from './structured.js';
 export * from './logging.js';
 export * from './fabric.js';
 export * from './head-gate.js';
+export * from './source-quality.js';
 export * from './prompts/fact-check.js';
 export * from './prompts/drop-sources.js';
 export * from './prompts/drop-headline.js';
