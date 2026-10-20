@@ -24,7 +24,9 @@ describe('cost — caps', () => {
   it('per-task caps sum to the global ceiling exactly', () => {
     const sum = Object.values(PER_TASK_CAPS_USD).reduce((a, b) => a + b, 0);
     expect(sum).toBe(GLOBAL_CAP_USD);
-    expect(GLOBAL_CAP_USD).toBe(32); // +1 with topic_fact_explainer (A4)
+    // +46 with sourced_factcheck raised to $50/day for Perplexity Sonar
+    // grounding (P4 batch pre-launch cap). Previous value: 32.
+    expect(GLOBAL_CAP_USD).toBe(78);
   });
 
   it('assertUnderCap allows spend under per-task cap', () => {
@@ -53,15 +55,17 @@ describe('cost — caps', () => {
   });
 });
 
-describe('cost — alert hook fires at $22 threshold once per day', () => {
-  it('emits a warn-level [budget-alert] log when total reaches $22', () => {
+describe('cost — alert hook fires at $57 threshold once per day', () => {
+  // Threshold raised to $57 (~75% of the $78 global cap) when
+  // sourced_factcheck's share went to $50 for Perplexity Sonar
+  // grounding (P4 batch pre-launch cap).
+  it('emits a warn-level [budget-alert] log when total reaches $57', () => {
     const sink = vi.fn<(p: LogPayload) => void>();
     recordSpend('code_gen', 8, { sink });
     recordSpend('debate_score', 5, { sink });
-    recordSpend('sourced_factcheck', 4, { sink });
+    recordSpend('sourced_factcheck', 40, { sink });
     expect(sink).not.toHaveBeenCalled();
     recordSpend('live_factcheck', 4, { sink });
-    recordSpend('trivia_gen', 1, { sink });
     expect(sink).toHaveBeenCalledTimes(1);
     const payload = sink.mock.calls[0]![0]!;
     expect(payload.level).toBe('warn');
@@ -73,7 +77,7 @@ describe('cost — alert hook fires at $22 threshold once per day', () => {
     const sink = vi.fn<(p: LogPayload) => void>();
     recordSpend('code_gen', 8, { sink });
     recordSpend('debate_score', 5, { sink });
-    recordSpend('sourced_factcheck', 4, { sink });
+    recordSpend('sourced_factcheck', 40, { sink });
     recordSpend('live_factcheck', 4, { sink });
     recordSpend('trivia_gen', 1, { sink });
     recordSpend('news_rank', 0.5, { sink });

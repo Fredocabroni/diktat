@@ -443,6 +443,7 @@ export type Database = {
           label: string
           position: number
           snippet: string | null
+          source_quality: string
           url: string
           verdict_id: string
         }
@@ -453,6 +454,7 @@ export type Database = {
           label: string
           position?: number
           snippet?: string | null
+          source_quality?: string
           url: string
           verdict_id: string
         }
@@ -463,6 +465,7 @@ export type Database = {
           label?: string
           position?: number
           snippet?: string | null
+          source_quality?: string
           url?: string
           verdict_id?: string
         }
@@ -478,6 +481,7 @@ export type Database = {
       }
       fact_check_verdicts: {
         Row: {
+          authoritative: boolean
           claim_id: string
           confidence: number
           contested_reason: string | null
@@ -491,6 +495,7 @@ export type Database = {
           verdict: string
         }
         Insert: {
+          authoritative?: boolean
           claim_id: string
           confidence: number
           contested_reason?: string | null
@@ -504,6 +509,7 @@ export type Database = {
           verdict: string
         }
         Update: {
+          authoritative?: boolean
           claim_id?: string
           confidence?: number
           contested_reason?: string | null
@@ -1634,7 +1640,7 @@ export type Database = {
         Returns: Json
       }
       fact_check_dedup_lookup: {
-        Args: { p_claim_id: string; p_max_age_hours?: number }
+        Args: { p_claim_id: string; p_force_miss?: boolean; p_max_age_hours?: number }
         Returns: Json
       }
       fact_check_persist_verdict: {

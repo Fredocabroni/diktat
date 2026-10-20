@@ -20,6 +20,8 @@
 
 import {
   buildFactCheckUserPrompt,
+  classifySourceQuality,
+  deriveAuthoritative,
   FACT_CHECK_SYSTEM_PROMPT,
   FactCheckResultSchema,
   runHeadCheck,
@@ -28,21 +30,30 @@ import {
   type invoke as fabricInvokeType,
   type Provider,
   type ProviderEnv,
+  type SourceQuality,
 } from '@diktat/ai-fabric';
 
 import { scrubMessage } from '@diktat/shared/alerts';
 
 import type { JobHandler } from './scheduler.js';
 
-/** Projection used for the per-task cap pre-check. Tuned to the Sonnet
- *  4.6 cost for one verdict; Perplexity Sonar will be higher when wired
- *  — adjust when that PR lands. */
-const PROJECTED_USD_PER_CALL = 0.01;
+/** Projection used for the per-task cap pre-check. Perplexity Sonar
+ *  per-call cost under current pricing (~$1/M in, ~$1/M out, plus a
+ *  per-request search fee ~$0.005) lands near $0.012-$0.015 for a
+ *  typical claim; $0.02 leaves headroom for larger context + output.
+ *  Sonnet-fallback path is cheaper (~$0.004-$0.008), so the projection
+ *  is a worst-case bound. (CLAUDE.md pre-launch band.) */
+const PROJECTED_USD_PER_CALL = 0.02;
 const MAX_TOKENS = 2048;
 
 interface FactCheckJobPayload {
   readonly claim_id?: string;
   readonly emitted_at?: string;
+  /** When true, the orchestrator calls `fact_check_dedup_lookup` with
+   *  `p_force_miss=true` so a stale `retrieval_mode='none'` /
+   *  `authoritative=false` verdict does NOT short-circuit the fresh
+   *  Perplexity-grounded redo. Used by `factcheck:recheck`. */
+  readonly force_miss?: boolean;
 }
 
 interface ClaimRow {
@@ -73,10 +84,16 @@ export const factCheckOrchestratorHandler: JobHandler = async (row, deps) => {
     throw new Error('fact_check: payload.claim_id is required on the job row');
   }
 
+  const forceMiss = payload.force_miss === true;
+
   // 1. Dedup-check via the SQL function (no AI call when cached).
+  //    `p_force_miss=true` is the recheck sweep's hook: the RPC returns
+  //    `{hit:false}` even when a cached verdict exists so the fresh
+  //    Perplexity-grounded run always lands.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const dedup = (await (deps.supabase as any).rpc('fact_check_dedup_lookup', {
     p_claim_id: claimId,
+    p_force_miss: forceMiss,
   })) as { data: { hit: boolean; verdict?: unknown } | null; error: { message: string } | null };
   if (dedup.error) {
     throw new Error(`fact_check_dedup_lookup RPC failed: ${scrubMessage(dedup.error.message)}`);
@@ -130,22 +147,42 @@ export const factCheckOrchestratorHandler: JobHandler = async (row, deps) => {
   const verdict = invokeResult.output as FactCheckResult;
   const retrievalMode = providerToRetrievalMode(invokeResult.provider);
 
-  // 4. HEAD-check every returned source URL — stamp fetch_status.
+  // 4. HEAD-check every returned source URL AND classify by host.
+  //    source_quality is server-derived — never trust the model's
+  //    self-report of source quality (classifier is a host-check only,
+  //    runs after HEAD-gate, see @diktat/ai-fabric/source-quality).
   const sources = await Promise.all(
     verdict.sources.map(async (src, idx) => {
       const head = await runHeadCheck(src.url, fetchFn);
       logHeadOutcome(deps, row.id, head);
+      const sourceQuality: SourceQuality = classifySourceQuality(src.url);
       return {
         url: src.url,
         label: src.label,
         snippet: src.snippet,
         fetch_status: head.outcome,
         position: idx,
+        source_quality: sourceQuality,
       };
     }),
   );
 
-  // 5. Persist verdict + sources atomically.
+  // 5. Derive authoritative flag. False when the retrieval path was
+  //    the Sonnet-from-memory fallback OR when every persisted source
+  //    is `other` (CLAUDE.md pre-launch batch: "a supported/refuted
+  //    verdict whose sources are all `other` must be persisted as
+  //    non-authoritative"). The future UI uses this flag — not
+  //    `retrieval_mode` directly — to decide whether to render a
+  //    supported/refuted as authoritative; the factcheck:recheck
+  //    sweep uses `authoritative=false AND verdict IN ('supported',
+  //    'refuted')` to find rows that need a fresh Perplexity-grounded
+  //    redo.
+  const authoritative = deriveAuthoritative(
+    retrievalMode,
+    sources.map((s) => s.source_quality),
+  );
+
+  // 6. Persist verdict + sources atomically.
   const verdictJsonb = {
     verdict: verdict.verdict,
     confidence: verdict.confidence,
@@ -154,6 +191,7 @@ export const factCheckOrchestratorHandler: JobHandler = async (row, deps) => {
     model: invokeResult.model,
     route: 'sourced_factcheck',
     retrieval_mode: retrievalMode,
+    authoritative,
     cost_usd: invokeResult.usd,
   };
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -175,6 +213,7 @@ export const factCheckOrchestratorHandler: JobHandler = async (row, deps) => {
     verdict_id: verdictId,
     verdict: verdict.verdict,
     retrieval_mode: retrievalMode,
+    authoritative,
     cost_usd: invokeResult.usd,
   });
 
@@ -186,8 +225,10 @@ export const factCheckOrchestratorHandler: JobHandler = async (row, deps) => {
     verdict: verdict.verdict,
     confidence: verdict.confidence,
     retrievalMode,
+    authoritative,
     model: invokeResult.model,
     sourceCount: sources.length,
+    sourceQualities: sources.map((s) => s.source_quality),
     costUsd: invokeResult.usd,
   });
 };
