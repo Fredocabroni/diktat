@@ -67,10 +67,30 @@ function buildRow(): ScheduledJobRow {
 }
 
 describe('digestDate', () => {
-  it('subtracts 6h so a 06:00 UTC run pins to that UTC date', () => {
-    expect(digestDate(new Date('2026-10-17T06:00:00Z'))).toBe('2026-10-17');
-    // 00:00 UTC run (edge) pins to the prior UTC day.
-    expect(digestDate(new Date('2026-10-17T00:00:00Z'))).toBe('2026-10-16');
+  // Cron fires at 01:10 UTC. ET date depends on DST:
+  //   EDT (UTC-4, Mar–Nov): 01:10 UTC on day D = 9:10 PM ET of day D-1
+  //   EST (UTC-5, Nov–Mar): 01:10 UTC on day D = 8:10 PM ET of day D-1
+  // The row's drop_date must be that ET-evening date — i.e., D-1 for
+  // the cron firing moment, in both DST regimes.
+  it('01:10 UTC in EDT (summer): pins to the previous UTC day in ET', () => {
+    expect(digestDate(new Date('2026-10-19T01:10:00Z'))).toBe('2026-10-18');
+  });
+
+  it('01:10 UTC in EST (winter): pins to the previous UTC day in ET', () => {
+    expect(digestDate(new Date('2026-12-20T01:10:00Z'))).toBe('2026-12-19');
+  });
+
+  it('crosses the UTC midnight boundary — not the ET-day boundary', () => {
+    // 23:59 UTC day D (EDT = 19:59 ET of day D) and 00:01 UTC day D+1
+    // (EDT = 20:01 ET of same day D) are both the same ET date.
+    expect(digestDate(new Date('2026-10-18T23:59:00Z'))).toBe('2026-10-18');
+    expect(digestDate(new Date('2026-10-19T00:01:00Z'))).toBe('2026-10-18');
+  });
+
+  it('EDT→EST transition (Nov 1 2026): 01:10 UTC on Nov 2 is still Nov 1 ET', () => {
+    // EDT ends 2 AM local Sun 2026-11-01 → clocks fall back to 1 AM EST.
+    // 01:10 UTC on Nov 2 → 20:10 EST on Nov 1.
+    expect(digestDate(new Date('2026-11-02T01:10:00Z'))).toBe('2026-11-01');
   });
 });
 

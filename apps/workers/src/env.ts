@@ -85,6 +85,25 @@ const envSchema = z
     // other var); they are listed here for completeness + documentation.
     TELEGRAM_BOT_TOKEN: z.string().optional(),
     TELEGRAM_CHAT_ID: z.string().optional(),
+
+    // Nightly shadow-digest delivery to Telegram. Shadow-only; the
+    // operator reviews top-5 heat picks vs the walker's real Drop pick
+    // via inline buttons, callback writes land in drop_shadow_log.
+    //
+    // Reuses the EXISTING alerter bot (TELEGRAM_BOT_TOKEN +
+    // TELEGRAM_CHAT_ID). The long-poll loop (getUpdates) authorises
+    // taps by:
+    //   - DM chat (positive numeric TELEGRAM_CHAT_ID): require
+    //     callback_query.from.id == TELEGRAM_CHAT_ID.
+    //   - Group / channel (non-positive-numeric TELEGRAM_CHAT_ID):
+    //     require TELEGRAM_OPERATOR_USER_ID set + from.id match.
+    //     Without TELEGRAM_OPERATOR_USER_ID, every tap in the group
+    //     is rejected (fail-closed).
+    //
+    // Defaults OFF; the superRefine below refuses to boot when the
+    // flag is on without the credentials needed to authorise taps.
+    TELEGRAM_DIGEST_ENABLED: boolFromString.default(false),
+    TELEGRAM_OPERATOR_USER_ID: z.string().default(''),
   })
   .superRefine((env, ctx) => {
     // X_TRENDS_ENABLED=true without X_BEARER_TOKEN is a misconfiguration:
@@ -98,6 +117,50 @@ const envSchema = z
         path: ['X_BEARER_TOKEN'],
         message: 'X_TRENDS_ENABLED=true requires a non-empty X_BEARER_TOKEN',
       });
+    }
+    // TELEGRAM_DIGEST_ENABLED=true demands the alerter bot's
+    // credentials (TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID) AND a
+    // resolvable tap-authorisation path:
+    //   - DM (TELEGRAM_CHAT_ID parses as a positive integer):
+    //     the chat.id *is* the operator's user id, so no extra var
+    //     is required — the gate uses it on both sides.
+    //   - Group / channel (anything else, incl. negative supergroup
+    //     ids and the empty string from an un-set var):
+    //     require TELEGRAM_OPERATOR_USER_ID. The gate matches
+    //     callback_query.from.id against it; the chat.id matches
+    //     TELEGRAM_CHAT_ID.
+    // A boot that cannot resolve BOTH credentials AND an operator
+    // user id for a group chat fails here instead of silently
+    // rejecting every tap at runtime.
+    if (env.TELEGRAM_DIGEST_ENABLED) {
+      if (!env.TELEGRAM_BOT_TOKEN || env.TELEGRAM_BOT_TOKEN.length === 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['TELEGRAM_BOT_TOKEN'],
+          message: 'TELEGRAM_DIGEST_ENABLED=true requires a non-empty TELEGRAM_BOT_TOKEN',
+        });
+      }
+      if (!env.TELEGRAM_CHAT_ID || env.TELEGRAM_CHAT_ID.length === 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['TELEGRAM_CHAT_ID'],
+          message: 'TELEGRAM_DIGEST_ENABLED=true requires a non-empty TELEGRAM_CHAT_ID',
+        });
+      } else {
+        const chatIdInt = Number.parseInt(env.TELEGRAM_CHAT_ID, 10);
+        const isDm =
+          Number.isFinite(chatIdInt) &&
+          chatIdInt > 0 &&
+          String(chatIdInt) === env.TELEGRAM_CHAT_ID.trim();
+        if (!isDm && env.TELEGRAM_OPERATOR_USER_ID.length === 0) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['TELEGRAM_OPERATOR_USER_ID'],
+            message:
+              'TELEGRAM_DIGEST_ENABLED=true with a group/channel TELEGRAM_CHAT_ID requires TELEGRAM_OPERATOR_USER_ID',
+          });
+        }
+      }
     }
   });
 
