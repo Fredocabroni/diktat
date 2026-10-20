@@ -83,7 +83,6 @@ export const SessionNudgeSheetOpen: StoryObj<typeof SessionNudgeSheet> = {
   render: () => (
     <SessionNudgeSheet
       open
-      minutesElapsed={30}
       onContinue={() => console.info('continue')}
       onLater={() => console.info('later')}
     />
