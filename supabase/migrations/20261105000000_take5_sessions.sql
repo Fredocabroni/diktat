@@ -36,7 +36,8 @@
 --   create table public.take5_sessions (…);
 --   enable RLS; SELECT own; no app-role write policy.
 --   SECURITY DEFINER RPC record_take5_shift(uuid, smallint, uuid).
--- Down (strict reversal order):
+-- Down:
+--   (strict reversal order)
 --   drop function if exists public.record_take5_shift(uuid, smallint, uuid);
 --   drop table if exists public.take5_sessions;
 
@@ -71,6 +72,17 @@ create unique index take5_sessions_user_topic_uniq
 -- Serves the per-ET-day cap COUNT + the "today's take5 stack" read.
 create index take5_sessions_user_et_day_idx
   on public.take5_sessions (user_id, et_day);
+
+-- Standalone FK indexes. The (user_id, topic_id) unique index leads
+-- with user_id, so a cascade delete from `news_topics` on topic_id
+-- alone would seq-scan this table. Likewise `shift_id` is unindexed
+-- except as the FK target column, and a delete from `opinion_shifts`
+-- would seq-scan. Both are rare paths but cheap to cover.
+create index take5_sessions_topic_id_idx
+  on public.take5_sessions (topic_id);
+
+create index take5_sessions_shift_id_idx
+  on public.take5_sessions (shift_id);
 
 comment on table public.take5_sessions is
   'Per-stance log for the /take5 surface. One row per (user_id, topic_id). et_day is the America/New_York date of the stance, used for the 5-per-day cap. Writes only via record_take5_shift SECURITY DEFINER RPC.';
@@ -146,10 +158,16 @@ begin
   -- (3) Per-ET-day cap of 5 cards. Must check BEFORE delegating to
   -- record_opinion_shift so an over-cap tap does NOT credit the
   -- Take 5 streak trigger.
+  --
+  -- NOTE: `returns table (… et_day …)` makes `et_day` an OUT
+  -- parameter name that shadows the column of the same name inside
+  -- the function body (plpgsql column-conflict detection). Every
+  -- read of the physical column must schema-qualify via the alias
+  -- `t.et_day` to disambiguate.
   select count(*)::int
     into v_count
-    from public.take5_sessions
-   where user_id = v_user_id and et_day = v_et_day;
+    from public.take5_sessions t
+   where t.user_id = v_user_id and t.et_day = v_et_day;
   if v_count >= 5 then
     raise exception 'take5 daily cap reached: 5 cards per ET day'
       using errcode = '54000';  -- program_limit_exceeded
@@ -184,8 +202,8 @@ begin
            p_topic_id,
            v_et_day,
            (select count(*)::int
-              from public.take5_sessions
-             where user_id = v_user_id and et_day = v_et_day);
+              from public.take5_sessions t
+             where t.user_id = v_user_id and t.et_day = v_et_day);
 end;
 $$;
 
