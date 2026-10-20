@@ -59,10 +59,23 @@ const envSchema = z
     // Defaults OFF.
     WIKIMEDIA_ENABLED: boolFromString.default(false),
 
-    // Master heat-score gate. Defaults OFF. When off, every heat
-    // collector/composer stamps outcome='disabled' and returns; the
-    // walker's Drop-selection logic never reads heat_score.
+    // Live heat gate — reserved for the eventual "heat picks the
+    // Drop" switch. Defaults OFF. Nothing reads this today; the
+    // walker's Drop-selection logic will consult it once P4 (walker
+    // migration) lands. DO NOT reuse this flag to gate shadow work;
+    // the shadow pipeline has its own flag (HEAT_SHADOW_ENABLED)
+    // precisely so the operator can calibrate heat_score in shadow
+    // without implying "heat is live".
     HEAT_ENABLED: boolFromString.default(false),
+
+    // Shadow heat gate — governs the compose + nightly-digest
+    // generator pair. When ON (and HEAT_ENABLED still OFF), the
+    // composer writes heat_score + components to the candidates
+    // table and the digest row is captured each night; the walker
+    // continues to pick the Drop via the pre-heat rank_score path.
+    // When OFF, both handlers stamp outcome='disabled' and return;
+    // the crons keep emitting rows so the queue drains cleanly.
+    HEAT_SHADOW_ENABLED: boolFromString.default(false),
 
     // X v2 Trends-by-WOEID collector. Pay-per-use ($0.010/request).
     // Defaults OFF; handler fails closed with outcome='no_bearer' if
@@ -72,9 +85,10 @@ const envSchema = z
     X_BEARER_TOKEN: z.string().default(''),
 
     // Heat-signal collectors (plan v3). Each defaults OFF; the operator
-    // flips them one at a time behind HEAT_ENABLED=false. When off, each
-    // poller handler stamps outcome='disabled' and returns; the cron
-    // keeps emitting rows so the queue drains cleanly.
+    // flips them one at a time behind HEAT_SHADOW_ENABLED=true (while
+    // HEAT_ENABLED stays OFF). When off, each poller handler stamps
+    // outcome='disabled' and returns; the cron keeps emitting rows so
+    // the queue drains cleanly.
     BLUESKY_ENABLED: boolFromString.default(false),
 
     // Telegram alerting (optional). Missing = alerter disabled — NEVER a boot

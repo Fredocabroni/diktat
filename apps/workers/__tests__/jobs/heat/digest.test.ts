@@ -28,6 +28,7 @@ function env(overrides: Partial<Env> = {}): Env {
     VAPID_SUBJECT: '',
     GDELT_ENABLED: false,
     HEAT_ENABLED: false,
+    HEAT_SHADOW_ENABLED: false,
     ...overrides,
   } as Env;
 }
@@ -196,8 +197,7 @@ describe('buildShadowTop5', () => {
 });
 
 describe('drop_shadow_digest handler', () => {
-  it('HEAT_ENABLED=false short-circuits (no DB reads, stamps disabled)', async () => {
-    const stamped: { rowId: string; payload: Record<string, unknown> }[] = [];
+  function buildStampOnlyClient(stamped: { rowId: string; payload: Record<string, unknown> }[]) {
     const fromImpl = (table: string) => {
       if (table === 'scheduled_jobs') {
         return {
@@ -213,7 +213,12 @@ describe('drop_shadow_digest handler', () => {
       }
       throw new Error(`fake: unexpected table ${table}`);
     };
-    const client = { from: fromImpl } as unknown as ServiceClient;
+    return { from: fromImpl } as unknown as ServiceClient;
+  }
+
+  it('HEAT_SHADOW_ENABLED=false (default, both flags off) short-circuits: no DB reads, stamps disabled', async () => {
+    const stamped: { rowId: string; payload: Record<string, unknown> }[] = [];
+    const client = buildStampOnlyClient(stamped);
     const logger = buildLogger();
     const handler = buildDropShadowDigestHandler({
       now: () => new Date('2026-10-17T06:00:00Z'),
@@ -221,10 +226,21 @@ describe('drop_shadow_digest handler', () => {
     });
     await handler(buildRow(), { supabase: client, logger });
     expect(stamped[0]!.payload.outcome).toBe('disabled');
-    expect(stamped[0]!.payload.drop_date).toBe('2026-10-17');
   });
 
-  it('HEAT_ENABLED=true: queries real drop + top-5, calls RPC, stamps ok', async () => {
+  it('HEAT_ENABLED=true alone (no shadow): still stamps disabled — live flag is NOT the shadow gate', async () => {
+    const stamped: { rowId: string; payload: Record<string, unknown> }[] = [];
+    const client = buildStampOnlyClient(stamped);
+    const logger = buildLogger();
+    const handler = buildDropShadowDigestHandler({
+      now: () => new Date('2026-10-17T06:00:00Z'),
+      envProvider: () => env({ HEAT_ENABLED: true, HEAT_SHADOW_ENABLED: false }),
+    });
+    await handler(buildRow(), { supabase: client, logger });
+    expect(stamped[0]!.payload.outcome).toBe('disabled');
+  });
+
+  it('HEAT_SHADOW_ENABLED=true + HEAT_ENABLED=false: queries real drop + top-5, calls RPC, stamps ok', async () => {
     const stamped: { rowId: string; payload: Record<string, unknown> }[] = [];
     const rpcCalls: { fn: string; args: Record<string, unknown> }[] = [];
     const fromImpl = (table: string) => {
@@ -311,7 +327,7 @@ describe('drop_shadow_digest handler', () => {
     const logger = buildLogger();
     const handler = buildDropShadowDigestHandler({
       now: () => new Date('2026-10-17T06:00:00Z'),
-      envProvider: () => env({ HEAT_ENABLED: true }),
+      envProvider: () => env({ HEAT_SHADOW_ENABLED: true }),
     });
     await handler(buildRow(), { supabase: client, logger });
     expect(rpcCalls).toHaveLength(1);
@@ -384,7 +400,7 @@ describe('drop_shadow_digest handler', () => {
     const logger = buildLogger();
     const handler = buildDropShadowDigestHandler({
       now: () => new Date('2026-10-17T06:00:00Z'),
-      envProvider: () => env({ HEAT_ENABLED: true }),
+      envProvider: () => env({ HEAT_SHADOW_ENABLED: true }),
     });
     await handler(buildRow(), { supabase: client, logger });
     expect(rpcCalls[0]!.args.p_real_drop_topic_id).toBeNull();

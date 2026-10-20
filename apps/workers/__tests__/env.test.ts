@@ -32,6 +32,26 @@ describe('workers loadEnv — empty-string == unset', () => {
   });
 });
 
+describe('workers loadEnv — HEAT_ENABLED and HEAT_SHADOW_ENABLED are independent flags', () => {
+  it('both default to false when unset', () => {
+    const env = loadEnv(base);
+    expect(env.HEAT_ENABLED).toBe(false);
+    expect(env.HEAT_SHADOW_ENABLED).toBe(false);
+  });
+
+  it('HEAT_SHADOW_ENABLED=true does NOT flip HEAT_ENABLED', () => {
+    const env = loadEnv({ ...base, HEAT_SHADOW_ENABLED: 'true' });
+    expect(env.HEAT_SHADOW_ENABLED).toBe(true);
+    expect(env.HEAT_ENABLED).toBe(false);
+  });
+
+  it('HEAT_ENABLED=true does NOT flip HEAT_SHADOW_ENABLED', () => {
+    const env = loadEnv({ ...base, HEAT_ENABLED: 'true' });
+    expect(env.HEAT_ENABLED).toBe(true);
+    expect(env.HEAT_SHADOW_ENABLED).toBe(false);
+  });
+});
+
 describe('workers loadEnv — X_TRENDS_ENABLED requires X_BEARER_TOKEN', () => {
   it('X_TRENDS_ENABLED=true with blank X_BEARER_TOKEN hard-fails at parse', () => {
     expect(() => loadEnv({ ...base, X_TRENDS_ENABLED: 'true' })).toThrow(/X_BEARER_TOKEN/);

@@ -29,6 +29,7 @@ function env(overrides: Partial<Env> = {}): Env {
     VAPID_SUBJECT: '',
     GDELT_ENABLED: false,
     HEAT_ENABLED: false,
+    HEAT_SHADOW_ENABLED: false,
     ...overrides,
   } as Env;
 }
@@ -319,7 +320,7 @@ describe('heat_compose handler — non-finite guard (handler-level)', () => {
     const logger = buildLogger();
     const handler = buildHeatComposeHandler({
       now: () => new Date('2026-10-16T19:00:00Z'),
-      envProvider: () => env({ HEAT_ENABLED: true }),
+      envProvider: () => env({ HEAT_SHADOW_ENABLED: true }),
       weights: { ...DEFAULT_HEAT_WEIGHTS, w_g: Number.NaN },
     });
     await handler(buildRow(), { supabase: client, logger });
@@ -340,8 +341,7 @@ describe('heat_compose handler — non-finite guard (handler-level)', () => {
 });
 
 describe('heat_compose handler (shadow gates)', () => {
-  it('HEAT_ENABLED=false: no DB reads, stamps disabled', async () => {
-    const stamped: { rowId: string; payload: Record<string, unknown> }[] = [];
+  function buildStampOnlyClient(stamped: { rowId: string; payload: Record<string, unknown> }[]) {
     const fromImpl = (table: string) => {
       if (table === 'scheduled_jobs') {
         return {
@@ -357,11 +357,29 @@ describe('heat_compose handler (shadow gates)', () => {
       }
       throw new Error(`fake: unexpected table ${table}`);
     };
-    const client = { from: fromImpl } as unknown as ServiceClient;
+    return { from: fromImpl } as unknown as ServiceClient;
+  }
+
+  it('HEAT_SHADOW_ENABLED=false (default, both flags off): no DB reads, stamps disabled', async () => {
+    const stamped: { rowId: string; payload: Record<string, unknown> }[] = [];
+    const client = buildStampOnlyClient(stamped);
     const logger = buildLogger();
     const handler = buildHeatComposeHandler({
       now: () => new Date('2026-10-16T19:00:00Z'),
       envProvider: () => env(),
+    });
+    await handler(buildRow(), { supabase: client, logger });
+    expect(stamped).toHaveLength(1);
+    expect(stamped[0]!.payload.outcome).toBe('disabled');
+  });
+
+  it('HEAT_ENABLED=true alone (no shadow): still stamps disabled — live flag is NOT the shadow gate', async () => {
+    const stamped: { rowId: string; payload: Record<string, unknown> }[] = [];
+    const client = buildStampOnlyClient(stamped);
+    const logger = buildLogger();
+    const handler = buildHeatComposeHandler({
+      now: () => new Date('2026-10-16T19:00:00Z'),
+      envProvider: () => env({ HEAT_ENABLED: true, HEAT_SHADOW_ENABLED: false }),
     });
     await handler(buildRow(), { supabase: client, logger });
     expect(stamped).toHaveLength(1);
