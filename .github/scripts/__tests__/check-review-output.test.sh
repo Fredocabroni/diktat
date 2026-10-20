@@ -225,6 +225,33 @@ run_case "channel A: 'Final verdict: PASS' inline → ok" \
   "${FIX}/real-review-final-verdict-pass-inline.md" 0 0 ok
 
 echo
+echo "=== Group H: canonical FINAL VERDICT line (channel 0, 2026-10-20) ==="
+# The operator contract: reviewer prompts instruct the agent to end
+# with the LITERAL string `VERDICT: PASS` or `VERDICT: BLOCK`.
+# Channel 0 short-circuits on this exact form.
+run_case "canonical 'VERDICT: PASS' as trailing line → ok" \
+  "${FIX}/real-review-canonical-verdict-pass.md" 0 0 ok
+run_case "canonical 'VERDICT: BLOCK' as trailing line → ok_block" \
+  "${FIX}/real-review-canonical-verdict-block.md" 0 0 ok_block
+# A body with contradictory in-body `verdict:` lines must defer to the
+# canonical VERDICT line — the operator contract makes it the single
+# overall verdict. Here the body mentions `verdict: APPROVE` /
+# `verdict: BLOCK` for per-mechanic rollups; the trailing
+# `VERDICT: PASS` wins.
+run_case "canonical VERDICT overrides per-mechanic in-body verdicts → ok" \
+  "${FIX}/real-review-canonical-verdict-overrides-prose.md" 0 0 ok
+# Decorated form (`**VERDICT: PASS**`) is NOT channel 0 — channel 0 is
+# EXACT. The body still classifies as `ok` via the fallback channels
+# (specifically channel B's trailing-PASS pattern doesn't match
+# "**VERDICT: PASS**", so this one actually falls through to channel
+# A's "**verdict: … pass**" inline pattern). Assert the outcome
+# WITHOUT asserting the channel — the test's purpose is that
+# decoration doesn't BLOCK the gate; the exact classification path
+# is irrelevant.
+run_case "decorated '**VERDICT: PASS**' still classifies as ok via fallback channels" \
+  "${FIX}/real-review-canonical-decorated-fails.md" 0 0 ok
+
+echo
 echo "=== Group G: NEEDS-USER-DECISION fails closed like BLOCK (exit 0, stdout 'ok_block') ==="
 # A verdict that needs a human decision must not merge on a green
 # check. Until 2026-10-14 the gate grouped NEEDS-USER-DECISION with
