@@ -302,18 +302,44 @@ app.addHook('onRequest', async (request, reply) => {
       .send(buildOuterHookBlockedBody());
   }
 
+  // tRPC fastify adapter supports procedure batching: a client can
+  // request multiple procedures in one URL like
+  //   /trpc/auth.session,other.proc?batch=1&input=…
+  // Only the FIRST segment carries the `/trpc/` prefix; subsequent
+  // segments are bare procedure names. The band checks below must
+  // compare against the comma-separated procedure list, not an exact
+  // string equality against `pathOnly`, or batched requests silently
+  // bypass the Fastify-layer floor.
+  // (CI security-reviewer PR #276 MEDIUM.)
+  const procsInBatch = pathOnly.startsWith('/trpc/')
+    ? pathOnly.slice('/trpc/'.length).split(',')
+    : [];
+
   // Pre-launch band 2 — auth-session cap (60/min per IP /24).
   // CLAUDE.md pre-launch TODO. The per-procedure `publicLimit` in
   // routers/auth.ts further tightens via hybrid IP+userId keying once
   // the tRPC context is built; this floor runs before context so it
   // covers the pre-sign-in polling case.
-  if (pathOnly === '/trpc/auth.session') {
+  if (procsInBatch.includes('auth.session')) {
     const authResult = await checkAuthSessionHook({
       redis: outerRedis,
       ipCidr,
       perMin: AUTH_SESSION_PER_MIN,
     });
     if (!authResult.allowed) {
+      // Deny-telemetry — the global outer hook already logs
+      // `rate_limit.redis_down` on fail-open; mirror a structured
+      // deny-event here so a Fastify-layer 429 is observable in
+      // Axiom/console. We do NOT log `ipCidr` at this layer (network
+      // identifier; GDPR-adjacent in some jurisdictions). (CI
+      // security-reviewer PR #276 LOW.)
+      console.warn(
+        JSON.stringify({
+          event: 'rate_limit.deny',
+          tier: 'auth_session',
+          retryAfterSec: authResult.retryAfterSec,
+        }),
+      );
       return reply
         .code(429)
         .header('Retry-After', String(authResult.retryAfterSec))
@@ -332,13 +358,29 @@ app.addHook('onRequest', async (request, reply) => {
   // after a 429 here, so a resumed client reusing the same key will
   // land on the server's 23505 idempotency branch when the budget
   // clears.
-  if (request.method === 'POST' && pathOnly.startsWith('/trpc/')) {
+  //
+  // Known limitation (CI security-reviewer PR #276 LOW): a batched
+  // POST (`/trpc/proc1,proc2`) counts as a SINGLE increment but
+  // executes N mutations. The per-procedure `mutationLimit`
+  // middleware (ctx.userId-keyed) still fires N times individually,
+  // so the per-user tightening above this floor is NOT bypassed —
+  // only the IP-keyed Fastify floor under-counts. Acceptable pre-
+  // launch; revisit (either count batch depth into the Lua INCR or
+  // reject batched POSTs with 400) before production-scale load.
+  if (request.method === 'POST' && procsInBatch.length > 0) {
     const mutResult = await checkMutationBurstHook({
       redis: outerRedis,
       ipCidr,
       perMin: MUTATION_BURST_PER_MIN,
     });
     if (!mutResult.allowed) {
+      console.warn(
+        JSON.stringify({
+          event: 'rate_limit.deny',
+          tier: 'mutation_burst',
+          retryAfterSec: mutResult.retryAfterSec,
+        }),
+      );
       return reply
         .code(429)
         .header('Retry-After', String(mutResult.retryAfterSec))

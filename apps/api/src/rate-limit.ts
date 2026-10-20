@@ -674,12 +674,15 @@ export async function checkMutationBurstHook(opts: {
   nowMs?: number;
 }): Promise<SingleGateResult> {
   const now = opts.nowMs ?? Date.now();
-  const key = publicKey('__mutation__', opts.ipCidr, GLOBAL_WINDOW_SEC, now);
+  // Tier-local window constant so a future DDoS-window tuning on
+  // GLOBAL_WINDOW_SEC does not silently widen the mutation burst
+  // window. (CI security-reviewer PR #276 LOW.)
+  const key = publicKey('__mutation__', opts.ipCidr, MUTATION_WINDOW_SEC, now);
   const result = await checkAndIncrementSingle(
     opts.redis,
     key,
     opts.perMin,
-    GLOBAL_WINDOW_SEC,
+    MUTATION_WINDOW_SEC,
     /* failOpen */ true,
   );
   if (result.redisDown) {
@@ -712,12 +715,15 @@ export async function checkAuthSessionHook(opts: {
   nowMs?: number;
 }): Promise<SingleGateResult> {
   const now = opts.nowMs ?? Date.now();
-  const key = publicKey('__auth_session__', opts.ipCidr, GLOBAL_WINDOW_SEC, now);
+  // Tier-local window constant (same shape as publicLimit uses) so
+  // a future DDoS-window tuning on GLOBAL_WINDOW_SEC does not silently
+  // widen the auth-session window. (CI security-reviewer PR #276 LOW.)
+  const key = publicKey('__auth_session__', opts.ipCidr, PUBLIC_WINDOW_SEC, now);
   const result = await checkAndIncrementSingle(
     opts.redis,
     key,
     opts.perMin,
-    GLOBAL_WINDOW_SEC,
+    PUBLIC_WINDOW_SEC,
     /* failOpen */ true,
   );
   if (result.redisDown) {

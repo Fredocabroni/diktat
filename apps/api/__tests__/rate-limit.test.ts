@@ -690,6 +690,45 @@ describe('checkAuthSessionHook (auth-session IP-keyed floor)', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Batch-bypass guard — CI security-reviewer PR #276 MEDIUM
+//
+// tRPC fastify adapter batches procedures as `/trpc/proc1,proc2`.
+// The Fastify band checks must inspect the comma-separated procedure
+// list, not an exact-equality string match, or a batched request
+// silently bypasses the IP-keyed floor. This regression guard pins
+// the detection logic that server.ts uses.
+// ---------------------------------------------------------------------------
+
+describe('tRPC batch URL parsing (regression guard for CI #276 MEDIUM)', () => {
+  function parseProcs(pathOnly: string): string[] {
+    return pathOnly.startsWith('/trpc/') ? pathOnly.slice('/trpc/'.length).split(',') : [];
+  }
+
+  it('empty list for a non-trpc path', () => {
+    expect(parseProcs('/health')).toEqual([]);
+    expect(parseProcs('/foo/bar')).toEqual([]);
+  });
+
+  it('single-proc URL yields a one-element list', () => {
+    expect(parseProcs('/trpc/auth.session')).toEqual(['auth.session']);
+  });
+
+  it('batched URL yields the full comma-separated procedure list', () => {
+    // The attacker-shaped case the MEDIUM found: auth.session batched
+    // with any other proc must still be detected as "auth.session is
+    // in this request".
+    const procs = parseProcs('/trpc/auth.session,tribes.list');
+    expect(procs).toEqual(['auth.session', 'tribes.list']);
+    expect(procs.includes('auth.session')).toBe(true);
+  });
+
+  it('batched URL with auth.session in a non-first slot is still detected', () => {
+    const procs = parseProcs('/trpc/tribes.list,auth.session');
+    expect(procs.includes('auth.session')).toBe(true);
+  });
+});
+
 describe('checkMutationBurstHook (mutation IP-keyed floor)', () => {
   it('allowed at the limit (perMin=10)', async () => {
     const redis = fakeRedis();
