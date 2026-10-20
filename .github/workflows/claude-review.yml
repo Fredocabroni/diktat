@@ -3,7 +3,19 @@ name: claude-review
 on:
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened]
+    # Trigger types (operator cost-cut, 2026-10-20):
+    #   - `labeled` / `ready_for_review`: pick up the ready-for-review
+    #     label addition and the draft→ready transition. Together these
+    #     are the "we're paying for a review now" signals.
+    #   - `synchronize`: a new push on an already-reviewed PR must
+    #     re-run the reviewers (if the label is still present) so a
+    #     fix-up push doesn't merge against a stale verdict.
+    #   - `opened` / `reopened`: the matrix jobs still FIRE here so
+    #     the merge-gate check surface exists from day 1 — the per-job
+    #     label gate below fails fast when the label isn't present, so
+    #     the check turns red (NOT green / NOT skipped) and
+    #     "never-labeled" PRs cannot bypass the gate by starving it.
+    types: [opened, synchronize, reopened, labeled, ready_for_review]
     # Cost cut 1 (Issue #127 follow-up): workflow-level filter, EXPRESSED
     # AS `paths-ignore` instead of `paths`. Round-1 security-reviewer M4
     # flagged the allowlist shape as a blind spot for security-relevant
@@ -236,7 +248,24 @@ jobs:
       cancel-in-progress: ${{ matrix.reviewer.name != 'security-reviewer' }}
     # Gate via repo Variable (Settings → Secrets and variables → Variables):
     #   set ENABLE_CLAUDE_REVIEW=true once ANTHROPIC_API_KEY secret is configured.
-    if: ${{ vars.ENABLE_CLAUDE_REVIEW == 'true' }}
+    #
+    # Extra `labeled`-event guard (2026-10-20 cost cut): GitHub fires
+    # the `labeled` action on EVERY label add, including unrelated ones
+    # (bug, p1, needs-triage, …). Without this guard, adding ANY label
+    # would re-trigger the whole reviewer matrix and burn tokens. The
+    # job runs when:
+    #   - the event is NOT `labeled` (opened / synchronize / reopened /
+    #     ready_for_review — every other type we trigger on), OR
+    #   - the event IS `labeled` AND the added label is specifically
+    #     `ready-for-review` (the one that pays for a review).
+    # The per-matrix-job label-gate STEP below then fails fast if the
+    # PR doesn't currently carry `ready-for-review` — that catches the
+    # case where the label was removed between events, and the case
+    # where the PR was opened without the label.
+    if: >-
+      ${{ vars.ENABLE_CLAUDE_REVIEW == 'true'
+          && (github.event.action != 'labeled'
+              || github.event.label.name == 'ready-for-review') }}
     # Round-1 L2: consolidate the "should this reviewer run?" predicate
     # into a single job-level env var. All four conditional steps below
     # (Install / Compute diff / Run / Post) now read `env.SHOULD_RUN`,
@@ -250,11 +279,35 @@ jobs:
     # a bare boolean context and would run the step unconditionally,
     # including the ANTHROPIC_API_KEY-bearing Run step.
     env:
-      SHOULD_RUN: >-
+      # The in-scope-for-this-reviewer predicate stays as-is.
+      IN_SCOPE: >-
         ${{ (matrix.reviewer.name == 'security-reviewer' && needs.changes.outputs.code == 'true')
             || (matrix.reviewer.name == 'copy-linter' && needs.changes.outputs.copy == 'true')
             || (matrix.reviewer.name == 'addiction-auditor' && needs.changes.outputs.addiction == 'true')
             || (matrix.reviewer.name == 'neutrality-auditor' && needs.changes.outputs.neutrality == 'true') }}
+      # 2026-10-20 operator cost-cut: the AI reviewer only invokes the
+      # agent when the PR carries the `ready-for-review` label. The
+      # label is applied by the operator (or by claude-code locally
+      # after free checks + local reviewers go green), removed before
+      # pushing a fix-up, and re-added once the fix-up is clean.
+      #
+      # Everything downstream reads this via `env.LABEL_READY`. The
+      # Gate step below fails the job red when LABEL_READY is 'false'
+      # (so the merge-gate check NEVER passes silently on an unlabelled
+      # PR); the Run / Post steps additionally gate on it so no
+      # Anthropic token is spent at the fail-fast boundary.
+      LABEL_READY: >-
+        ${{ contains(github.event.pull_request.labels.*.name, 'ready-for-review') }}
+      # Composite "should this reviewer actually invoke the agent?"
+      # Both must be true. String-typed per the round-2 L1 note above.
+      SHOULD_RUN: >-
+        ${{ contains(github.event.pull_request.labels.*.name, 'ready-for-review')
+            && (
+              (matrix.reviewer.name == 'security-reviewer' && needs.changes.outputs.code == 'true')
+              || (matrix.reviewer.name == 'copy-linter' && needs.changes.outputs.copy == 'true')
+              || (matrix.reviewer.name == 'addiction-auditor' && needs.changes.outputs.addiction == 'true')
+              || (matrix.reviewer.name == 'neutrality-auditor' && needs.changes.outputs.neutrality == 'true')
+            ) }}
     strategy:
       # One reviewer timing out must not cancel the other two.
       fail-fast: false
@@ -266,7 +319,7 @@ jobs:
           - name: security-reviewer
             model: claude-sonnet-4-6
             scope: diff-only
-            prompt: "Run the security-reviewer subagent on the PR diff at ./pr.diff. Report findings ONLY on code added or modified in that diff — never on untouched surrounding code, never on files not in the diff. You MAY read other repo files for context (to understand how a change fits with surrounding infrastructure, prior migrations, or callers), but a finding on a file that the diff doesn't touch must be omitted entirely. Output ONLY the review report in markdown. The VERY FIRST non-blank line of your output MUST be a markdown header (e.g. '# Security Review') — do not precede it with any preamble, and do not follow the report with any closing summary, meta-comment, or note about the report itself (e.g. never write 'the report above is complete'). The report IS your entire output. Do NOT edit files, request write or file permissions, run shell commands, or take any tool action of any kind. You are a read-only reviewer: if the diff has defects, name them and recommend the fix IN THE REPORT — never apply or offer to apply changes yourself. A human approves every change."
+            prompt: "Run the security-reviewer subagent on the PR diff at ./pr.diff. Report findings ONLY on code added or modified in that diff — never on untouched surrounding code, never on files not in the diff. You MAY read other repo files for context (to understand how a change fits with surrounding infrastructure, prior migrations, or callers), but a finding on a file that the diff doesn't touch must be omitted entirely. Output ONLY the review report in markdown. The VERY FIRST non-blank line of your output MUST be a markdown header (e.g. '# Security Review') — do not precede it with any preamble. The VERY LAST non-blank line of your output MUST be EXACTLY `VERDICT: PASS` or `VERDICT: BLOCK` (no decoration, no trailing period, nothing after it). Nothing else — no closing summary, no meta-comment, no note about the report itself. The report + final VERDICT line IS your entire output. Do NOT edit files, request write or file permissions, run shell commands, or take any tool action of any kind. You are a read-only reviewer: if the diff has defects, name them and recommend the fix IN THE REPORT — never apply or offer to apply changes yourself. A human approves every change."
           # copy-linter → Haiku 4.5. Checklist-based pattern matching;
           # Haiku is capable at ~5-10× lower per-token cost. Also gated
           # via `changes.outputs.copy` so it only fires when a
@@ -276,7 +329,7 @@ jobs:
           - name: copy-linter
             model: claude-haiku-4-5-20251001
             scope: diff-only
-            prompt: "Run the copy-linter subagent on the PR diff at ./pr.diff. Report findings ONLY on lines added or modified in that diff — never on untouched surrounding code, never on files not in the diff. If a violation is on a line that appears in the diff hunk, include it; if the violation is in a file the diff doesn't touch, omit it entirely. Output ONLY the review report in markdown. The VERY FIRST non-blank line of your output MUST be a markdown header (e.g. '# Copy Review') — do not precede it with any preamble, and do not follow the report with any closing summary, meta-comment, or note about the report itself. The report IS your entire output. Do NOT edit files, request write or file permissions, run shell commands, or take any tool action of any kind. You are a read-only reviewer: if the diff has defects, name them and recommend the fix IN THE REPORT — never apply or offer to apply changes yourself. A human approves every change."
+            prompt: "Run the copy-linter subagent on the PR diff at ./pr.diff. Report findings ONLY on lines added or modified in that diff — never on untouched surrounding code, never on files not in the diff. If a violation is on a line that appears in the diff hunk, include it; if the violation is in a file the diff doesn't touch, omit it entirely. Output ONLY the review report in markdown. The VERY FIRST non-blank line of your output MUST be a markdown header (e.g. '# Copy Review') — do not precede it with any preamble. The VERY LAST non-blank line of your output MUST be EXACTLY `VERDICT: PASS` or `VERDICT: BLOCK` (no decoration, no trailing period, nothing after it). Nothing else — no closing summary, no meta-comment, no note about the report itself. The report + final VERDICT line IS your entire output. Do NOT edit files, request write or file permissions, run shell commands, or take any tool action of any kind. You are a read-only reviewer: if the diff has defects, name them and recommend the fix IN THE REPORT — never apply or offer to apply changes yourself. A human approves every change."
           # addiction-auditor stays on Sonnet 4.6. Its judgment calls
           # (§11 anti-patterns, §12 trust test) are load-bearing when
           # they trigger; it just runs rarely now that it's gated by
@@ -285,7 +338,7 @@ jobs:
           - name: addiction-auditor
             model: claude-sonnet-4-6
             scope: diff-only
-            prompt: "Run the addiction-auditor subagent on engagement-mechanic changes in the PR diff at ./pr.diff. Report findings ONLY on lines added or modified in that diff — never on untouched surrounding code, never on files not in the diff. If a mechanic is defined on a line that appears in the diff hunk, audit it; if the mechanic is in a file the diff doesn't touch, omit it entirely. Output ONLY the review report in markdown. The VERY FIRST non-blank line of your output MUST be a markdown header (e.g. '# Addiction Audit') — do not precede it with any preamble, and do not follow the report with any closing summary, meta-comment, or note about the report itself. The report IS your entire output. Do NOT edit files, request write or file permissions, run shell commands, or take any tool action of any kind. You are a read-only reviewer: if the diff has defects, name them and recommend the fix IN THE REPORT — never apply or offer to apply changes yourself. A human approves every change."
+            prompt: "Run the addiction-auditor subagent on engagement-mechanic changes in the PR diff at ./pr.diff. Report findings ONLY on lines added or modified in that diff — never on untouched surrounding code, never on files not in the diff. If a mechanic is defined on a line that appears in the diff hunk, audit it; if the mechanic is in a file the diff doesn't touch, omit it entirely. Output ONLY the review report in markdown. The VERY FIRST non-blank line of your output MUST be a markdown header (e.g. '# Addiction Audit') — do not precede it with any preamble. The VERY LAST non-blank line of your output MUST be EXACTLY `VERDICT: PASS` or `VERDICT: BLOCK` (no decoration, no trailing period, nothing after it). Nothing else — no closing summary, no meta-comment, no note about the report itself. The report + final VERDICT line IS your entire output. Do NOT edit files, request write or file permissions, run shell commands, or take any tool action of any kind. You are a read-only reviewer: if the diff has defects, name them and recommend the fix IN THE REPORT — never apply or offer to apply changes yourself. A human approves every change."
           # neutrality-auditor on Sonnet 4.6. Guards the fact-check
           # integrity contract — the prompt template, the verdict
           # enum, the retrieval_mode field, and verdict-rendering
@@ -298,8 +351,30 @@ jobs:
           - name: neutrality-auditor
             model: claude-sonnet-4-6
             scope: diff-only
-            prompt: "Run the neutrality-auditor subagent on fact-check integrity-contract changes in the PR diff at ./pr.diff. Report findings ONLY on lines added or modified in that diff — never on untouched surrounding code, never on files not in the diff. You MAY read packages/ai-fabric/src/prompts/fact-check.ts, packages/ai-fabric/src/types.ts, and docs/MASTER_PLAN.md for context on the integrity contract; a finding on a file the diff doesn't touch must be omitted entirely. Output ONLY the review report in markdown. The VERY FIRST non-blank line of your output MUST be a markdown header (e.g. '# Neutrality Audit') — do not precede it with any preamble, and do not follow the report with any closing summary, meta-comment, or note about the report itself. The report IS your entire output. Do NOT edit files, request write or file permissions, run shell commands, or take any tool action of any kind. You are a read-only reviewer: if the diff weakens the integrity contract, name it and recommend the fix IN THE REPORT — never apply or offer to apply changes yourself. A human approves every change."
+            prompt: "Run the neutrality-auditor subagent on fact-check integrity-contract changes in the PR diff at ./pr.diff. Report findings ONLY on lines added or modified in that diff — never on untouched surrounding code, never on files not in the diff. You MAY read packages/ai-fabric/src/prompts/fact-check.ts, packages/ai-fabric/src/types.ts, and docs/MASTER_PLAN.md for context on the integrity contract; a finding on a file the diff doesn't touch must be omitted entirely. Output ONLY the review report in markdown. The VERY FIRST non-blank line of your output MUST be a markdown header (e.g. '# Neutrality Audit') — do not precede it with any preamble. The VERY LAST non-blank line of your output MUST be EXACTLY `VERDICT: PASS` or `VERDICT: BLOCK` (no decoration, no trailing period, nothing after it). Nothing else — no closing summary, no meta-comment, no note about the report itself. The report + final VERDICT line IS your entire output. Do NOT edit files, request write or file permissions, run shell commands, or take any tool action of any kind. You are a read-only reviewer: if the diff weakens the integrity contract, name it and recommend the fix IN THE REPORT — never apply or offer to apply changes yourself. A human approves every change."
     steps:
+      # Label gate (2026-10-20 cost cut). The reviewer check turns
+      # RED when the PR doesn't carry `ready-for-review` AND the diff
+      # is in-scope for this reviewer. "Pending/skipped = not passed"
+      # per the operator contract: a never-labeled PR cannot bypass
+      # the gate because the status check reports a terminal FAIL,
+      # not a never-ran "neutral". When the diff is out of scope for
+      # THIS reviewer (e.g. copy-linter on a migration-only PR), the
+      # gate passes — the review would have been a legitimate empty-
+      # no-scope stamp anyway.
+      - name: Gate — require ready-for-review label
+        if: ${{ env.IN_SCOPE == 'true' && env.LABEL_READY != 'true' }}
+        env:
+          REVIEWER_NAME: ${{ matrix.reviewer.name }}
+        run: |
+          echo "::error::${REVIEWER_NAME}: this PR must carry the 'ready-for-review' label to run the AI reviewer. Add it when free checks (lint/typecheck/test) + local reviewers are green."
+          {
+            echo "### ${REVIEWER_NAME}: label gate"
+            echo ""
+            echo "PR does not carry the \`ready-for-review\` label. Add the label to run this reviewer; the merge-gate check will stay RED until the label is present AND the reviewer returns PASS."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+
       # actions/checkout@v4.2.2 — SHA-pinned. The agent runs against
       # whatever ends up in the working tree; a moved `v4` tag could
       # substitute a modified diff and shape what the reviewer sees.

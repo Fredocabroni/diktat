@@ -71,10 +71,19 @@
 #       horizontal-rule dividers before the header (observed on the
 #       PR #46 copy-linter body).
 #
-# Verdict classification — three channels, each tried in order,
+# Verdict classification — four channels, each tried in order,
 # BLOCK beats PASS beats ambiguous. NEEDS-USER-DECISION is in the BLOCK
 # family in every channel (it was in the PASS family until 2026-10-14,
 # which let a "needs a human decision" verdict merge on a green check):
+#
+#   (0) Canonical FINAL VERDICT line (2026-10-20 operator contract):
+#         The LAST non-blank line of the review is EXACTLY the string
+#         `VERDICT: PASS` or `VERDICT: BLOCK`. Case-sensitive, no
+#         decoration, no trailing period. This is the format every
+#         reviewer-prompt now enforces. Highest priority — when the
+#         canonical line is present, channels (A/B/C) are not
+#         consulted (an in-body "verdict: approve" for a per-mechanic
+#         rollup cannot overrule the overall VERDICT line).
 #
 #   (A) Explicit single-line verdict:
 #         `[**##_]*(Overall |Summary |Final )?Verdict[: ]*[**_]*(BLOCK|PASS|APPROVE|NEEDS-USER-DECISION)`
@@ -248,11 +257,34 @@ fi
 # ----------------------------------------------------------------------
 # Verdict classification. BLOCK beats PASS-family beats ambiguous.
 #
-# Each channel is a boolean flag; we evaluate all three for each
-# verdict family and then pick the highest-severity outcome. This keeps
-# the "BLOCK wins over PASS" rule explicit instead of relying on
-# scan-order coincidence.
+# Channel (0) is checked FIRST and short-circuits: when the canonical
+# `VERDICT: PASS|BLOCK` line is the trailing non-blank line, that IS
+# the overall verdict, period. Channels A/B/C are the dialect
+# fallbacks that cover reviewer-agent bodies written before (or
+# occasionally still not conforming to) the canonical contract.
 # ----------------------------------------------------------------------
+
+# The trailing non-blank line, UNSTRIPPED (channel 0 is exact-match
+# including spacing). All other channels operate on normalized forms.
+trailing_line_exact=$(awk 'NF {last=$0} END {print last}' "$file")
+
+# --- Channel (0): canonical FINAL VERDICT line -------------------------
+# Exact-match. `VERDICT: PASS` or `VERDICT: BLOCK` as the trailing
+# non-blank line. No decoration tolerated — the operator contract
+# instructs reviewers to emit this LITERAL string. A reviewer that
+# wraps it in bold, decorates it with trailing punctuation, or
+# otherwise drifts STILL has a chance via the dialect channels below;
+# but a canonical emission here is terminal.
+case "$trailing_line_exact" in
+  "VERDICT: PASS")
+    echo "ok"
+    exit 0
+    ;;
+  "VERDICT: BLOCK")
+    echo "ok_block"
+    exit 0
+    ;;
+esac
 
 # The tail body (non-blank lines, last TAIL_SCAN_LINES of them) is the
 # input to channels (A) and (B). Non-blank reduction first so blank
