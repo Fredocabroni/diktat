@@ -59,6 +59,11 @@ export interface DropCardProps {
    *  `feed.list` server state on first render + overridden with the
    *  freshly-tapped stance after a successful mutation. (P2.a.) */
   readonly selected?: SelectedStance;
+  /** No-Drop-day replay mode (P4 PR B). Hides the stance grid, the
+   *  stance-confirmation pill and the Battle footer entirely so the
+   *  card renders as a non-interactive receipt of yesterday's Drop.
+   *  `onStance` is never called in this mode. */
+  readonly readOnly?: boolean;
 }
 
 const CATEGORY_LABELS: Record<string, string> = {
@@ -118,6 +123,7 @@ export function DropCard({
   disabled,
   banner,
   selected = null,
+  readOnly = false,
 }: DropCardProps): React.JSX.Element {
   const source = parsePrimaryUrl(topic.primarySourceUrl);
   const categoryLabel = topic.category ? (CATEGORY_LABELS[topic.category] ?? topic.category) : null;
@@ -173,34 +179,36 @@ export function DropCard({
         </a>
       ) : null}
 
-      <div role="group" aria-label="Stance" className="mt-1 grid grid-cols-3 gap-3">
-        <StanceButton
-          label="Disagree"
-          tone="danger"
-          disabled={disabled}
-          selected={selected === 'disagree'}
-          dimmed={selected !== null && selected !== 'disagree'}
-          onClick={() => onStance('disagree')}
-        />
-        <StanceButton
-          label="Skip"
-          tone="neutral"
-          disabled={disabled}
-          selected={false}
-          dimmed={selected !== null}
-          onClick={() => onStance('skip')}
-        />
-        <StanceButton
-          label="Agree"
-          tone="success"
-          disabled={disabled}
-          selected={selected === 'agree'}
-          dimmed={selected !== null && selected !== 'agree'}
-          onClick={() => onStance('agree')}
-        />
-      </div>
+      {readOnly ? null : (
+        <div role="group" aria-label="Stance" className="mt-1 grid grid-cols-3 gap-3">
+          <StanceButton
+            label="Disagree"
+            tone="danger"
+            disabled={disabled}
+            selected={selected === 'disagree'}
+            dimmed={selected !== null && selected !== 'disagree'}
+            onClick={() => onStance('disagree')}
+          />
+          <StanceButton
+            label="Skip"
+            tone="neutral"
+            disabled={disabled}
+            selected={false}
+            dimmed={selected !== null}
+            onClick={() => onStance('skip')}
+          />
+          <StanceButton
+            label="Agree"
+            tone="success"
+            disabled={disabled}
+            selected={selected === 'agree'}
+            dimmed={selected !== null && selected !== 'agree'}
+            onClick={() => onStance('agree')}
+          />
+        </div>
+      )}
 
-      {selected !== null ? (
+      {!readOnly && selected !== null ? (
         <p
           role="status"
           aria-live="polite"
@@ -212,18 +220,22 @@ export function DropCard({
         </p>
       ) : null}
 
-      <footer className="flex items-center justify-between gap-3 pt-1">
+      {readOnly ? (
         <WhySourcesDialog />
-        <button
-          type="button"
-          disabled
-          aria-disabled
-          data-component="BattleThisCta.disabled"
-          className="cursor-not-allowed rounded-xl border border-ink-300 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-text-tertiary"
-        >
-          Battle · locked
-        </button>
-      </footer>
+      ) : (
+        <footer className="flex items-center justify-between gap-3 pt-1">
+          <WhySourcesDialog />
+          <button
+            type="button"
+            disabled
+            aria-disabled
+            data-component="BattleThisCta.disabled"
+            className="cursor-not-allowed rounded-xl border border-ink-300 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-text-tertiary"
+          >
+            Battle · locked
+          </button>
+        </footer>
+      )}
     </article>
   );
 }
