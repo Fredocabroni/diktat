@@ -8,9 +8,14 @@ import { publicProcedure, router } from '../trpc.js';
 
 export const authRouter = router({
   session: publicProcedure
-    // M5 — 600/min per IP /24. Hit on every page-load by every
-    // client; CGNAT-tolerant ceiling.
-    .use(publicLimit('auth.session', { perMin: 600 }))
+    // CLAUDE.md pre-launch TODO: 60 req/min on /trpc/auth.session.
+    // The Fastify-layer `checkAuthSessionHook` applies the same cap
+    // keyed strictly on IP /24 BEFORE context is built (covers the
+    // pre-sign-in polling case). This per-procedure band keys hybrid
+    // IP+userId via `publicLimit` so authed callers get a per-user
+    // counter (co-NAT isolation) above the floor. Both bands are
+    // 60/min; the stricter of the two fires first.
+    .use(publicLimit('auth.session', { perMin: 60 }))
     .query(async ({ ctx }) => {
       if (!ctx.userId) return null;
 

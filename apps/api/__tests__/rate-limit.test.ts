@@ -7,6 +7,8 @@ import {
   aiSpendLimit,
   checkAndIncrementCombined,
   checkAndIncrementSingle,
+  checkAuthSessionHook,
+  checkMutationBurstHook,
   mutationLimit,
   publicLimit,
   queryLimit,
@@ -620,5 +622,164 @@ describe('PROCEDURE_RE allowlist — queryLimit / mutationLimit factory guard', 
     it('accepts the live `factCheck.enqueue` call site', () => {
       expect(() => aiSpendLimit('factCheck.enqueue', { daily: 20, burst: 3 })).not.toThrow();
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fastify-layer helpers (CLAUDE.md pre-launch bands)
+//
+// Both helpers mirror checkGlobalOuterHook: IP-keyed, fail-open on
+// Redis down, Retry-After threaded via SingleGateResult.retryAfterSec.
+// The hooks run at the Fastify onRequest layer BEFORE tRPC builds the
+// per-request context — strictly IP-keyed by design (the per-procedure
+// middleware does the userId tightening above the floor).
+// ---------------------------------------------------------------------------
+
+describe('checkAuthSessionHook (auth-session IP-keyed floor)', () => {
+  it('allowed at the limit (perMin=60)', async () => {
+    const redis = fakeRedis();
+    redis.evalReturn = 60;
+    const r = await checkAuthSessionHook({
+      redis: redis as unknown as RedisClient,
+      ipCidr: '198.51.100.0/24',
+      perMin: 60,
+    });
+    expect(r.allowed).toBe(true);
+    expect(r.redisDown).toBe(false);
+  });
+
+  it('throws TOO_MANY_REQUESTS shape at limit+1', async () => {
+    const redis = fakeRedis();
+    redis.evalReturn = 61;
+    const r = await checkAuthSessionHook({
+      redis: redis as unknown as RedisClient,
+      ipCidr: '198.51.100.0/24',
+      perMin: 60,
+    });
+    expect(r.allowed).toBe(false);
+    expect(r.retryAfterSec).toBeGreaterThan(0);
+  });
+
+  it('fail-OPEN on Redis throw', async () => {
+    const redis = fakeRedis();
+    redis.eval = async () => {
+      throw new Error('upstash timeout');
+    };
+    const r = await checkAuthSessionHook({
+      redis: redis as unknown as RedisClient,
+      ipCidr: '198.51.100.0/24',
+      perMin: 60,
+    });
+    expect(r.allowed).toBe(true);
+    expect(r.redisDown).toBe(true);
+  });
+
+  it('uses a dedicated counter namespace (__auth_session__), separate from __global__ and __mutation__', async () => {
+    const redis = fakeRedis();
+    redis.evalReturn = 1;
+    await checkAuthSessionHook({
+      redis: redis as unknown as RedisClient,
+      ipCidr: '203.0.113.0/24',
+      perMin: 60,
+    });
+    expect(redis.evalCalls.length).toBe(1);
+    const key = redis.evalCalls[0]!.keys[0]!;
+    expect(key).toMatch(/^rl:pub:__auth_session__:ip:203\.0\.113\.0\/24:\d+$/);
+    expect(key).not.toContain('__global__');
+    expect(key).not.toContain('__mutation__');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Batch-bypass guard — CI security-reviewer PR #276 MEDIUM
+//
+// tRPC fastify adapter batches procedures as `/trpc/proc1,proc2`.
+// The Fastify band checks must inspect the comma-separated procedure
+// list, not an exact-equality string match, or a batched request
+// silently bypasses the IP-keyed floor. This regression guard pins
+// the detection logic that server.ts uses.
+// ---------------------------------------------------------------------------
+
+describe('tRPC batch URL parsing (regression guard for CI #276 MEDIUM)', () => {
+  function parseProcs(pathOnly: string): string[] {
+    return pathOnly.startsWith('/trpc/') ? pathOnly.slice('/trpc/'.length).split(',') : [];
+  }
+
+  it('empty list for a non-trpc path', () => {
+    expect(parseProcs('/health')).toEqual([]);
+    expect(parseProcs('/foo/bar')).toEqual([]);
+  });
+
+  it('single-proc URL yields a one-element list', () => {
+    expect(parseProcs('/trpc/auth.session')).toEqual(['auth.session']);
+  });
+
+  it('batched URL yields the full comma-separated procedure list', () => {
+    // The attacker-shaped case the MEDIUM found: auth.session batched
+    // with any other proc must still be detected as "auth.session is
+    // in this request".
+    const procs = parseProcs('/trpc/auth.session,tribes.list');
+    expect(procs).toEqual(['auth.session', 'tribes.list']);
+    expect(procs.includes('auth.session')).toBe(true);
+  });
+
+  it('batched URL with auth.session in a non-first slot is still detected', () => {
+    const procs = parseProcs('/trpc/tribes.list,auth.session');
+    expect(procs.includes('auth.session')).toBe(true);
+  });
+});
+
+describe('checkMutationBurstHook (mutation IP-keyed floor)', () => {
+  it('allowed at the limit (perMin=10)', async () => {
+    const redis = fakeRedis();
+    redis.evalReturn = 10;
+    const r = await checkMutationBurstHook({
+      redis: redis as unknown as RedisClient,
+      ipCidr: '198.51.100.0/24',
+      perMin: 10,
+    });
+    expect(r.allowed).toBe(true);
+    expect(r.redisDown).toBe(false);
+  });
+
+  it('throws TOO_MANY_REQUESTS shape at limit+1', async () => {
+    const redis = fakeRedis();
+    redis.evalReturn = 11;
+    const r = await checkMutationBurstHook({
+      redis: redis as unknown as RedisClient,
+      ipCidr: '198.51.100.0/24',
+      perMin: 10,
+    });
+    expect(r.allowed).toBe(false);
+    expect(r.retryAfterSec).toBeGreaterThan(0);
+  });
+
+  it('fail-OPEN on Redis throw', async () => {
+    const redis = fakeRedis();
+    redis.eval = async () => {
+      throw new Error('upstash timeout');
+    };
+    const r = await checkMutationBurstHook({
+      redis: redis as unknown as RedisClient,
+      ipCidr: '198.51.100.0/24',
+      perMin: 10,
+    });
+    expect(r.allowed).toBe(true);
+    expect(r.redisDown).toBe(true);
+  });
+
+  it('uses a dedicated counter namespace (__mutation__), separate from __global__ and __auth_session__', async () => {
+    const redis = fakeRedis();
+    redis.evalReturn = 1;
+    await checkMutationBurstHook({
+      redis: redis as unknown as RedisClient,
+      ipCidr: '203.0.113.0/24',
+      perMin: 10,
+    });
+    expect(redis.evalCalls.length).toBe(1);
+    const key = redis.evalCalls[0]!.keys[0]!;
+    expect(key).toMatch(/^rl:pub:__mutation__:ip:203\.0\.113\.0\/24:\d+$/);
+    expect(key).not.toContain('__global__');
+    expect(key).not.toContain('__auth_session__');
   });
 });

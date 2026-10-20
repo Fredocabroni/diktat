@@ -654,6 +654,90 @@ export async function checkGlobalOuterHook(opts: {
   return result;
 }
 
+/**
+ * Mutation-burst Fastify hook. Caps POST /trpc/* requests to
+ * MUTATION_BURST_PER_MIN (10/min) keyed on the normalised IP /24.
+ * CLAUDE.md pre-launch TODO: "10 mutations/min keyed on ctx.userId
+ * (fallback IP)". The Fastify layer runs before tRPC builds context,
+ * so `ctx.userId` is not yet available at this hook — IP-keyed IS the
+ * fallback-IP branch of the user's spec; the per-procedure
+ * `mutationLimit` middleware tightens by userId above this floor.
+ *
+ * Separate counter namespace (`__mutation__`) so this budget never
+ * shares a Redis key with the global outer-hook (`__global__`) or the
+ * auth-session cap (`__auth_session__`).
+ */
+export async function checkMutationBurstHook(opts: {
+  redis: RedisClient;
+  ipCidr: string;
+  perMin: number;
+  nowMs?: number;
+}): Promise<SingleGateResult> {
+  const now = opts.nowMs ?? Date.now();
+  // Tier-local window constant so a future DDoS-window tuning on
+  // GLOBAL_WINDOW_SEC does not silently widen the mutation burst
+  // window. (CI security-reviewer PR #276 LOW.)
+  const key = publicKey('__mutation__', opts.ipCidr, MUTATION_WINDOW_SEC, now);
+  const result = await checkAndIncrementSingle(
+    opts.redis,
+    key,
+    opts.perMin,
+    MUTATION_WINDOW_SEC,
+    /* failOpen */ true,
+  );
+  if (result.redisDown) {
+    console.warn(
+      JSON.stringify({
+        event: 'rate_limit.redis_down',
+        tier: 'mutation_burst',
+        posture: 'fail-open',
+      }),
+    );
+  }
+  return result;
+}
+
+/**
+ * Auth-session Fastify hook. Caps /trpc/auth.session requests to
+ * AUTH_SESSION_PER_MIN (60/min) keyed on the normalised IP /24.
+ * CLAUDE.md pre-launch TODO: "60 req/min per IP on /trpc/auth.session".
+ * The per-procedure `publicLimit` middleware DOES hybrid-key (userId
+ * when authed, IP when anon); this Fastify-level check runs BEFORE
+ * context is built and is strictly IP-keyed to cover the pre-sign-in
+ * polling case specifically.
+ *
+ * Separate counter namespace (`__auth_session__`).
+ */
+export async function checkAuthSessionHook(opts: {
+  redis: RedisClient;
+  ipCidr: string;
+  perMin: number;
+  nowMs?: number;
+}): Promise<SingleGateResult> {
+  const now = opts.nowMs ?? Date.now();
+  // Tier-local window constant (same shape as publicLimit uses) so
+  // a future DDoS-window tuning on GLOBAL_WINDOW_SEC does not silently
+  // widen the auth-session window. (CI security-reviewer PR #276 LOW.)
+  const key = publicKey('__auth_session__', opts.ipCidr, PUBLIC_WINDOW_SEC, now);
+  const result = await checkAndIncrementSingle(
+    opts.redis,
+    key,
+    opts.perMin,
+    PUBLIC_WINDOW_SEC,
+    /* failOpen */ true,
+  );
+  if (result.redisDown) {
+    console.warn(
+      JSON.stringify({
+        event: 'rate_limit.redis_down',
+        tier: 'auth_session',
+        posture: 'fail-open',
+      }),
+    );
+  }
+  return result;
+}
+
 // The previous `export const __internals = {...}` lived here. It moved
 // to `rate-limit.internal.ts` to keep the Lua scripts and key builders
 // out of `rate-limit.ts`'s public surface (PR #56 r2 security-reviewer
