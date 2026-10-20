@@ -18,6 +18,7 @@
 // per local day (see migration 20261011000000). We never touch
 // `opinion_shifts` or `take5_sessions` directly from the router.
 
+import type { Database } from '@diktat/db';
 import { TRPCError } from '@trpc/server';
 import { z } from 'zod';
 
@@ -25,6 +26,36 @@ import { mutationLimit, queryLimit } from '../rate-limit.js';
 import { protectedProcedure, router } from '../trpc.js';
 
 const positionSchema = z.number().int().min(-2).max(2);
+
+// Runtime Zod guard against the RPC return shape generated into
+// `Database['public']['Functions']['record_take5_shift']['Returns'][0]`.
+// A schema drift (RPC return column added / renamed / retyped) causes
+// `safeParse` to fail here instead of silently returning `undefined`
+// through the typed cast. Matches the security-reviewer LOW-1 on #272.
+const recordTake5ShiftRowSchema = z.object({
+  shift_id: z.string().uuid(),
+  topic_id: z.string().uuid(),
+  et_day: z.string(),
+  cards_today: z.number().int(),
+});
+type RecordTake5ShiftRow = Database['public']['Functions']['record_take5_shift']['Returns'][number];
+// Compile-time wedge against generated-type / Zod-schema drift. The
+// assignment catches, at typecheck time:
+//   - generated gains a required field (RPC adds a column) without a
+//     Zod update → inferred shape lacks it → assignment fails;
+//   - Zod drops a shared field that generated still has → same shape;
+//   - any mismatch in a shared field's declared type.
+// It does NOT catch:
+//   - Zod gains a required field without a generated update, or
+//   - generated loses a shared field without a Zod update.
+// Both of those remaining drift directions are caught at runtime by
+// `safeParse` below (rpc_bad_shape → INTERNAL_SERVER_ERROR), so the
+// gate is still fail-closed either way.
+// Zero runtime cost.
+const _assertSchemaMatchesGeneratedType: RecordTake5ShiftRow = {} as z.infer<
+  typeof recordTake5ShiftRowSchema
+>;
+void _assertSchemaMatchesGeneratedType;
 
 // Mirror the fields the Drop card renders. Kept narrow so the Take 5
 // payload is small (we fetch up to 5 rows + their stance join).
@@ -185,15 +216,20 @@ export const take5Router = router({
 
       // The RPC returns a setof — supabase-js materialises it as an
       // array. We only ever return one row per call (one shift ↔
-      // one take5_sessions row).
-      const row = Array.isArray(data) ? data[0] : data;
-      if (!row) {
+      // one take5_sessions row). The row shape is pinned by the Zod
+      // schema above; a drift in the generated types or a null row
+      // throws INTERNAL_SERVER_ERROR instead of a silent `undefined`.
+      // (security-reviewer PR #272 LOW-1.)
+      const rawRow: unknown = Array.isArray(data) ? data[0] : data;
+      const parsed = recordTake5ShiftRowSchema.safeParse(rawRow);
+      if (!parsed.success) {
         throw new TRPCError({
           code: 'INTERNAL_SERVER_ERROR',
           message: 'Failed to record Take 5 stance.',
-          cause: new Error('rpc_null_result'),
+          cause: new Error(rawRow == null ? 'rpc_null_result' : 'rpc_bad_shape'),
         });
       }
+      const row = parsed.data;
 
       return {
         shiftId: row.shift_id,

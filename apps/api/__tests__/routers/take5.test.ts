@@ -277,7 +277,30 @@ describe('take5Router.recordShift', () => {
     const caller = appRouter.createCaller(makeCtx({ db }));
     await expect(
       caller.take5.recordShift({ topicId: TOPIC_A, afterPosition: 1 }),
-    ).rejects.toMatchObject({ code: 'INTERNAL_SERVER_ERROR' });
+    ).rejects.toMatchObject({
+      code: 'INTERNAL_SERVER_ERROR',
+      cause: expect.objectContaining({ message: 'rpc_null_result' }),
+    });
+  });
+
+  it('throws INTERNAL_SERVER_ERROR with cause rpc_bad_shape when the RPC row drifts from the generated type', async () => {
+    // Row is non-null but shift_id is missing (schema drift). The
+    // Zod safeParse guard turns this into a controlled failure
+    // instead of silently returning `undefined` through the typed
+    // cast. (security-reviewer PR #272 LOW-1 follow-up.)
+    const { db } = rpcFake([
+      {
+        data: [{ topic_id: TOPIC_A, et_day: '2026-01-01', cards_today: 1 }],
+        error: null,
+      },
+    ]);
+    const caller = appRouter.createCaller(makeCtx({ db }));
+    await expect(
+      caller.take5.recordShift({ topicId: TOPIC_A, afterPosition: 1 }),
+    ).rejects.toMatchObject({
+      code: 'INTERNAL_SERVER_ERROR',
+      cause: expect.objectContaining({ message: 'rpc_bad_shape' }),
+    });
   });
 
   it('rejects a non-UUID topic id at the input schema', async () => {
