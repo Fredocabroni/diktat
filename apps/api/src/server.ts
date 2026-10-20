@@ -9,7 +9,12 @@ import { buildContext, getOrBuildRedis, normalizeIpToCidr, type RedisClient } fr
 import { decideCorsOrigin } from './cors-origin.js';
 import { loadEnv } from './env.js';
 import { buildOuterHookBlockedBody, OUTER_HOOK_WINDOW_SEC } from './outer-hook.js';
-import { checkGlobalOuterHook, extractRetryAfterSec } from './rate-limit.js';
+import {
+  checkAuthSessionHook,
+  checkGlobalOuterHook,
+  checkMutationBurstHook,
+  extractRetryAfterSec,
+} from './rate-limit.js';
 import { appRouter, type AppRouter } from './routers/index.js';
 import { checkWebOrigins } from './web-origins-gate.js';
 
@@ -121,10 +126,33 @@ if (jwtIssuerFailure) {
 // is stateless). PR #56 r1 security-reviewer L-redis-dup.
 const outerRedis = getOrBuildRedis(env) as unknown as RedisClient;
 
-// Outer-hook global ceiling. M5 design's anti-DDoS floor; tuned to a
-// generous human-burst per /24 NAT block. Tighten in M6 if real abuse
-// shows up post-launch.
-const OUTER_HOOK_PER_MIN = 1_200;
+// Outer-hook global ceiling. CLAUDE.md pre-launch TODO specifies
+// 600/min as the global anti-DDoS floor; tightened from the prior
+// 1200/min to the stated band. Cross-instance via Upstash REST (the
+// same `outerRedis` the per-request tRPC contexts use). The co-NAT
+// hybrid-keying posture lives one layer down in `publicLimit`; this
+// IP-only ceiling is defense-in-depth above it.
+const OUTER_HOOK_PER_MIN = 600;
+
+// Mutation-burst global cap. CLAUDE.md pre-launch TODO: "10 mutations/
+// min keyed on ctx.userId (fallback IP)". The Fastify layer runs BEFORE
+// the tRPC plugin builds the per-request context, so there is no
+// ctx.userId here — the IP /24 (`request.ip` normalised through
+// `normalizeIpToCidr`) IS the fallback-IP branch of the user's spec.
+// The per-procedure `mutationLimit` middleware (rate-limit.ts) still
+// keys on `ctx.userId` for the authed tightening above this floor.
+// Separate counter namespace (`__mutation__`) so a user's 60/min on
+// /trpc/auth.session (public tier) and this 10/min mutation burst
+// never share a key.
+const MUTATION_BURST_PER_MIN = 10;
+
+// Auth-session global cap. CLAUDE.md pre-launch TODO: "60 req/min per
+// IP on /trpc/auth.session". The per-procedure `publicLimit` in
+// `routers/auth.ts` DOES hybrid-key (userId when authed, IP /24 when
+// anon) — this Fastify-layer check runs before context is built and
+// is strictly IP-keyed so it covers the pre-sign-in polling case.
+// Separate counter namespace (`__auth_session__`).
+const AUTH_SESSION_PER_MIN = 60;
 // OUTER_HOOK_WINDOW_SEC moved to ./outer-hook.ts so the body builder
 // derives `window: '${N}s'` from the same single source of truth that
 // `responseMeta`'s Retry-After fallback below uses. PR #67 round-1
@@ -262,22 +290,60 @@ app.addHook('onRequest', async (request, reply) => {
     // RETURN the reply: with no return, an async onRequest hook can
     // fall through to the route handler after invoking `.send(...)`,
     // which then attempts a second `.send` and Fastify throws
-    // FST_ERR_REP_ALREADY_SENT. Returning the reply object
-    // short-circuits the request lifecycle deterministically.
-    // RFC 6585 §4: 429 SHOULD include Retry-After. Use the TTL from
-    // the checkGlobalOuterHook result (now threaded through the
-    // single-gate helper) — accurate to the second instead of the
-    // round window value.
-    // Body shape lives in `outer-hook.ts` so it's unit-testable without
-    // booting the Fastify app. The `limit` field was deliberately
-    // dropped — it disclosed the numeric ceiling (1200/min) and let an
-    // adversary calibrate just under it. RFC 6585 §4: Retry-After is
-    // sufficient; the limit value adds no signal a legitimate client
-    // needs. PR #65 round-3 reviewer MEDIUM-3.
+    // FST_ERR_REP_ALREADY_SENT.
+    //
+    // Body shape in `outer-hook.ts` is unit-testable without booting
+    // Fastify. The numeric ceiling is deliberately NOT disclosed (RFC
+    // 6585 §4: Retry-After alone is sufficient; disclosing the limit
+    // lets an adversary calibrate requests to stay just under it).
     return reply
       .code(429)
       .header('Retry-After', String(result.retryAfterSec))
       .send(buildOuterHookBlockedBody());
+  }
+
+  // Pre-launch band 2 — auth-session cap (60/min per IP /24).
+  // CLAUDE.md pre-launch TODO. The per-procedure `publicLimit` in
+  // routers/auth.ts further tightens via hybrid IP+userId keying once
+  // the tRPC context is built; this floor runs before context so it
+  // covers the pre-sign-in polling case.
+  if (pathOnly === '/trpc/auth.session') {
+    const authResult = await checkAuthSessionHook({
+      redis: outerRedis,
+      ipCidr,
+      perMin: AUTH_SESSION_PER_MIN,
+    });
+    if (!authResult.allowed) {
+      return reply
+        .code(429)
+        .header('Retry-After', String(authResult.retryAfterSec))
+        .send(buildOuterHookBlockedBody());
+    }
+  }
+
+  // Pre-launch band 3 — mutation burst cap (10/min per IP /24).
+  // CLAUDE.md pre-launch TODO. tRPC fastify adapter routes mutations
+  // over POST and queries over GET, so `method === 'POST' && path
+  // startsWith '/trpc/'` is the reliable mutation-only discriminator
+  // at the Fastify layer. The per-procedure `mutationLimit` middleware
+  // tightens by `ctx.userId` above this floor once the context is
+  // built. The `clientKey` idempotency path in individual mutation
+  // routers (feed.recordShift, take5.recordShift, …) still applies
+  // after a 429 here, so a resumed client reusing the same key will
+  // land on the server's 23505 idempotency branch when the budget
+  // clears.
+  if (request.method === 'POST' && pathOnly.startsWith('/trpc/')) {
+    const mutResult = await checkMutationBurstHook({
+      redis: outerRedis,
+      ipCidr,
+      perMin: MUTATION_BURST_PER_MIN,
+    });
+    if (!mutResult.allowed) {
+      return reply
+        .code(429)
+        .header('Retry-After', String(mutResult.retryAfterSec))
+        .send(buildOuterHookBlockedBody());
+    }
   }
 });
 

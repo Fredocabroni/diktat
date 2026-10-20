@@ -7,6 +7,8 @@ import {
   aiSpendLimit,
   checkAndIncrementCombined,
   checkAndIncrementSingle,
+  checkAuthSessionHook,
+  checkMutationBurstHook,
   mutationLimit,
   publicLimit,
   queryLimit,
@@ -620,5 +622,125 @@ describe('PROCEDURE_RE allowlist — queryLimit / mutationLimit factory guard', 
     it('accepts the live `factCheck.enqueue` call site', () => {
       expect(() => aiSpendLimit('factCheck.enqueue', { daily: 20, burst: 3 })).not.toThrow();
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fastify-layer helpers (CLAUDE.md pre-launch bands)
+//
+// Both helpers mirror checkGlobalOuterHook: IP-keyed, fail-open on
+// Redis down, Retry-After threaded via SingleGateResult.retryAfterSec.
+// The hooks run at the Fastify onRequest layer BEFORE tRPC builds the
+// per-request context — strictly IP-keyed by design (the per-procedure
+// middleware does the userId tightening above the floor).
+// ---------------------------------------------------------------------------
+
+describe('checkAuthSessionHook (auth-session IP-keyed floor)', () => {
+  it('allowed at the limit (perMin=60)', async () => {
+    const redis = fakeRedis();
+    redis.evalReturn = 60;
+    const r = await checkAuthSessionHook({
+      redis: redis as unknown as RedisClient,
+      ipCidr: '198.51.100.0/24',
+      perMin: 60,
+    });
+    expect(r.allowed).toBe(true);
+    expect(r.redisDown).toBe(false);
+  });
+
+  it('throws TOO_MANY_REQUESTS shape at limit+1', async () => {
+    const redis = fakeRedis();
+    redis.evalReturn = 61;
+    const r = await checkAuthSessionHook({
+      redis: redis as unknown as RedisClient,
+      ipCidr: '198.51.100.0/24',
+      perMin: 60,
+    });
+    expect(r.allowed).toBe(false);
+    expect(r.retryAfterSec).toBeGreaterThan(0);
+  });
+
+  it('fail-OPEN on Redis throw', async () => {
+    const redis = fakeRedis();
+    redis.eval = async () => {
+      throw new Error('upstash timeout');
+    };
+    const r = await checkAuthSessionHook({
+      redis: redis as unknown as RedisClient,
+      ipCidr: '198.51.100.0/24',
+      perMin: 60,
+    });
+    expect(r.allowed).toBe(true);
+    expect(r.redisDown).toBe(true);
+  });
+
+  it('uses a dedicated counter namespace (__auth_session__), separate from __global__ and __mutation__', async () => {
+    const redis = fakeRedis();
+    redis.evalReturn = 1;
+    await checkAuthSessionHook({
+      redis: redis as unknown as RedisClient,
+      ipCidr: '203.0.113.0/24',
+      perMin: 60,
+    });
+    expect(redis.evalCalls.length).toBe(1);
+    const key = redis.evalCalls[0]!.keys[0]!;
+    expect(key).toMatch(/^rl:pub:__auth_session__:ip:203\.0\.113\.0\/24:\d+$/);
+    expect(key).not.toContain('__global__');
+    expect(key).not.toContain('__mutation__');
+  });
+});
+
+describe('checkMutationBurstHook (mutation IP-keyed floor)', () => {
+  it('allowed at the limit (perMin=10)', async () => {
+    const redis = fakeRedis();
+    redis.evalReturn = 10;
+    const r = await checkMutationBurstHook({
+      redis: redis as unknown as RedisClient,
+      ipCidr: '198.51.100.0/24',
+      perMin: 10,
+    });
+    expect(r.allowed).toBe(true);
+    expect(r.redisDown).toBe(false);
+  });
+
+  it('throws TOO_MANY_REQUESTS shape at limit+1', async () => {
+    const redis = fakeRedis();
+    redis.evalReturn = 11;
+    const r = await checkMutationBurstHook({
+      redis: redis as unknown as RedisClient,
+      ipCidr: '198.51.100.0/24',
+      perMin: 10,
+    });
+    expect(r.allowed).toBe(false);
+    expect(r.retryAfterSec).toBeGreaterThan(0);
+  });
+
+  it('fail-OPEN on Redis throw', async () => {
+    const redis = fakeRedis();
+    redis.eval = async () => {
+      throw new Error('upstash timeout');
+    };
+    const r = await checkMutationBurstHook({
+      redis: redis as unknown as RedisClient,
+      ipCidr: '198.51.100.0/24',
+      perMin: 10,
+    });
+    expect(r.allowed).toBe(true);
+    expect(r.redisDown).toBe(true);
+  });
+
+  it('uses a dedicated counter namespace (__mutation__), separate from __global__ and __auth_session__', async () => {
+    const redis = fakeRedis();
+    redis.evalReturn = 1;
+    await checkMutationBurstHook({
+      redis: redis as unknown as RedisClient,
+      ipCidr: '203.0.113.0/24',
+      perMin: 10,
+    });
+    expect(redis.evalCalls.length).toBe(1);
+    const key = redis.evalCalls[0]!.keys[0]!;
+    expect(key).toMatch(/^rl:pub:__mutation__:ip:203\.0\.113\.0\/24:\d+$/);
+    expect(key).not.toContain('__global__');
+    expect(key).not.toContain('__auth_session__');
   });
 });
