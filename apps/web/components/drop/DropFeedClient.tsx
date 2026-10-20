@@ -19,6 +19,7 @@
 
 'use client';
 
+import Link from 'next/link';
 import { useCallback, useRef, useState } from 'react';
 
 import { trpc } from '../../lib/trpc';
@@ -54,7 +55,11 @@ type DropState =
   | { kind: 'error' }
   | { kind: 'empty' }
   | { kind: 'live'; topic: DropTopic }
-  | { kind: 'pre_drop'; topic: DropTopic };
+  | { kind: 'pre_drop'; topic: DropTopic }
+  /** No Drop was published for today's ET date — the heat score skipped
+   *  the day. The most-recent past Drop is still rendered, read-only,
+   *  below an honest banner and a Take 5 CTA. P4 PR B. */
+  | { kind: 'no_drop_today'; topic: DropTopic };
 
 function classify(topic: DropTopic | undefined, now: Date): DropState {
   if (!topic) return { kind: 'empty' };
@@ -66,7 +71,8 @@ function classify(topic: DropTopic | undefined, now: Date): DropState {
     return { kind: 'pre_drop', topic };
   }
   // The drop_at has passed. If it belongs to today's ET calendar day,
-  // it's live; otherwise it's yesterday's (or earlier) fallback.
+  // it's live; otherwise today's slot is empty and we're looking at a
+  // past Drop (yesterday's or earlier) — the "no Drop today" state.
   // The server-side query already returns the most-recent past Drop,
   // so we only need to compare ET dates here.
   const todayEtYmd = new Intl.DateTimeFormat('en-CA', {
@@ -81,7 +87,7 @@ function classify(topic: DropTopic | undefined, now: Date): DropState {
     month: '2-digit',
     day: '2-digit',
   }).format(new Date(topic.dropAt));
-  return dropEtYmd === todayEtYmd ? { kind: 'live', topic } : { kind: 'pre_drop', topic };
+  return dropEtYmd === todayEtYmd ? { kind: 'live', topic } : { kind: 'no_drop_today', topic };
 }
 
 export function DropFeedClient(): React.JSX.Element {
@@ -197,7 +203,52 @@ export function DropFeedClient(): React.JSX.Element {
           }
         />
       ) : null}
+      {state.kind === 'no_drop_today' ? <NoDropTodayPanel topic={state.topic} /> : null}
     </section>
+  );
+}
+
+interface NoDropTodayPanelProps {
+  readonly topic: DropTopic;
+}
+
+/** Home surface for an ET day the heat score skipped. Honest banner,
+ *  read-only replay of the most-recent past Drop, primary CTA to the
+ *  /take5 archive stack. Deliberately omits NextDropCountdown — the
+ *  user said no "come back tomorrow" nudges on this state. The CTA
+ *  is primary but tappable-past: the user keeps full autonomy. */
+function NoDropTodayPanel({ topic }: NoDropTodayPanelProps): React.JSX.Element {
+  return (
+    <div className="flex flex-col gap-4">
+      <div
+        data-component="NoDropTodayPanel.Banner"
+        className="rounded-2xl border border-ink-300 bg-surface-card p-5"
+      >
+        <p className="font-display text-lg font-semibold text-text-primary">
+          No Drop today. Nothing cleared the bar.
+        </p>
+        <p className="mt-2 text-sm text-text-secondary">
+          Here&rsquo;s yesterday&rsquo;s, read-only. Keep the ritual with Take 5.
+        </p>
+        <Link
+          href="/take5"
+          data-component="NoDropTodayPanel.Cta"
+          className="mt-4 inline-flex items-center justify-center rounded-xl bg-brand-accent px-4 py-2 text-sm font-semibold text-brand-accent-fg"
+        >
+          Take 5
+        </Link>
+      </div>
+      <DropCard
+        topic={topic}
+        variant="pre_drop"
+        onStance={() => {
+          /* read-only: no stance on the no-Drop replay */
+        }}
+        selected={topic.userStance}
+        readOnly
+        banner={topic.isBlockExhausted ? <BlockExhaustedBanner /> : null}
+      />
+    </div>
   );
 }
 
