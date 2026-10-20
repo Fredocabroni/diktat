@@ -178,18 +178,39 @@ function buildSupabase(opts: {
   } | null;
   readonly topicRow?: { headline: string } | null;
   readonly logErr?: { message: string } | null;
+  /** Reviewed-history rows the handler reads to compute the
+   *  "Heat agreed with you X of last N nights." digest line (P4 PR
+   *  heat refit tool). Default: empty — no history yet. */
+  readonly reviewedHistory?: ReadonlyArray<Record<string, unknown>>;
+  readonly historyErr?: { message: string } | null;
 }): { client: ServiceClient; stamped: FakeStamp[] } {
   const stamped: FakeStamp[] = [];
   const fromImpl = (table: string) => {
     if (table === 'drop_shadow_log') {
+      // The handler walks TWO distinct chains on this table:
+      //   (a) current-day row: .select(...).eq('drop_date', ...).maybeSingle()
+      //   (b) reviewed history: .select(...).not(...).lt(...).order(...).limit(...)
+      // The select() stub returns a shim object that routes
+      // whichever chain the caller walks next.
       return {
         select: (_cols: string) => ({
+          // (a) current-day fetch
           eq: (_c: string, _v: string) => ({
-            maybeSingle: () =>
-              Promise.resolve({
-                data: opts.logRow,
-                error: opts.logErr ?? null,
+            maybeSingle: () => Promise.resolve({ data: opts.logRow, error: opts.logErr ?? null }),
+          }),
+          // (b) reviewed-history fetch. The chain's terminator is
+          // `.limit(n)` which returns a thenable resolving to
+          // { data, error }.
+          not: (_c: string, _op: string, _v: unknown) => ({
+            lt: (_c2: string, _v2: unknown) => ({
+              order: (_c3: string, _opts: unknown) => ({
+                limit: (_n: number) =>
+                  Promise.resolve({
+                    data: opts.reviewedHistory ?? [],
+                    error: opts.historyErr ?? null,
+                  }),
               }),
+            }),
           }),
         }),
       };
@@ -307,6 +328,108 @@ describe('telegram_digest_send handler', () => {
 
     expect(supa.stamped[0]!.payload.outcome).toBe('ok');
     expect(supa.stamped[0]!.payload.telegram_message_id).toBe(7777);
+  });
+
+  it('appends the "Heat agreed with you X of last N nights." line when reviewed history exists', async () => {
+    // Reviewed history: 3 picks (2 agreements) + 1 skip. The handler
+    // feeds this through computeAgreementStats → formatAgreementLine
+    // → buildMessageText and the resulting text contains the digest
+    // summary. (P4 PR heat refit tool, 2026-10-20.)
+    const supa = buildSupabase({
+      logRow: {
+        drop_date: '2026-10-18',
+        real_drop_topic_id: null,
+        shadow_top_5: [
+          { candidate_id: 'cx', source_title: 'Today', source_url: null, heat_score: 1 },
+        ],
+      },
+      reviewedHistory: [
+        {
+          drop_date: '2026-10-17',
+          operator_pick_candidate_id: 'c1',
+          operator_picked_at: '2026-10-17T06:00:00Z',
+          shadow_top_5: [{ candidate_id: 'c1', heat_score: 10 }],
+        },
+        {
+          drop_date: '2026-10-16',
+          operator_pick_candidate_id: 'c1',
+          operator_picked_at: '2026-10-16T06:00:00Z',
+          shadow_top_5: [{ candidate_id: 'c1', heat_score: 10 }],
+        },
+        {
+          drop_date: '2026-10-15',
+          operator_pick_candidate_id: 'c2',
+          operator_picked_at: '2026-10-15T06:00:00Z',
+          shadow_top_5: [
+            { candidate_id: 'c1', heat_score: 10 },
+            { candidate_id: 'c2', heat_score: 9 },
+          ],
+        },
+        {
+          drop_date: '2026-10-14',
+          operator_pick_candidate_id: null,
+          operator_picked_at: '2026-10-14T06:00:00Z',
+          shadow_top_5: [{ candidate_id: 'c1', heat_score: 3 }],
+        },
+      ],
+    });
+    const logger = buildLogger();
+    const captured: { body: Record<string, unknown> } = { body: {} };
+    const fetchImpl = vi.fn(async (_url: string, init: RequestInit) => {
+      captured.body = JSON.parse(init.body as string);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, result: { message_id: 7778 } }),
+      } as unknown as Response;
+    }) as unknown as typeof globalThis.fetch;
+    const handler = buildTelegramDigestSendHandler({
+      now: () => new Date('2026-10-19T01:15:00Z'),
+      envProvider: () =>
+        env({
+          TELEGRAM_DIGEST_ENABLED: true,
+          TELEGRAM_BOT_TOKEN: 'bot-token',
+          TELEGRAM_CHAT_ID: '42',
+        }),
+      fetchImpl,
+    });
+    await handler(buildRow(), { supabase: supa.client, logger });
+    expect(captured.body.text).toContain('Heat agreed with you 2 of last 3 nights.');
+  });
+
+  it('omits the agreement line when there is no reviewed history yet', async () => {
+    const supa = buildSupabase({
+      logRow: {
+        drop_date: '2026-10-18',
+        real_drop_topic_id: null,
+        shadow_top_5: [
+          { candidate_id: 'cx', source_title: 'Today', source_url: null, heat_score: 1 },
+        ],
+      },
+      reviewedHistory: [], // explicit: no reviewed nights yet
+    });
+    const logger = buildLogger();
+    const captured: { body: Record<string, unknown> } = { body: {} };
+    const fetchImpl = vi.fn(async (_url: string, init: RequestInit) => {
+      captured.body = JSON.parse(init.body as string);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, result: { message_id: 7779 } }),
+      } as unknown as Response;
+    }) as unknown as typeof globalThis.fetch;
+    const handler = buildTelegramDigestSendHandler({
+      now: () => new Date('2026-10-19T01:15:00Z'),
+      envProvider: () =>
+        env({
+          TELEGRAM_DIGEST_ENABLED: true,
+          TELEGRAM_BOT_TOKEN: 'bot-token',
+          TELEGRAM_CHAT_ID: '42',
+        }),
+      fetchImpl,
+    });
+    await handler(buildRow(), { supabase: supa.client, logger });
+    expect(captured.body.text).not.toContain('Heat agreed with you');
   });
 
   it('Telegram 403 (bot blocked): stamps degraded_send', async () => {

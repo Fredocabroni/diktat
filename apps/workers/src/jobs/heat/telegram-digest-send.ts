@@ -42,6 +42,7 @@ import { scrubMessage } from '@diktat/shared/alerts';
 
 import { loadEnv, type Env } from '../../env.js';
 import type { JobHandler, ScheduledJobRow } from '../scheduler.js';
+import { computeAgreementStats, type ReviewedShadowRow } from './refit.js';
 
 type ScheduledJobsUpdate = Database['public']['Tables']['scheduled_jobs']['Update'];
 
@@ -120,6 +121,13 @@ export function buildMessageText(
   dropDate: string,
   realDropHeadline: string | null,
   top5: ShadowTopEntry[],
+  /** Optional agreement counter line. Shape: {x, n} where x is the
+   *  number of reviewed-and-picked nights where heat #1 == operator
+   *  pick and n is the total reviewed-and-picked nights. When
+   *  provided and n > 0, appends "Heat agreed with you X of last N
+   *  nights." as a one-line summary. When n === 0 the summary is
+   *  omitted (nothing honest to say yet). */
+  agreement?: { readonly x: number; readonly n: number },
 ): string {
   const lines: string[] = [];
   lines.push(`📊 <b>Shadow digest · ${escapeHtml(dropDate)}</b>`);
@@ -140,6 +148,10 @@ export function buildMessageText(
     });
   }
   lines.push('');
+  if (agreement && agreement.n > 0) {
+    lines.push(`<i>Heat agreed with you ${agreement.x} of last ${agreement.n} nights.</i>`);
+    lines.push('');
+  }
   lines.push('<i>Pick one — writes to drop_shadow_log.operator_pick.</i>');
   return lines.join('\n');
 }
@@ -310,11 +322,56 @@ export function buildTelegramDigestSendHandler(opts?: {
       realDropHeadline = topicRow?.headline ?? null;
     }
 
-    // 3. Build message + keyboard. The "📰 Actual Drop" button is
+    // 3. Pull the last 14 reviewed drop_shadow_log rows (operator
+    //    has filled in operator_pick_candidate_id OR explicitly
+    //    skipped by setting operator_picked_at with a null
+    //    candidate). Compute the "heat agreed with you X of last N
+    //    nights" counter here so the digest body can render the
+    //    operator's historical agreement rate with heat. Fail soft —
+    //    an error pulling history must NOT drop the digest; the
+    //    agreement line is omitted and the main body still ships.
+    //    (P4 PR heat refit tool, 2026-10-20.)
+    const AGREEMENT_WINDOW_NIGHTS = 14;
+    let agreement: { x: number; n: number } | undefined;
+    const { data: historyRows, error: historyErr } = await deps.supabase
+      .from('drop_shadow_log')
+      .select('drop_date, operator_pick_candidate_id, operator_picked_at, shadow_top_5')
+      .not('operator_picked_at', 'is', null)
+      .lt('drop_date', dropDate)
+      .order('drop_date', { ascending: false })
+      .limit(AGREEMENT_WINDOW_NIGHTS);
+    if (historyErr) {
+      deps.logger.debug({
+        event: 'telegram_digest_send.agreement_load_failed',
+        message: scrubMessage(historyErr.message),
+      });
+    } else if (historyRows) {
+      // Fail-soft completeness. The DB-error branch is already handled
+      // above; this try/catch catches the OTHER failure mode — a
+      // malformed shadow_top_5 on a historic row (null, non-array, or
+      // missing fields) that would otherwise throw inside
+      // computeAgreementStats and abort the entire digest send. The
+      // writer of this column is the composer (service-role only), so
+      // there is no untrusted-input path, but a stale historic row
+      // from a prior schema should degrade gracefully — omit the
+      // agreement line, log at debug, keep the main digest shipping.
+      try {
+        const reviewed = historyRows as unknown as ReadonlyArray<ReviewedShadowRow>;
+        const stats = computeAgreementStats(reviewed);
+        agreement = { x: stats.agreements, n: stats.picks };
+      } catch (err) {
+        deps.logger.debug({
+          event: 'telegram_digest_send.agreement_compute_failed',
+          message: scrubMessage(err instanceof Error ? err.message : String(err)),
+        });
+      }
+    }
+
+    // 4. Build message + keyboard. The "📰 Actual Drop" button is
     //    always offered when real_drop_topic_id is present — the
     //    operator sees the headline in the message body and can
     //    decide whether it was already one of the top-5 picks.
-    const text = buildMessageText(dropDate, realDropHeadline, top5);
+    const text = buildMessageText(dropDate, realDropHeadline, top5, agreement);
     const keyboard = buildInlineKeyboard(dropDate, top5, shadow.real_drop_topic_id);
 
     // 5. POST to Telegram. URL carries the bot token — never logged.
