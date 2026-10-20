@@ -129,6 +129,16 @@ language plpgsql
 security definer
 set search_path = ''
 as $$
+-- `returns table (… shift_id, topic_id, et_day, cards_today)` makes
+-- those names OUT parameters that otherwise shadow the physical
+-- columns of take5_sessions inside this body. plpgsql's default
+-- #variable_conflict is `error`, which turns every reference —
+-- including the INSERT target column list — into "ambiguous column
+-- reference". Pin to `use_column` so plain unqualified column
+-- references always resolve to the physical column; where a code
+-- path legitimately wants to project the OUT value, we use the
+-- explicit local `v_shift`, `v_et_day`, `v_count` instead.
+#variable_conflict use_column
 declare
   v_user_id uuid := auth.uid();
   v_et_day  date := (now() at time zone 'America/New_York')::date;
@@ -157,13 +167,9 @@ begin
 
   -- (3) Per-ET-day cap of 5 cards. Must check BEFORE delegating to
   -- record_opinion_shift so an over-cap tap does NOT credit the
-  -- Take 5 streak trigger.
-  --
-  -- NOTE: `returns table (… et_day …)` makes `et_day` an OUT
-  -- parameter name that shadows the column of the same name inside
-  -- the function body (plpgsql column-conflict detection). Every
-  -- read of the physical column must schema-qualify via the alias
-  -- `t.et_day` to disambiguate.
+  -- Take 5 streak trigger. The table alias is a belt-and-braces
+  -- habit even with `#variable_conflict use_column` in effect; it
+  -- keeps the intent legible against the OUT-shadow.
   select count(*)::int
     into v_count
     from public.take5_sessions t
