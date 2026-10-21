@@ -36,6 +36,25 @@ export interface RedisClient {
   eval(script: string, keys: string[], args: (string | number)[]): Promise<unknown>;
 }
 
+/**
+ * 18+ age-gate state the mutation middleware reads to decide whether
+ * to block (migration 20261108000000). Lazily resolved — the first
+ * caller forces a single `get_user_self()` lookup per request; later
+ * callers in the same request share the resolved value via the
+ * returned promise. Tests inject a resolved verified posture via
+ * `makeCtx`, so no live DB lookup fires in unit tests.
+ */
+export type AgeStatus =
+  | { readonly kind: 'verified' }
+  | { readonly kind: 'unverified' }
+  | { readonly kind: 'blocked' }
+  // No `public.users` row for this `auth.uid()` — `handle_new_user`
+  // trigger failed at signup. Treat as unverified at the gate (block
+  // mutations); the (app) layout renders a recovery page.
+  | { readonly kind: 'no_profile' }
+  // Lookup failed (DB error). Fail-closed at the gate.
+  | { readonly kind: 'error'; readonly code: string };
+
 export interface Context {
   readonly env: Env;
   readonly userId: string | null;
@@ -48,6 +67,14 @@ export interface Context {
   // / un-bearered tRPC procedures. See `rate-limit.ts` for the
   // extraction + topology constraint documented at buildContext.
   readonly clientIpCidr: string;
+  /**
+   * Lazy resolver for the caller's age-gate state. The mutation-wide
+   * age-gate middleware (in `trpc.ts`) invokes this; queries never
+   * do. Returns `null` for anonymous callers (userId null). The
+   * resolved value is memoised on first call via the returned
+   * Promise's identity.
+   */
+  readonly loadAgeStatus: () => Promise<AgeStatus | null>;
 }
 
 let cachedRedis: Redis | null = null;
@@ -238,6 +265,36 @@ export async function buildContext(env: Env, req: FastifyRequest): Promise<Conte
   // public procedures that do a DB read with a stale client token.
   const db = userScopedClient(env, verifiedToken);
 
+  // 18+ age-gate state loader. Lazy + memoised per request: the
+  // mutation middleware in trpc.ts calls this on every mutation; the
+  // first call pays the single `get_user_self()` round-trip, subsequent
+  // calls in the same request share the resolved promise. Queries
+  // never invoke it, so queries have zero gate-related DB cost.
+  // Anonymous callers short-circuit to null.
+  let ageStatusPromise: Promise<AgeStatus | null> | null = null;
+  const loadAgeStatus = (): Promise<AgeStatus | null> => {
+    if (ageStatusPromise !== null) return ageStatusPromise;
+    if (userId === null) {
+      ageStatusPromise = Promise.resolve(null);
+      return ageStatusPromise;
+    }
+    ageStatusPromise = (async () => {
+      const { data, error } = await db.rpc('get_user_self').maybeSingle();
+      if (error) {
+        return { kind: 'error' as const, code: error.code ?? 'db_error' };
+      }
+      const row = (data ?? null) as {
+        age_verified_at: string | null;
+        age_blocked_at: string | null;
+      } | null;
+      if (!row) return { kind: 'no_profile' as const };
+      if (row.age_blocked_at) return { kind: 'blocked' as const };
+      if (!row.age_verified_at) return { kind: 'unverified' as const };
+      return { kind: 'verified' as const };
+    })();
+    return ageStatusPromise;
+  };
+
   return {
     env,
     userId,
@@ -246,5 +303,6 @@ export async function buildContext(env: Env, req: FastifyRequest): Promise<Conte
     bearerToken: verifiedToken,
     redis: getOrBuildRedis(env),
     clientIpCidr: normalizeIpToCidr(req.ip ?? ''),
+    loadAgeStatus,
   };
 }

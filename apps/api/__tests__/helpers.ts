@@ -157,6 +157,12 @@ export function fakeDb<T>(
   // primary from() flow (e.g. matchmaking.enqueue's bump_last_active
   // bump). Tests that need to assert the rpc shape should use
   // fakeRpcDb / fakeUserMeDb in the router test file directly.
+  //
+  // Special case: `get_user_self` returns a verified-adult profile by
+  // default so the age-gate middleware (migration 20261108000000) does
+  // not block every mutation under test. Tests that need to pin
+  // age-blocked / age-unverified behaviour override the rpc shim
+  // explicitly.
   const rpcBuilder: Record<string, unknown> = {};
   for (const op of ['select', 'eq', 'lt', 'lte', 'gt', 'gte', 'order', 'limit']) {
     rpcBuilder[op] = () => rpcBuilder;
@@ -165,6 +171,31 @@ export function fakeDb<T>(
   rpcBuilder.maybeSingle = () => Promise.resolve(rpcOk);
   rpcBuilder.single = () => Promise.resolve(rpcOk);
   rpcBuilder.then = (resolve: (v: typeof rpcOk) => unknown) => Promise.resolve(resolve(rpcOk));
+
+  const AGE_VERIFIED_SELF = {
+    data: {
+      id: '00000000-0000-0000-0000-000000000001',
+      handle: 'test',
+      display_name: 'Test',
+      avatar_url: null,
+      current_ap: 100,
+      tier_id: 0,
+      is_bot: false,
+      onboarded_at: '2026-01-01T00:00:00Z',
+      notification_preferences: {},
+      age_verified_at: '2026-01-01T00:00:00Z',
+      age_blocked_at: null,
+    },
+    error: null,
+  };
+  const ageVerifiedRpcBuilder: Record<string, unknown> = {};
+  for (const op of ['select', 'eq', 'lt', 'lte', 'gt', 'gte', 'order', 'limit']) {
+    ageVerifiedRpcBuilder[op] = () => ageVerifiedRpcBuilder;
+  }
+  ageVerifiedRpcBuilder.maybeSingle = () => Promise.resolve(AGE_VERIFIED_SELF);
+  ageVerifiedRpcBuilder.single = () => Promise.resolve(AGE_VERIFIED_SELF);
+  ageVerifiedRpcBuilder.then = (resolve: (v: typeof AGE_VERIFIED_SELF) => unknown) =>
+    Promise.resolve(resolve(AGE_VERIFIED_SELF));
 
   // A dedicated sidecar builder for non-primary tables. Returns an
   // empty data array for any chained read, so a router that follows
@@ -193,7 +224,8 @@ export function fakeDb<T>(
         ).join(', ')}])`,
       );
     },
-    rpc: (_fn: string, _args?: unknown) => rpcBuilder,
+    rpc: (fn: string, _args?: unknown) =>
+      fn === 'get_user_self' ? ageVerifiedRpcBuilder : rpcBuilder,
   };
 
   return { db, calls };
@@ -217,6 +249,12 @@ export function makeCtx(overrides: Partial<Context> & { db: unknown }): Context 
     // any production-shaped counter and silently hide cross-IP
     // collision bugs. PR #56 r1 security-reviewer M-makectx.
     clientIpCidr: '198.51.100.0/24',
+    // Default to a verified-adult age posture so the mutation-wide
+    // age-gate middleware (migration 20261108000000) does NOT block
+    // every mutation under test. Tests that need to pin the gate's
+    // block/unverified/no-profile/error branches override explicitly
+    // via `loadAgeStatus: async () => ({ kind: 'blocked' })` etc.
+    loadAgeStatus: async () => ({ kind: 'verified' }),
     ...(overrides as Partial<Context>),
     db: overrides.db as Context['db'],
   };
