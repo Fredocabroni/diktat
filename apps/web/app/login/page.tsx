@@ -104,6 +104,7 @@ function LoginInner() {
       <p className="mt-3 text-text-secondary">
         Enter your email. We&rsquo;ll send a six-digit code.
       </p>
+      <p className="mt-2 text-xs uppercase tracking-wide text-text-tertiary">18+ only.</p>
 
       {step === 'email' && (
         <form onSubmit={requestCode} className="mt-8 flex flex-col gap-3">

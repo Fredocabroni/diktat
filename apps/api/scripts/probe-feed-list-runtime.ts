@@ -94,6 +94,9 @@ async function main(): Promise<void> {
     bearerToken: bearer,
     redis: {} as Context['redis'],
     clientIpCidr: 'probe-feed-list',
+    // Probe hits feed.list (a query); the age-gate middleware
+    // short-circuits on queries, but Context requires the field.
+    loadAgeStatus: async () => ({ kind: 'verified' }),
   };
 
   let result: { topics: unknown[] } | null = null;

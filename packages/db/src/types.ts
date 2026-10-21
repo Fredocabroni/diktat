@@ -1432,6 +1432,8 @@ export type Database = {
       }
       users: {
         Row: {
+          age_blocked_at: string | null
+          age_verified_at: string | null
           avatar_url: string | null
           created_at: string
           current_ap: number
@@ -1448,6 +1450,8 @@ export type Database = {
           updated_at: string
         }
         Insert: {
+          age_blocked_at?: string | null
+          age_verified_at?: string | null
           avatar_url?: string | null
           created_at?: string
           current_ap?: number
@@ -1464,6 +1468,8 @@ export type Database = {
           updated_at?: string
         }
         Update: {
+          age_blocked_at?: string | null
+          age_verified_at?: string | null
           avatar_url?: string | null
           created_at?: string
           current_ap?: number
@@ -1599,6 +1605,7 @@ export type Database = {
         Args: { p_user_id: string; p_yesterday: string }
         Returns: Json
       }
+      attest_age: { Args: { p_birth_date: string }; Returns: Json }
       bump_last_active: { Args: never; Returns: string }
       cast_debate_vote: {
         Args: { p_battle_id: string; p_vote_for_user_id: string }
@@ -1650,6 +1657,8 @@ export type Database = {
       get_user_self: {
         Args: never
         Returns: {
+          age_blocked_at: string | null
+          age_verified_at: string | null
           avatar_url: string
           current_ap: number
           display_name: string

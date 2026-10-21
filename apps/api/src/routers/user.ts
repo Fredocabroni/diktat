@@ -186,6 +186,92 @@ export const userRouter = router({
       return { id: ctx.userId, onboarded_at: data };
     }),
 
+  // 18+ age gate. Delegates to the SECURITY DEFINER `attest_age(date)`
+  // RPC (migration 20261108000000). The server computes age from the
+  // caller's self-reported DOB and stamps `age_verified_at` or
+  // `age_blocked_at` on the users row. The DOB is NEVER stored.
+  //
+  // Terminal-block posture: once `age_blocked_at` is set the RPC
+  // raises `P0001` and we return a controlled FORBIDDEN. The web
+  // client's /not-eligible redirect in the (app) layout is the only
+  // post-block surface; this error path is defensive against a
+  // direct tRPC retry from a blocked tab.
+  //
+  // Rate-limited per-user via mutationLimit; the auth-session floor
+  // and global 10/min POST burst (PR #276) layer above it. This
+  // mutation is deliberately NOT behind the mutation-wide age gate
+  // middleware — it IS the gate; blocking itself would deadlock
+  // every unverified user.
+  attestAge: protectedProcedure
+    .use(mutationLimit('user.attestAge', { perMin: 10 }))
+    .input(
+      z.object({
+        // YYYY-MM-DD. The HTML date input emits this shape; the Zod
+        // regex rejects anything else so the RPC never receives a
+        // malformed string that would raise 22023 at the SQL layer
+        // (we want a clean BAD_REQUEST at the tRPC boundary).
+        birthDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Enter a valid date of birth.'),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const { data, error } = await ctx.db.rpc('attest_age', {
+        p_birth_date: input.birthDate,
+      });
+      if (error) {
+        // Map sqlstate → tRPC code. The `cause` carries ONLY the
+        // sqlstate; raw PostgrestError message/details/hint never
+        // reach the wire response.
+        const code = error.code;
+        if (code === 'P0001') {
+          // Terminal block — no further attempts.
+          throw new TRPCError({
+            code: 'FORBIDDEN',
+            message: 'This account is not eligible.',
+            cause: new Error(code),
+          });
+        }
+        if (code === '22023') {
+          throw new TRPCError({
+            code: 'BAD_REQUEST',
+            message: 'Enter a valid date of birth.',
+            cause: new Error(code),
+          });
+        }
+        if (code === '28000') {
+          throw new TRPCError({
+            code: 'UNAUTHORIZED',
+            message: 'Sign in required.',
+            cause: new Error(code),
+          });
+        }
+        if (code === 'P0002') {
+          throw new TRPCError({
+            code: 'NOT_FOUND',
+            message: 'Profile not found.',
+            cause: new Error(code),
+          });
+        }
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message: 'Age check failed.',
+          cause: new Error(code ?? 'db_error'),
+        });
+      }
+      const row = (data ?? {}) as { outcome?: string };
+      if (
+        row.outcome !== 'verified' &&
+        row.outcome !== 'blocked' &&
+        row.outcome !== 'already_verified'
+      ) {
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message: 'Age check failed.',
+          cause: new Error('rpc_bad_shape'),
+        });
+      }
+      return { outcome: row.outcome };
+    }),
+
   // Update notification preferences. Per-notification-type granularity —
   // V1 ships exactly one key (`streak_risk_push`); future types add their
   // own keys without schema churn. Default-on policy: absent key = enabled,

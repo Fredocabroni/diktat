@@ -64,7 +64,11 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
   }
   const profile = profileResult.error
     ? null
-    : ((profileResult.data?.[0] ?? null) as { onboarded_at: string | null } | null);
+    : ((profileResult.data?.[0] ?? null) as {
+        onboarded_at: string | null;
+        age_verified_at: string | null;
+        age_blocked_at: string | null;
+      } | null);
   if (!profile) {
     // Recovery affordance (#148). The fail-closed branch above was a dead
     // end — refresh keeps looping back here when the public.users row
@@ -90,6 +94,18 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
       </main>
     );
   }
+  // Age-gate (18+) fires BEFORE onboarding and before any (app) shell
+  // render. The operator contract: ALL existing users must re-attest
+  // on their next visit; the DB migration left every pre-feature user
+  // with age_verified_at IS NULL AND age_blocked_at IS NULL (bots
+  // auto-stamped verified in the backfill).
+  //
+  // Order:
+  //   1. age_blocked_at set → /not-eligible (terminal state).
+  //   2. age_verified_at null → /onboard/age (self-attest DOB).
+  //   3. onboarded_at null → /onboard/welcome (existing flow).
+  if (profile.age_blocked_at) redirect('/not-eligible');
+  if (!profile.age_verified_at) redirect('/onboard/age');
   if (!profile.onboarded_at) redirect('/onboard/welcome');
 
   return (
