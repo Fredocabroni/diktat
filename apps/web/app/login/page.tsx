@@ -75,6 +75,16 @@ function LoginInner() {
   // input. `setCaptchaToken` from useState is already stable; this makes
   // the clear-token path stable too.
   const clearCaptchaToken = useCallback(() => setCaptchaToken(null), []);
+  // Separate Turnstile token for the X OAuth path. Supabase does NOT
+  // verify this token server-side on `signInWithOAuth` (there is no
+  // CAPTCHA hook for the OAuth surface) — it is a client-side bot-
+  // friction gate only. The email-OTP token above is server-verified
+  // by Supabase; mixing them would reuse a token across different
+  // action-tagged flows and defeat the Turnstile `action` scoping.
+  const [xCaptchaToken, setXCaptchaToken] = useState<string | null>(null);
+  const xCaptchaReady = !captchaRequired || xCaptchaToken !== null;
+  const clearXCaptchaToken = useCallback(() => setXCaptchaToken(null), []);
+  const xOauthEnabled = clientEnv.X_OAUTH_ENABLED;
 
   async function requestCode(e: React.FormEvent) {
     e.preventDefault();
@@ -103,6 +113,30 @@ function LoginInner() {
     }
     setCaptchaToken(null);
     setStep('code');
+  }
+
+  async function signInWithX() {
+    setBusy(true);
+    setError(null);
+    const supabase = getBrowserSupabaseClient();
+    // supabase-js 2.103.3 exposes `'twitter'` as the X provider literal;
+    // `'x'` is not yet in the Provider union. The hosted Supabase
+    // dashboard still names the integration "Twitter". See the PR
+    // description for the readiness checklist.
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: 'twitter',
+      options: {
+        redirectTo: `${window.location.origin}/auth/callback`,
+      },
+    });
+    // On the happy path the browser is already navigating away to X.com
+    // before this line runs. The clear + error branch only matters when
+    // Supabase returns synchronously (e.g. provider disabled server-side).
+    setXCaptchaToken(null);
+    if (error) {
+      setError(describeOtpError(error));
+      setBusy(false);
+    }
   }
 
   async function verifyCode(e: React.FormEvent) {
@@ -212,18 +246,26 @@ function LoginInner() {
         </p>
       )}
 
-      <div className="mt-10 border-t border-ink-300 pt-6">
+      <div className="mt-10 flex flex-col gap-3 border-t border-ink-300 pt-6">
+        {xOauthEnabled && captchaRequired && (
+          <TurnstileWidget
+            siteKey={turnstileSiteKey}
+            action="login_x_oauth"
+            onToken={setXCaptchaToken}
+            onExpired={clearXCaptchaToken}
+            onError={clearXCaptchaToken}
+          />
+        )}
         <button
           type="button"
-          disabled={!clientEnv.X_OAUTH_ENABLED}
+          onClick={signInWithX}
+          disabled={!xOauthEnabled || busy || !xCaptchaReady}
           className="w-full rounded-full border border-ink-400 px-4 py-3 text-sm font-semibold text-text-secondary transition hover:border-ink-500 hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:border-ink-400 disabled:hover:text-text-secondary"
         >
           Continue with X
         </button>
-        {!clientEnv.X_OAUTH_ENABLED && (
-          <p className="mt-2 text-center text-xs text-text-tertiary">
-            X sign-in is not available yet.
-          </p>
+        {!xOauthEnabled && (
+          <p className="text-center text-xs text-text-tertiary">X sign-in is not available yet.</p>
         )}
       </div>
     </main>
