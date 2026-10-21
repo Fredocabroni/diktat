@@ -19,12 +19,19 @@
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
 
+import { VersionSkewNotice } from '../../../components/VersionSkewNotice';
 import { trpc } from '../../../lib/trpc';
+import { isVersionSkewError } from '../../../lib/trpc-errors';
 
 export default function OnboardAgePage(): React.JSX.Element {
   const router = useRouter();
   const [birthDate, setBirthDate] = useState('');
   const [error, setError] = useState<string | null>(null);
+  // Version-skew surfaces when the web bundle lands before api — the
+  // `attestAge` procedure returns NOT_FOUND / 404, or the fetch fails
+  // outright with no response body. Both get the calm notice; the raw
+  // error path is reserved for signals the user can act on (bad DOB).
+  const [showSkewNotice, setShowSkewNotice] = useState(false);
   const attest = trpc.user.attestAge.useMutation({
     onSuccess: (outcome) => {
       if (outcome.outcome === 'blocked') {
@@ -36,6 +43,10 @@ export default function OnboardAgePage(): React.JSX.Element {
       router.push('/');
     },
     onError: (err) => {
+      if (isVersionSkewError(err)) {
+        setShowSkewNotice(true);
+        return;
+      }
       // The server returns BAD_REQUEST for a nonsense DOB; keep the
       // user on the page and prompt a correction.
       setError(err.message || 'Could not save. Try again.');
@@ -45,11 +56,17 @@ export default function OnboardAgePage(): React.JSX.Element {
   function onSubmit(e: React.FormEvent): void {
     e.preventDefault();
     setError(null);
+    setShowSkewNotice(false);
     if (!birthDate) {
       setError('Enter your date of birth.');
       return;
     }
     attest.mutate({ birthDate });
+  }
+
+  function onRetry(): void {
+    setShowSkewNotice(false);
+    if (birthDate) attest.mutate({ birthDate });
   }
 
   return (
@@ -76,7 +93,8 @@ export default function OnboardAgePage(): React.JSX.Element {
               className="rounded-xl border border-ink-300 bg-surface-card px-3 py-3 text-text-primary"
             />
           </label>
-          {error ? (
+          {showSkewNotice ? <VersionSkewNotice onRetry={onRetry} busy={attest.isPending} /> : null}
+          {error && !showSkewNotice ? (
             <p
               role="status"
               aria-live="polite"
@@ -87,7 +105,7 @@ export default function OnboardAgePage(): React.JSX.Element {
           ) : null}
           <button
             type="submit"
-            disabled={attest.isPending}
+            disabled={attest.isPending || showSkewNotice}
             data-component="OnboardAgePage.Submit"
             className="rounded-xl bg-brand-accent px-4 py-3 text-sm font-semibold text-brand-accent-fg disabled:opacity-60"
           >
