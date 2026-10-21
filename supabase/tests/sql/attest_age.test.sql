@@ -88,7 +88,12 @@ begin
 end
 $$;
 
--- T4: 18+ → verified.
+-- T4: 18+ → verified. Verification SELECT switches back to postgres
+-- because the `authenticated` column-grant subset (migration
+-- 20260618120000) excludes the two new timestamptz columns — `select *`
+-- as authenticated would fail with "permission denied for table users"
+-- (the local test rig uses `role=postgres` by default; running against
+-- CI's postgres superuser is why we flip back here).
 do $$
 declare
   v_out jsonb;
@@ -99,6 +104,7 @@ begin
   if v_out->>'outcome' <> 'verified' then
     raise exception 'T4: expected outcome=verified, got %', v_out;
   end if;
+  perform set_config('role', 'postgres', true);
   select * into v_row from public.users
    where id = 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa';
   if v_row.age_verified_at is null then
@@ -121,6 +127,7 @@ begin
   if v_out->>'outcome' <> 'blocked' then
     raise exception 'T5: expected outcome=blocked, got %', v_out;
   end if;
+  perform set_config('role', 'postgres', true);
   select * into v_row from public.users
    where id = 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb';
   if v_row.age_blocked_at is null then
@@ -145,20 +152,23 @@ begin
 end
 $$;
 
--- T7: already-verified → idempotent.
+-- T7: already-verified → idempotent. Verification SELECTs run as
+-- postgres (see T4 note).
 do $$
 declare
   v_out jsonb;
   v_before_at timestamptz;
   v_after_at  timestamptz;
 begin
-  perform _test_as('aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa');
+  perform set_config('role', 'postgres', true);
   select age_verified_at into v_before_at from public.users
    where id = 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa';
+  perform _test_as('aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa');
   v_out := public.attest_age((current_date - interval '25 years')::date);
   if v_out->>'outcome' <> 'already_verified' then
     raise exception 'T7: expected outcome=already_verified, got %', v_out;
   end if;
+  perform set_config('role', 'postgres', true);
   select age_verified_at into v_after_at from public.users
    where id = 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa';
   if v_after_at <> v_before_at then
