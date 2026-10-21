@@ -8,8 +8,9 @@
 
 import type { AuthError } from '@supabase/supabase-js';
 import { useSearchParams } from 'next/navigation';
-import { Suspense, useMemo, useState } from 'react';
+import { Suspense, useCallback, useMemo, useState } from 'react';
 
+import { TurnstileWidget } from '../../components/TurnstileWidget';
 import { clientEnv } from '../../lib/env';
 import { getBrowserSupabaseClient } from '../../lib/supabase/browser';
 
@@ -59,6 +60,21 @@ function LoginInner() {
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(callbackError);
+  // Cloudflare Turnstile — mounted only when the site key is set.
+  // When empty, the widget is omitted and `options.captchaToken` is
+  // never passed, which keeps today's behaviour byte-identical. Set
+  // `NEXT_PUBLIC_TURNSTILE_SITE_KEY` + flip the CAPTCHA toggle in the
+  // Supabase dashboard once the web deploy ships (per PR description:
+  // deploy web FIRST, then enable in Supabase).
+  const turnstileSiteKey = clientEnv.TURNSTILE_SITE_KEY;
+  const captchaRequired = turnstileSiteKey.length > 0;
+  const [captchaToken, setCaptchaToken] = useState<string | null>(null);
+  const captchaReady = !captchaRequired || captchaToken !== null;
+  // Stable callback identity so TurnstileWidget's render-effect doesn't
+  // tear down and re-mount the widget on every keystroke in the email
+  // input. `setCaptchaToken` from useState is already stable; this makes
+  // the clear-token path stable too.
+  const clearCaptchaToken = useCallback(() => setCaptchaToken(null), []);
 
   async function requestCode(e: React.FormEvent) {
     e.preventDefault();
@@ -72,13 +88,20 @@ function LoginInner() {
         // migration 0007 auto-provisions user, wallet, streak, and audit row.
         shouldCreateUser: true,
         emailRedirectTo: `${window.location.origin}/auth/callback`,
+        // Supabase ignores `captchaToken: undefined`, so omitting the
+        // field pre-launch is byte-identical to the pre-Turnstile call.
+        ...(captchaToken ? { captchaToken } : {}),
       },
     });
     setBusy(false);
     if (error) {
       setError(describeOtpError(error));
+      // One token = one Supabase call. Drop the used/failed token so
+      // the widget renews before the next attempt.
+      setCaptchaToken(null);
       return;
     }
+    setCaptchaToken(null);
     setStep('code');
   }
 
@@ -87,10 +110,18 @@ function LoginInner() {
     setBusy(true);
     setError(null);
     const supabase = getBrowserSupabaseClient();
-    const { error } = await supabase.auth.verifyOtp({ email, token: code, type: 'email' });
+    const { error } = await supabase.auth.verifyOtp({
+      email,
+      token: code,
+      type: 'email',
+      // Supabase's verifyOtp also accepts captchaToken when the
+      // project has CAPTCHA enabled on the auth surface.
+      ...(captchaToken ? { options: { captchaToken } } : {}),
+    });
     setBusy(false);
     if (error) {
       setError('Code did not match. Request a new code to try again.');
+      setCaptchaToken(null);
       return;
     }
     window.location.href = '/';
@@ -122,9 +153,18 @@ function LoginInner() {
             className="rounded-xl border border-ink-500 bg-surface-card px-4 py-3 text-text-primary placeholder:text-text-tertiary focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/40"
             placeholder="you@example.com"
           />
+          {captchaRequired && (
+            <TurnstileWidget
+              siteKey={turnstileSiteKey}
+              action="login_otp_request"
+              onToken={setCaptchaToken}
+              onExpired={clearCaptchaToken}
+              onError={clearCaptchaToken}
+            />
+          )}
           <button
             type="submit"
-            disabled={busy}
+            disabled={busy || !captchaReady}
             className="mt-1 rounded-full bg-brand px-4 py-3 font-display font-bold text-brand-fg shadow-glow-violet transition hover:bg-brand/90 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-60 disabled:shadow-none"
           >
             {busy ? 'Sending…' : 'Send code'}

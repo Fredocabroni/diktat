@@ -30,4 +30,12 @@ export const clientEnv = {
   get VAPID_PUBLIC_KEY() {
     return process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY ?? '';
   },
+  // Cloudflare Turnstile site key. When empty, the /login page skips
+  // the widget AND omits `options.captchaToken` on supabase.auth
+  // calls — behaviour is byte-identical to pre-Turnstile today.
+  // The deploy order is: web ships with this empty, operator sets the
+  // env var + enables CAPTCHA in Supabase dashboard once ready.
+  get TURNSTILE_SITE_KEY() {
+    return process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY ?? '';
+  },
 } as const;
