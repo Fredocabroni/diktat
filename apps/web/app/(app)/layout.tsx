@@ -89,7 +89,7 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
           >
             support@diktat.app
           </a>{' '}
-          with your account email and we&rsquo;ll fix it.
+          with your sign-in method (email or X account) and we&rsquo;ll fix it.
         </p>
       </main>
     );
