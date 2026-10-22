@@ -8,6 +8,7 @@ import { z } from 'zod';
 import type { Database } from '@diktat/db';
 
 import { mutationLimit, queryLimit } from '../rate-limit.js';
+import { serviceRoleClient } from '../supabase.js';
 import { protectedProcedure, router } from '../trpc.js';
 
 type Json = Database['public']['Tables']['users']['Row']['notification_preferences'];
@@ -347,5 +348,36 @@ export const userRouter = router({
         throw new TRPCError({ code: 'NOT_FOUND', message: 'Profile not found.' });
       }
       return { id: ctx.userId, timezone: data };
+    }),
+
+  // Self-serve account deletion. Operator contract (compliance batch):
+  // one plain confirmation on the client, no guilt copy, no retention
+  // nudge. Server side:
+  //   1. Supabase auth-admin `deleteUser(ctx.userId)` removes the
+  //      auth.users row.
+  //   2. ON DELETE CASCADE on public.users.id → auth.users.id ripples
+  //      through every private 1:1 table (streaks, wallets, debate_*,
+  //      take5_sessions, user_push_subscriptions, scheduled_jobs, …).
+  //   3. `ap_transactions.user_id` is ON DELETE SET NULL (migration
+  //      20261110000000), so ledger rows anonymize — not cascade-
+  //      delete — preserving economy audit continuity.
+  // This mutation is EXEMPT from the age-gate middleware for the same
+  // reason attestAge is: a user who hit the gate (blocked, or just
+  // unverified-and-wants-out) must still be able to delete their
+  // account. Rate limit kept tight — 2/min per user — to blunt a
+  // compromised-token mass-deletion vector.
+  deleteAccount: protectedProcedure
+    .use(mutationLimit('user.deleteAccount', { perMin: 2 }))
+    .mutation(async ({ ctx }) => {
+      const admin = serviceRoleClient(ctx.env);
+      const { error } = await admin.auth.admin.deleteUser(ctx.userId);
+      if (error) {
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message: 'Could not delete account. Try again.',
+          cause: new Error(error.message ?? 'auth_admin_delete_failed'),
+        });
+      }
+      return { outcome: 'deleted' as const };
     }),
 });
