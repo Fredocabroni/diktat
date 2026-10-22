@@ -1001,6 +1001,92 @@ describe('dropPublishHandler — A4 fact explainer', () => {
     ).toBeDefined();
   });
 
+  it('BOTH rewrite + explainer throw (credit-exhausted shape): Drop still publishes on raw title + null explainer + ai_fail_open log', async () => {
+    // Simulates the Anthropic-paused scenario the operator cares about
+    // tonight: both AI calls throw a provider-exhausted error. Drop
+    // MUST still publish with source.title verbatim + fact_explainer
+    // = null, and the handler emits a single `drop_publish.ai_fail_open`
+    // event so the operator can grep for it in prod logs.
+    const state = rewriteState();
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+    const alertCalls: Array<{
+      severity: string;
+      title: string;
+      detail: string;
+      opts: { dedupKey?: string; dedupTtlMs?: number } | undefined;
+    }> = [];
+    const alerter = {
+      enabled: true,
+      alert: async (
+        severity: string,
+        title: string,
+        detail: string,
+        opts: { dedupKey?: string; dedupTtlMs?: number } | undefined,
+      ) => {
+        alertCalls.push({ severity, title, detail, opts });
+      },
+    };
+    const creditError = new Error('[anthropic] all providers exhausted (credit balance too low)');
+    const invoke = (async () => {
+      throw creditError;
+    }) as unknown as typeof fabricInvoke;
+
+    await dropPublishHandler(row(), {
+      supabase,
+      logger,
+      invoke,
+      alerter: alerter as unknown as Parameters<typeof dropPublishHandler>[1]['alerter'],
+    });
+
+    // The Drop LANDED despite both AI calls failing.
+    expect(state.newsTopicInserts).toHaveLength(1);
+    const insert = state.newsTopicInserts[0]!;
+    // Headline is the raw source title verbatim — no AI rewrite.
+    expect(insert.headline).toBe(insert.source_title);
+    // Explainer section is omitted — null in the row.
+    expect(insert.fact_explainer).toBeNull();
+    expect(insert.fact_explainer_generated_at).toBeNull();
+    // Each task's own alert fires (deduped per-task).
+    expect(alertCalls.find((a) => a.title === 'drop_publish rewrite_failed')).toBeDefined();
+    expect(alertCalls.find((a) => a.title === 'drop_publish fact_explainer_failed')).toBeDefined();
+    // Combined signal: operator-greppable "both AI calls unavailable" log.
+    const failOpen = logger.calls.find((c) => c.obj.event === 'drop_publish.ai_fail_open');
+    expect(failOpen).toBeDefined();
+    expect(failOpen?.obj.note).toMatch(/both drop_headline_rewrite \+ topic_fact_explainer/);
+    // The handler never throws from the AI path.
+    const completeLog = logger.calls.find((c) => c.obj.event === 'drop_publish.complete');
+    expect(completeLog).toBeDefined();
+  });
+
+  it('ai_fail_open does NOT fire when the rewrite succeeded (one-sided failures stay per-task)', async () => {
+    const state = rewriteState();
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+    // Rewrite OK; explainer throws.
+    let callNo = 0;
+    const invoke = (async (req: { task: string }) => {
+      callNo += 1;
+      if (req.task === 'topic_fact_explainer') throw new Error('[anthropic] credit cap');
+      return {
+        output: { headline: 'rewritten', summary: 's', claim: '' },
+        provider: 'anthropic' as const,
+        model: 'claude-sonnet-4-6',
+        task: req.task as 'drop_headline_rewrite',
+        usd: 0.002,
+        latencyMs: 250,
+        routeDecision: { primary: 'anthropic' as const, model: 'claude-sonnet-4-6', fallbacks: [] },
+      };
+    }) as unknown as typeof fabricInvoke;
+
+    await dropPublishHandler(row(), { supabase, logger, invoke });
+
+    expect(callNo).toBe(2);
+    expect(state.newsTopicInserts[0]!.headline).toBe('rewritten');
+    const failOpen = logger.calls.find((c) => c.obj.event === 'drop_publish.ai_fail_open');
+    expect(failOpen).toBeUndefined();
+  });
+
   // The Zod schema's refine on source_url is the enforcement point;
   // the production adapter runs it via safeParse at invoke time. These
   // unit tests exercise the schema directly (the fakeInvoke above does
