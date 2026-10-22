@@ -1605,7 +1605,7 @@ export type Database = {
         Args: { p_user_id: string; p_yesterday: string }
         Returns: Json
       }
-      attest_age: { Args: { p_birth_date: string }; Returns: Json }
+      attest_age: { Args: { p_birth_date: string; p_us_resident: boolean }; Returns: Json }
       bump_last_active: { Args: never; Returns: string }
       cast_debate_vote: {
         Args: { p_battle_id: string; p_vote_for_user_id: string }

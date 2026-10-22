@@ -26,6 +26,11 @@ import { isVersionSkewError } from '../../../lib/trpc-errors';
 export default function OnboardAgePage(): React.JSX.Element {
   const router = useRouter();
   const [birthDate, setBirthDate] = useState('');
+  // US-only pre-launch gate. The checkbox is `required`, so the form
+  // cannot submit while it is false. The attestAge mutation input
+  // zod-refines `usResident === true` as defence in depth against a
+  // direct-tRPC call that bypasses the UI.
+  const [usResident, setUsResident] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Version-skew surfaces when the web bundle lands before api — the
   // `attestAge` procedure returns NOT_FOUND / 404, or the fetch fails
@@ -61,12 +66,16 @@ export default function OnboardAgePage(): React.JSX.Element {
       setError('Enter your date of birth.');
       return;
     }
-    attest.mutate({ birthDate });
+    if (!usResident) {
+      setError('Confirm you are a US resident to continue.');
+      return;
+    }
+    attest.mutate({ birthDate, usResident });
   }
 
   function onRetry(): void {
     setShowSkewNotice(false);
-    if (birthDate) attest.mutate({ birthDate });
+    if (birthDate && usResident) attest.mutate({ birthDate, usResident });
   }
 
   return (
@@ -92,6 +101,17 @@ export default function OnboardAgePage(): React.JSX.Element {
               data-component="OnboardAgePage.BirthDate"
               className="rounded-xl border border-ink-300 bg-surface-card px-3 py-3 text-text-primary"
             />
+          </label>
+          <label className="flex items-start gap-3 text-sm text-text-primary">
+            <input
+              type="checkbox"
+              required
+              checked={usResident}
+              onChange={(e) => setUsResident(e.target.checked)}
+              data-component="OnboardAgePage.UsResident"
+              className="mt-1 h-4 w-4 rounded border-ink-300"
+            />
+            <span>I&rsquo;m a US resident.</span>
           </label>
           {showSkewNotice ? <VersionSkewNotice onRetry={onRetry} busy={attest.isPending} /> : null}
           {error && !showSkewNotice ? (
