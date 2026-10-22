@@ -57,7 +57,7 @@ describe('/login — Turnstile widget mount', () => {
   });
 
   it('disables the Send-code button until a token is present (when required)', () => {
-    expect(LOGIN).toMatch(/disabled=\{busy \|\| !captchaReady\}/);
+    expect(LOGIN).toMatch(/disabled=\{busy \|\| !captchaReady \|\| geoBlocked\}/);
     expect(LOGIN).toMatch(/captchaReady = !captchaRequired \|\| captchaToken !== null/);
   });
 

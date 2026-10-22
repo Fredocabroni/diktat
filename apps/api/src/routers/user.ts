@@ -211,11 +211,20 @@ export const userRouter = router({
         // malformed string that would raise 22023 at the SQL layer
         // (we want a clean BAD_REQUEST at the tRPC boundary).
         birthDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Enter a valid date of birth.'),
+        // US-only pre-launch gate (migration 20261109000000). The web
+        // UI's checkbox makes false unreachable from a well-formed
+        // submission; `.refine(v => v)` closes the direct-tRPC path
+        // without reaching the RPC, which would otherwise return
+        // BAD_REQUEST.
+        usResident: z
+          .boolean()
+          .refine((v) => v === true, 'Diktat is currently available in the US only.'),
       }),
     )
     .mutation(async ({ ctx, input }) => {
       const { data, error } = await ctx.db.rpc('attest_age', {
         p_birth_date: input.birthDate,
+        p_us_resident: input.usResident,
       });
       if (error) {
         // Map sqlstate → tRPC code. The `cause` carries ONLY the

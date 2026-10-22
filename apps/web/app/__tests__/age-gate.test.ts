@@ -44,7 +44,7 @@ describe('(app) layout — age-gate redirect order', () => {
 describe('/onboard/age — self-attestation page', () => {
   it('calls trpc.user.attestAge with the entered birthDate', () => {
     expect(AGE_PAGE).toMatch(/trpc\.user\.attestAge\.useMutation/);
-    expect(AGE_PAGE).toMatch(/attest\.mutate\(\{\s*birthDate\s*\}\s*\)/);
+    expect(AGE_PAGE).toMatch(/attest\.mutate\(\{\s*birthDate,\s*usResident\s*\}\s*\)/);
   });
 
   it('routes to /not-eligible on a blocked outcome, to / otherwise', () => {
