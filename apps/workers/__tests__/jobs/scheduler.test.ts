@@ -159,6 +159,7 @@ describe('runSchedulerTick', () => {
         p_handler_types: [
           'heartbeat',
           'local_boundary_sweep',
+          'data_minimization_sweep',
           'risk_push',
           'fact_check',
           'news_ingest',

@@ -1642,6 +1642,7 @@ export type Database = {
         }
       }
       complete_onboarding: { Args: never; Returns: string }
+      data_minimization_sweep: { Args: { p_dry_run: boolean }; Returns: Json }
       evaluate_risk_push: {
         Args: { p_local_date: string; p_user_id: string }
         Returns: Json
