@@ -42,26 +42,43 @@ end
 $$;
 
 -- U1: us_resident=false → 22023; no stamps.
+--
+-- The before/after read happens as `postgres` (not `authenticated`),
+-- because the column-grant audit (migration 20260617160000 + the H1
+-- fix 20260618120000) only grants SELECT on a public subset to
+-- `authenticated` — `select * from public.users` under that role
+-- returns 42501 (permission denied). The RPC itself still runs as
+-- `authenticated` via _test_us_as.
 do $$
 declare
-  v_before public.users%rowtype;
-  v_after  public.users%rowtype;
+  v_before_verified timestamptz;
+  v_before_blocked  timestamptz;
+  v_after_verified  timestamptz;
+  v_after_blocked   timestamptz;
 begin
-  perform _test_us_as('dddddddd-4444-4444-8444-dddddddddddd');
-  select * into v_before from public.users
+  perform set_config('role', 'postgres', true);
+  select age_verified_at, age_blocked_at
+    into v_before_verified, v_before_blocked
+    from public.users
     where id = 'dddddddd-4444-4444-8444-dddddddddddd';
+
+  perform _test_us_as('dddddddd-4444-4444-8444-dddddddddddd');
   begin
     perform public.attest_age((current_date - interval '30 years')::date, false);
     raise exception 'U1: expected 22023 (us_resident=false)';
   exception when sqlstate '22023' then
     null;
   end;
-  select * into v_after from public.users
+
+  perform set_config('role', 'postgres', true);
+  select age_verified_at, age_blocked_at
+    into v_after_verified, v_after_blocked
+    from public.users
     where id = 'dddddddd-4444-4444-8444-dddddddddddd';
-  if v_after.age_verified_at is not null then
+  if v_after_verified is not null and v_before_verified is null then
     raise exception 'U1: age_verified_at was stamped on us_resident=false';
   end if;
-  if v_after.age_blocked_at is not null then
+  if v_after_blocked is not null and v_before_blocked is null then
     raise exception 'U1: age_blocked_at was stamped on us_resident=false (non-terminal only)';
   end if;
 end
@@ -83,20 +100,24 @@ $$;
 -- U3: us_resident=true + 18+ → verified.
 do $$
 declare
-  v_out jsonb;
-  v_row public.users%rowtype;
+  v_out      jsonb;
+  v_verified timestamptz;
+  v_blocked  timestamptz;
 begin
   perform _test_us_as('eeeeeeee-5555-4555-8555-eeeeeeeeeeee');
   v_out := public.attest_age((current_date - interval '30 years')::date, true);
   if v_out->>'outcome' <> 'verified' then
     raise exception 'U3: expected verified, got %', v_out;
   end if;
-  select * into v_row from public.users
+  perform set_config('role', 'postgres', true);
+  select age_verified_at, age_blocked_at
+    into v_verified, v_blocked
+    from public.users
     where id = 'eeeeeeee-5555-4555-8555-eeeeeeeeeeee';
-  if v_row.age_verified_at is null then
+  if v_verified is null then
     raise exception 'U3: age_verified_at should be stamped';
   end if;
-  if v_row.age_blocked_at is not null then
+  if v_blocked is not null then
     raise exception 'U3: age_blocked_at must stay null';
   end if;
 end
