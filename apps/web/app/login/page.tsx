@@ -6,7 +6,7 @@
 
 'use client';
 
-import type { AuthError } from '@supabase/supabase-js';
+import type { AuthError, Provider } from '@supabase/supabase-js';
 import { useSearchParams } from 'next/navigation';
 import { Suspense, useCallback, useMemo, useState } from 'react';
 
@@ -119,12 +119,16 @@ function LoginInner() {
     setBusy(true);
     setError(null);
     const supabase = getBrowserSupabaseClient();
-    // supabase-js 2.103.3 exposes `'twitter'` as the X provider literal;
-    // `'x'` is not yet in the Provider union. The hosted Supabase
-    // dashboard still names the integration "Twitter". See the PR
-    // description for the readiness checklist.
+    // The hosted Supabase project has the OAuth 2.0 "X / Twitter"
+    // provider enabled, which is the `'x'` provider literal, NOT the
+    // OAuth 1.0a `'twitter'` provider. supabase-js 2.103.3's `Provider`
+    // union doesn't include `'x'` yet (added in a later minor), so
+    // we cast — the SDK forwards the string straight into the auth
+    // URL, so the literal is the only thing that matters at runtime.
+    // When supabase-js bumps to a version that lists `'x'`, drop the
+    // cast.
     const { error } = await supabase.auth.signInWithOAuth({
-      provider: 'twitter',
+      provider: 'x' as Provider,
       options: {
         redirectTo: `${window.location.origin}/auth/callback`,
       },

@@ -8,13 +8,23 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const LOGIN = readFileSync(new URL('../login/page.tsx', import.meta.url), 'utf8');
+const CALLBACK = readFileSync(new URL('../auth/callback/route.ts', import.meta.url), 'utf8');
+const APP_LAYOUT = readFileSync(new URL('../(app)/layout.tsx', import.meta.url), 'utf8');
 
 describe('/login — X OAuth button', () => {
-  it('calls supabase.auth.signInWithOAuth with the twitter provider', () => {
-    // supabase-js 2.103.3's Provider union includes `'twitter'` but
-    // not `'x'` — see the PR description. Hosted Supabase still names
-    // the integration "Twitter".
-    expect(LOGIN).toMatch(/signInWithOAuth\(\{[\s\S]{0,200}provider:\s*'twitter'/);
+  it("calls supabase.auth.signInWithOAuth with the OAuth 2.0 'x' provider literal", () => {
+    // Hosted Supabase has "X / Twitter (OAuth 2.0)" enabled — the
+    // provider literal is 'x', not the OAuth 1.0a 'twitter'. The
+    // supabase-js 2.103.3 Provider union doesn't list 'x' yet, so
+    // the call site casts; the SDK forwards the string into the auth
+    // URL verbatim, so the literal is what counts at runtime.
+    expect(LOGIN).toMatch(/signInWithOAuth\(\{[\s\S]{0,300}provider:\s*'x'\s+as\s+Provider/);
+  });
+
+  it('imports the Provider type from supabase-js for the explicit cast', () => {
+    // Guards against the cast being deleted and the literal silently
+    // reverting under a stricter future TS config.
+    expect(LOGIN).toMatch(/import type \{ AuthError, Provider \} from '@supabase\/supabase-js'/);
   });
 
   it('redirects back to /auth/callback on the current origin', () => {
@@ -104,5 +114,45 @@ describe('/login — X OAuth error posture', () => {
     const handlerEnd = LOGIN.indexOf('async function verifyCode');
     const handlerBlock = LOGIN.slice(handlerStart, handlerEnd);
     expect(handlerBlock).toMatch(/setBusy\(false\)/);
+  });
+});
+
+describe('X signups without an email address are handled end-to-end', () => {
+  // X may return a user record with no email. Nothing in the signup
+  // pipeline reads `data.user.email`:
+  //   - /auth/callback only calls exchangeCodeForSession(code).
+  //   - handle_new_user (migration 0009) generates the public.users
+  //     handle from the UUID, not from email.
+  //   - The (app) layout's fail-closed copy was reworded to not
+  //     assume the user has an email.
+  // These source-pin tests guard against any of those surfaces
+  // regressing into an email dependency.
+
+  it('/auth/callback does not read data.user.email', () => {
+    expect(CALLBACK).not.toMatch(/\.email\b/);
+    expect(CALLBACK).not.toMatch(/data\.user/);
+  });
+
+  it('/auth/callback is a pure exchange-and-redirect — no email branch', () => {
+    expect(CALLBACK).toMatch(/exchangeCodeForSession\(code\)/);
+    // The error branch bounces to /login with a generic flag, not an
+    // email-specific one.
+    expect(CALLBACK).toMatch(/\/login\?error=exchange_failed/);
+  });
+
+  it('/login does not read supabase user.email on the OAuth path', () => {
+    const handlerStart = LOGIN.indexOf('async function signInWithX');
+    const handlerEnd = LOGIN.indexOf('async function verifyCode');
+    const handlerBlock = LOGIN.slice(handlerStart, handlerEnd);
+    // The only `.email` the OAuth path touches is the describeOtpError
+    // msg-text check, which runs on the Supabase error, not on the user.
+    expect(handlerBlock).not.toMatch(/user\.email|data\.user/);
+  });
+
+  it('(app)/layout fail-closed copy does NOT assume the user has an email', () => {
+    // Pre-fix read: "with your account email". Post-fix accepts both
+    // email-signup and X-signup users.
+    expect(APP_LAYOUT).not.toMatch(/your account email/);
+    expect(APP_LAYOUT).toMatch(/sign-in method \(email or X account\)/);
   });
 });
