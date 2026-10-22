@@ -56,6 +56,30 @@ values
    date '2026-05-01')
 on conflict (id) do nothing;
 
+-- The handle_new_user trigger on auth.users insert pre-creates the
+-- public.users rows with created_at = now() and is_bot = false. Our
+-- INSERT public.users (…) ON CONFLICT DO NOTHING above respects the
+-- trigger-made rows, so we have to UPDATE created_at + is_bot here
+-- too — otherwise the age_blocked_at = created_at + 2 hours stamp
+-- lands in the future for the "20 days ago" fixture and the sweep
+-- correctly reports zero >7-day blocked candidates.
+update public.users
+   set created_at = now() - interval '20 days',
+       is_bot = false
+ where id = '11111111-aaaa-4111-8111-111111111111';
+update public.users
+   set created_at = now() - interval '1 day',
+       is_bot = false
+ where id = '22222222-bbbb-4222-8222-222222222222';
+update public.users
+   set created_at = now() - interval '20 days',
+       is_bot = true
+ where id = '33333333-cccc-4333-8333-333333333333';
+update public.users
+   set created_at = date '2026-05-01',
+       is_bot = false
+ where id = '44444444-dddd-4444-8444-444444444444';
+
 -- Stamp age_blocked_at manually (bypassing attest_age so the test
 -- stays focused on the sweep). The bot's bot-trigger has already
 -- stamped age_verified_at; we overwrite to simulate the "would-be
