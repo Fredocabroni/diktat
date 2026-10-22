@@ -28,73 +28,79 @@ begin;
 -- --------------------------------------------------------------------
 -- Fixtures.
 -- --------------------------------------------------------------------
-insert into auth.users (id, email, aud, role, created_at, updated_at)
+-- INSERT auth.users rows. The handle_new_user trigger (migration
+-- 20261001050000) reads `raw_app_meta_data->>'is_bot'` AT INSERT TIME
+-- and stamps public.users.is_bot accordingly — that's the only path
+-- that creates a bot row, since the users_is_bot_immutable_check
+-- trigger blocks every subsequent UPDATE of is_bot. The bot fixture
+-- below uses raw_app_meta_data to signal the trigger; the human
+-- fixtures omit it and inherit is_bot=false.
+--
+-- The trigger also creates the matching public.users shell row with
+-- created_at = now() and handle = 'citizen_<slug>'. We then UPDATE
+-- the mutable columns (created_at, handle, display_name, age_*) to
+-- the historical values this test needs. is_bot is NOT updated — it
+-- is write-once at creation time.
+insert into auth.users (id, email, aud, role, raw_app_meta_data, created_at, updated_at)
 values
-  -- M3/M4 candidates: age-blocked humans.
+  -- M3/M4 candidates: age-blocked humans. raw_app_meta_data omits
+  -- is_bot so the trigger defaults to is_bot=false.
   ('11111111-aaaa-4111-8111-111111111111', 'blocked-old@test', 'authenticated',
-   'authenticated', now() - interval '20 days', now()),
+   'authenticated', '{}'::jsonb, now() - interval '20 days', now()),
   ('22222222-bbbb-4222-8222-222222222222', 'blocked-fresh@test', 'authenticated',
-   'authenticated', now() - interval '1 day', now()),
-  -- M3 negative: bot with a (would-be) blocked stamp — must be excluded.
+   'authenticated', '{}'::jsonb, now() - interval '1 day', now()),
+  -- M3 negative: bot with a (would-be) blocked stamp — the sweep must
+  -- exclude it. raw_app_meta_data->>'is_bot' = 'true' is the ONLY way
+  -- to stamp is_bot = true, because the immutability trigger blocks
+  -- any post-creation UPDATE.
   ('33333333-cccc-4333-8333-333333333333', 'blocked-bot@test', 'authenticated',
-   'authenticated', now() - interval '20 days', now()),
+   'authenticated', '{"is_bot":true}'::jsonb, now() - interval '20 days', now()),
   -- M5 pre-launch orphan: a human created before 2026-10-21 with no
   -- age stamp. Whether this counts depends on the clock vs launch+30d.
   ('44444444-dddd-4444-8444-444444444444', 'pre-launch@test', 'authenticated',
-   'authenticated', date '2026-05-01', now())
+   'authenticated', '{}'::jsonb, date '2026-05-01', now())
 on conflict (id) do nothing;
 
-insert into public.users (id, handle, display_name, is_bot, created_at)
-values
-  ('11111111-aaaa-4111-8111-111111111111', 'blo_old', 'BlockedOld', false,
-   now() - interval '20 days'),
-  ('22222222-bbbb-4222-8222-222222222222', 'blo_frh', 'BlockedFresh', false,
-   now() - interval '1 day'),
-  ('33333333-cccc-4333-8333-333333333333', 'blo_bot', 'BlockedBot', true,
-   now() - interval '20 days'),
-  ('44444444-dddd-4444-8444-444444444444', 'pre_lch', 'PreLaunch', false,
-   date '2026-05-01')
-on conflict (id) do nothing;
-
--- The handle_new_user trigger on auth.users insert pre-creates the
--- public.users rows with created_at = now() and is_bot = false. Our
--- INSERT public.users (…) ON CONFLICT DO NOTHING above respects the
--- trigger-made rows, so we have to UPDATE created_at + is_bot here
--- too — otherwise the age_blocked_at = created_at + 2 hours stamp
--- lands in the future for the "20 days ago" fixture and the sweep
--- correctly reports zero >7-day blocked candidates.
+-- Backfill the mutable columns (handle, display_name, created_at) on
+-- the trigger-made public.users shells. is_bot is NOT touched — it's
+-- immutable post-creation and already set correctly by the trigger
+-- from raw_app_meta_data above.
 update public.users
-   set created_at = now() - interval '20 days',
-       is_bot = false
+   set handle = 'blo_old',
+       display_name = 'BlockedOld',
+       created_at = now() - interval '20 days'
  where id = '11111111-aaaa-4111-8111-111111111111';
 update public.users
-   set created_at = now() - interval '1 day',
-       is_bot = false
+   set handle = 'blo_frh',
+       display_name = 'BlockedFresh',
+       created_at = now() - interval '1 day'
  where id = '22222222-bbbb-4222-8222-222222222222';
 update public.users
-   set created_at = now() - interval '20 days',
-       is_bot = true
+   set handle = 'blo_bot',
+       display_name = 'BlockedBot',
+       created_at = now() - interval '20 days'
  where id = '33333333-cccc-4333-8333-333333333333';
 update public.users
-   set created_at = date '2026-05-01',
-       is_bot = false
+   set handle = 'pre_lch',
+       display_name = 'PreLaunch',
+       created_at = date '2026-05-01'
  where id = '44444444-dddd-4444-8444-444444444444';
 
 -- Stamp age_blocked_at manually (bypassing attest_age so the test
--- stays focused on the sweep). The bot's bot-trigger has already
--- stamped age_verified_at; we overwrite to simulate the "would-be
--- blocked bot" case the sweep must ignore.
+-- stays focused on the sweep). For the bot row, the BEFORE INSERT
+-- trigger stamp_bot_age_verified has already stamped age_verified_at;
+-- we null it + stamp age_blocked_at here to simulate the "would-be
+-- blocked bot" case the sweep must ignore. The users_age_mutex CHECK
+-- allows at-most-one-non-null, so we null age_verified_at in the same
+-- UPDATE as stamping age_blocked_at.
 update public.users
    set age_blocked_at = created_at + interval '2 hours',
        age_verified_at = null
  where id in (
    '11111111-aaaa-4111-8111-111111111111',
-   '22222222-bbbb-4222-8222-222222222222'
+   '22222222-bbbb-4222-8222-222222222222',
+   '33333333-cccc-4333-8333-333333333333'
  );
-update public.users
-   set age_blocked_at = created_at + interval '2 hours',
-       age_verified_at = null
- where id = '33333333-cccc-4333-8333-333333333333';
 -- Pre-launch orphan stays with both age_* null, is_bot=false,
 -- created_at < 2026-10-21.
 
