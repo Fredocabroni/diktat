@@ -32,8 +32,24 @@ describe('DeleteAccount — operator contract', () => {
   });
 
   it('uses one confirmation (two-step: idle → confirm), not a dark-pattern "are you sure?" modal', () => {
-    // Explicit Phase union; no third nag step.
-    expect(COMPONENT).toMatch(/type Phase = 'idle' \| 'confirm' \| 'deleting' \| 'error'/);
+    // Phase union: idle → confirm → deleting plus three terminal
+    // branches the server-side gates can land on (error, recent_auth,
+    // blocked). No "are you sure?" nag step.
+    expect(COMPONENT).toMatch(
+      /type Phase = 'idle' \| 'confirm' \| 'deleting' \| 'error' \| 'recent_auth' \| 'blocked'/,
+    );
+  });
+
+  it('on recent_auth_required: shows a re-sign-in CTA (not a toast + retry loop)', () => {
+    expect(COMPONENT).toMatch(/>Sign in again to delete your account\.</);
+    expect(COMPONENT).toMatch(/data-component="DeleteAccount\.RecentAuth\.ReSignIn"/);
+  });
+
+  it('on FORBIDDEN (in-battle or in-matchmaking): shows a factual blocker, no coercion', () => {
+    expect(COMPONENT).toMatch(/data-component="DeleteAccount\.Blocked"/);
+    expect(COMPONENT).toMatch(
+      /Finish your current battle or leave the matchmaking queue, then try again\./,
+    );
   });
 
   it('offers a Cancel escape on the confirmation step (no coercion)', () => {
