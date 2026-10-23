@@ -38,7 +38,9 @@ describe('/login — X OAuth button', () => {
 
   it('stays disabled unless NEXT_PUBLIC_X_OAUTH_ENABLED is true', () => {
     expect(LOGIN).toMatch(/xOauthEnabled\s*=\s*clientEnv\.X_OAUTH_ENABLED/);
-    expect(LOGIN).toMatch(/disabled=\{!xOauthEnabled \|\| busy \|\| !xCaptchaReady\}/);
+    expect(LOGIN).toMatch(
+      /disabled=\{!xOauthEnabled \|\| busy \|\| !xCaptchaReady \|\| geoBlocked\}/,
+    );
   });
 
   it('still shows the "X sign-in is not available yet." affordance when disabled', () => {

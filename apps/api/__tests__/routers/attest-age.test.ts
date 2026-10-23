@@ -51,30 +51,30 @@ describe('user.attestAge', () => {
   it('verified outcome: forwards p_birth_date and returns {outcome: "verified"}', async () => {
     const db = ageDb({ attest: { data: { outcome: 'verified' }, error: null } });
     const caller = appRouter.createCaller(makeCtx({ db, redis: fakeRedis() }));
-    const r = await caller.user.attestAge({ birthDate: '2000-01-15' });
+    const r = await caller.user.attestAge({ birthDate: '2000-01-15', usResident: true });
     expect(r).toEqual({ outcome: 'verified' });
   });
 
   it('blocked outcome returns {outcome: "blocked"} — client redirects to /not-eligible', async () => {
     const db = ageDb({ attest: { data: { outcome: 'blocked' }, error: null } });
     const caller = appRouter.createCaller(makeCtx({ db, redis: fakeRedis() }));
-    const r = await caller.user.attestAge({ birthDate: '2020-01-15' });
+    const r = await caller.user.attestAge({ birthDate: '2020-01-15', usResident: true });
     expect(r).toEqual({ outcome: 'blocked' });
   });
 
   it('already-verified is idempotent', async () => {
     const db = ageDb({ attest: { data: { outcome: 'already_verified' }, error: null } });
     const caller = appRouter.createCaller(makeCtx({ db, redis: fakeRedis() }));
-    const r = await caller.user.attestAge({ birthDate: '1990-05-05' });
+    const r = await caller.user.attestAge({ birthDate: '1990-05-05', usResident: true });
     expect(r).toEqual({ outcome: 'already_verified' });
   });
 
   it('malformed DOB rejected at the Zod gate (BAD_REQUEST, no RPC call)', async () => {
     const db = ageDb({});
     const caller = appRouter.createCaller(makeCtx({ db, redis: fakeRedis() }));
-    await expect(caller.user.attestAge({ birthDate: 'not-a-date' })).rejects.toBeInstanceOf(
-      TRPCError,
-    );
+    await expect(
+      caller.user.attestAge({ birthDate: 'not-a-date', usResident: true }),
+    ).rejects.toBeInstanceOf(TRPCError);
   });
 
   it.each<[string, string]>([
@@ -88,7 +88,9 @@ describe('user.attestAge', () => {
       attest: { data: null, error: { code, message: `db error ${code}` } },
     });
     const caller = appRouter.createCaller(makeCtx({ db, redis: fakeRedis() }));
-    await expect(caller.user.attestAge({ birthDate: '2000-01-15' })).rejects.toMatchObject({
+    await expect(
+      caller.user.attestAge({ birthDate: '2000-01-15', usResident: true }),
+    ).rejects.toMatchObject({
       code: trpcCode,
     });
   });
@@ -96,9 +98,24 @@ describe('user.attestAge', () => {
   it('unknown rpc outcome shape → INTERNAL_SERVER_ERROR (rpc_bad_shape)', async () => {
     const db = ageDb({ attest: { data: { outcome: 'nonsense' }, error: null } });
     const caller = appRouter.createCaller(makeCtx({ db, redis: fakeRedis() }));
-    await expect(caller.user.attestAge({ birthDate: '2000-01-15' })).rejects.toMatchObject({
+    await expect(
+      caller.user.attestAge({ birthDate: '2000-01-15', usResident: true }),
+    ).rejects.toMatchObject({
       code: 'INTERNAL_SERVER_ERROR',
     });
+  });
+
+  it('rejects usResident=false at the input layer before reaching the RPC', async () => {
+    // Zod `.refine(v => v === true)` fails fast — the RPC should
+    // never be called when the UI box is unchecked (or a crafted
+    // call passes false).
+    const db = ageDb({
+      attest: { data: { outcome: 'verified' }, error: null },
+    });
+    const caller = appRouter.createCaller(makeCtx({ db, redis: fakeRedis() }));
+    await expect(
+      caller.user.attestAge({ birthDate: '2000-01-15', usResident: false }),
+    ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
   });
 
   it('attestAge is EXEMPT from the mutation-wide age-gate (even when age is unverified)', async () => {
@@ -114,7 +131,7 @@ describe('user.attestAge', () => {
         loadAgeStatus: async () => ({ kind: 'unverified' }),
       }),
     );
-    const r = await caller.user.attestAge({ birthDate: '1990-01-01' });
+    const r = await caller.user.attestAge({ birthDate: '1990-01-01', usResident: true });
     expect(r).toEqual({ outcome: 'verified' });
   });
 });

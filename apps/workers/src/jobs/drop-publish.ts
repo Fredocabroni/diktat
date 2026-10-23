@@ -4,6 +4,23 @@
 // 23:59 ET. The first 20:00 ET tick of the day fires; later ticks no-op
 // via the partial-unique idempotency index on (job_type, idempotency_key).
 //
+// Fail-open posture (compliance batch, 2026-10-22). The two AI calls on
+// the Drop path — drop_headline_rewrite and topic_fact_explainer — are
+// each wrapped in a safe fallback: any thrown error (provider credit
+// exhaustion, 4xx, 5xx, routing/budget error, schema parse failure)
+// returns empty / null and the main handler proceeds. The Drop ships
+// with:
+//   - rewrite failed → finalHeadline = source.title verbatim (news_topics
+//     row carries this; headline_rewritten:false in the stamp payload).
+//   - explainer failed → news_topics.fact_explainer = null; the Drop UI
+//     omits the "What this means" section.
+// Nothing on the Drop path dead-letters when AI is unavailable; the row
+// INSERT still happens with raw source values. Each failure fires its
+// own 60-min deduped Telegram alert, and when BOTH fail together the
+// handler emits a single structured drop_publish.ai_fail_open event the
+// operator can grep for. Tests cover: no deps.invoke, rewrite throws,
+// explainer throws, both throw (credit-exhausted).
+//
 // PR C changes (2026-10-14):
 //   - Candidate list now sourced from the SECURITY DEFINER RPC
 //     `pick_drop_eligible_candidates` (migration 20261019000000), which
@@ -422,6 +439,28 @@ export const dropPublishHandler: JobHandler = async (row, deps) => {
   const slug = await generateSlug(deps, chosen, now);
   const finalHeadline = rewrite.headline.length > 0 ? rewrite.headline : source.title;
   const finalSummary = rewrite.summary.length > 0 ? rewrite.summary : source.summary;
+
+  // Fail-open telemetry. The two AI calls above are each wrapped in a
+  // safe fallback (rewrite → empty, explainer → null), so the Drop
+  // publishes regardless of provider state. When BOTH came back
+  // unusable, surface a single structured event the operator can
+  // grep for ("Drop shipped on raw source title tonight because AI
+  // was unavailable") — distinct from the per-task rewrite_failed /
+  // fact_explainer_failed alerts, which fire on EACH task's failure
+  // and dedup per-task. This event is observational only; it does
+  // not alert.
+  const headlineFromAi = rewrite.headline.length > 0;
+  const explainerFromAi = factExplainer !== null;
+  if (!headlineFromAi && !explainerFromAi) {
+    deps.logger.warn({
+      event: 'drop_publish.ai_fail_open',
+      jobId: row.id,
+      candidateId: chosen.id,
+      slug,
+      sourceHost: source.host,
+      note: 'both drop_headline_rewrite + topic_fact_explainer unavailable; Drop shipped on raw source title',
+    });
+  }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { data: topicData, error: topicErr } = (await (deps.supabase as any)
