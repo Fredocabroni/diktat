@@ -8,6 +8,8 @@
 
 import { useMemo } from 'react';
 
+import { ReportButton } from '../report/ReportButton';
+
 const ROUND_LABELS: ReadonlyArray<string> = ['Opening', 'Rebuttal', 'Closing'];
 
 interface RoundRow {
@@ -24,6 +26,7 @@ interface ParticipantRow {
 }
 
 interface ArgumentRow {
+  readonly id?: string;
   readonly round_id: string;
   readonly user_id: string;
   readonly text: string;
@@ -95,6 +98,9 @@ export function ArgumentsTimeline({
                         {arg?.text ?? '—'}
                       </p>
                     )}
+                    {!isForfeit && !isYou && arg?.id ? (
+                      <ReportButton targetType="debate_arg" targetId={arg.id} />
+                    ) : null}
                   </div>
                 );
               })}

@@ -901,6 +901,47 @@ export type Database = {
           },
         ]
       }
+      reports: {
+        Row: {
+          created_at: string
+          id: string
+          reason: string
+          reporter_user_id: string | null
+          status: string
+          target_id: string
+          target_type: string
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          reason: string
+          reporter_user_id?: string | null
+          status?: string
+          target_id: string
+          target_type: string
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          reason?: string
+          reporter_user_id?: string | null
+          status?: string
+          target_id?: string
+          target_type?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "reports_reporter_user_id_fkey"
+            columns: ["reporter_user_id"]
+            isOneToOne: false
+            referencedRelation: "users"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       scheduled_jobs: {
         Row: {
           attempts: number
@@ -1766,6 +1807,10 @@ export type Database = {
       stamp_cluster_drop_published: {
         Args: { p_at?: string; p_global_event_id: string }
         Returns: boolean
+      }
+      submit_report: {
+        Args: { p_target_type: string; p_target_id: string; p_reason: string }
+        Returns: Json
       }
       submit_trivia_answer: {
         Args: {

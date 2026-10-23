@@ -6,6 +6,7 @@ import { factCheckRouter } from './fact-check.js';
 import { feedRouter } from './feed.js';
 import { matchmakingRouter } from './matchmaking.js';
 import { pushSubscriptionsRouter } from './push-subscriptions.js';
+import { reportsRouter } from './reports.js';
 import { take5Router } from './take5.js';
 import { tribesRouter } from './tribes.js';
 import { userRouter } from './user.js';
@@ -22,6 +23,7 @@ export const appRouter = router({
   factCheck: factCheckRouter,
   feed: feedRouter,
   pushSubscriptions: pushSubscriptionsRouter,
+  reports: reportsRouter,
   take5: take5Router,
 });
 
