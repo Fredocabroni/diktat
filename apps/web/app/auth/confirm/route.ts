@@ -39,6 +39,14 @@ export async function GET(request: Request) {
     return NextResponse.redirect(new URL('/login?error=missing_code', url.origin));
   }
 
+  // US-only pre-launch gate (same posture as /auth/callback). Vercel's
+  // `x-vercel-ip-country` header is set at the edge; a non-US value
+  // refuses the token exchange so no session cookie is set.
+  const country = (request.headers.get('x-vercel-ip-country') ?? '').toUpperCase();
+  if (country && country !== 'US') {
+    return NextResponse.redirect(new URL('/login?error=not_us', url.origin));
+  }
+
   const supabase = await getServerSupabaseClient();
   const { error } = await supabase.auth.verifyOtp({
     token_hash: tokenHash,
