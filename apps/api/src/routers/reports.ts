@@ -7,7 +7,7 @@
 // logger), the user's report submits regardless of Telegram health.
 
 import { TRPCError } from '@trpc/server';
-import { makeAlerter, type Alerter, escapeHtml } from '@diktat/shared/alerts';
+import { makeAlerter, type Alerter } from '@diktat/shared/alerts';
 import { z } from 'zod';
 
 import type { Env } from '../env.js';
@@ -62,7 +62,7 @@ export const reportsRouter = router({
         if (code === '22023') {
           throw new TRPCError({
             code: 'BAD_REQUEST',
-            message: 'Report could not be saved. Check the details and try again.',
+            message: "Report didn't save. Check the details and try again.",
             cause: new Error(code),
           });
         }
@@ -75,7 +75,7 @@ export const reportsRouter = router({
         }
         throw new TRPCError({
           code: 'INTERNAL_SERVER_ERROR',
-          message: 'Report could not be saved. Try again.',
+          message: "Report didn't save. Try again.",
           cause: new Error(code ?? 'db_error'),
         });
       }
@@ -87,15 +87,21 @@ export const reportsRouter = router({
       // user's happy path doesn't wait on Telegram. Dedup keyed on
       // target so a single reported post doesn't storm the operator
       // chat if it gets reported many times quickly.
+      //
+      // Detail is plain text — the alerter sink runs `escapeHtml` on
+      // the body and emits it under Telegram parse_mode='HTML', so any
+      // HTML wrapper tags we insert here would show up as literal
+      // `&lt;code&gt;` in the operator chat instead of monospace. Keep
+      // the body as line-separated label/value pairs.
       const alerter = getAlerter(ctx.env);
       void alerter.alert(
         'warn',
         'Content report',
         [
-          `Target: <code>${escapeHtml(input.targetType)}</code> / <code>${escapeHtml(input.targetId)}</code>`,
-          `Reporter: <code>${escapeHtml(ctx.userId ?? '')}</code>`,
-          `Reason: ${escapeHtml(input.reason.slice(0, 500))}`,
-          reportId ? `Report id: <code>${escapeHtml(reportId)}</code>` : '',
+          `Target: ${input.targetType} / ${input.targetId}`,
+          `Reporter: ${ctx.userId ?? ''}`,
+          `Reason: ${input.reason.slice(0, 500)}`,
+          reportId ? `Report id: ${reportId}` : '',
         ]
           .filter(Boolean)
           .join('\n'),

@@ -43,7 +43,7 @@ export function ReportButton(props: ReportButtonProps): React.JSX.Element {
       setTimeout(() => setPhase('idle'), 5000);
     } catch (err) {
       setPhase('error');
-      setErrorMsg(err instanceof Error ? err.message : 'Report could not be saved. Try again.');
+      setErrorMsg(err instanceof Error ? err.message : "Report didn't save. Try again.");
     }
   }
 

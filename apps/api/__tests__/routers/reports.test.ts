@@ -164,7 +164,7 @@ describe('reports.submit', () => {
       }),
     ).rejects.toMatchObject({
       code: 'INTERNAL_SERVER_ERROR',
-      message: 'Report could not be saved. Try again.',
+      message: "Report didn't save. Try again.",
     });
   });
 
