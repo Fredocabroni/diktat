@@ -21,6 +21,7 @@
 
 import { useEffect, useState } from 'react';
 
+import { DeleteAccount } from '../../../../components/settings/DeleteAccount';
 import {
   disablePush,
   enablePush,
@@ -197,6 +198,8 @@ export default function NotificationsSettingsPage() {
           {error}
         </p>
       )}
+
+      <DeleteAccount />
     </section>
   );
 }

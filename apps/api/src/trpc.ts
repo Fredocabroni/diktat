@@ -42,9 +42,14 @@ const requireAuthed = t.middleware(({ ctx, next }) => {
 //     attested or terminally-blocked account from affecting any
 //     economy / content state.
 //
-// The one exempt mutation is `user.attestAge` itself: blocking it
-// would deadlock every unverified user. Path-exemption keeps the
-// gate on every other mutation without a per-router opt-in.
+// Two exempt mutations:
+//   - `user.attestAge` — blocking it would deadlock every unverified
+//     user.
+//   - `user.deleteAccount` — a user who hit the gate (blocked, or
+//     wants out before attesting) must still be able to self-serve
+//     delete.
+// Path-exemption keeps the gate on every other mutation without a
+// per-router opt-in.
 //
 // Anon callers (`ctx.userId` null) pass through — they haven't
 // authed yet. `requireAuthed` catches that case for `protectedProcedure`
@@ -53,7 +58,7 @@ const requireAuthed = t.middleware(({ ctx, next }) => {
 const requireAgeVerifiedForMutations = t.middleware(async ({ ctx, next, type, path }) => {
   if (type !== 'mutation') return next();
   if (!ctx.userId) return next(); // anon → let requireAuthed throw
-  if (path === 'user.attestAge') return next();
+  if (path === 'user.attestAge' || path === 'user.deleteAccount') return next();
 
   // Age state via the context's lazy, memoised loader. The first
   // mutation on a request pays one `get_user_self()` round-trip; any

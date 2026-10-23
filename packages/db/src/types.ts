@@ -45,7 +45,10 @@ export type Database = {
           reason: string
           ref_id: string | null
           ref_type: string | null
-          user_id: string
+          // Nullable post-migration 20261110000000 — anonymized rows
+          // from self-serve account deletion carry user_id = NULL
+          // (ledger integrity, actor identity removed).
+          user_id: string | null
         }
         Insert: {
           balance_after: number
@@ -57,7 +60,7 @@ export type Database = {
           reason: string
           ref_id?: string | null
           ref_type?: string | null
-          user_id: string
+          user_id?: string | null
         }
         Update: {
           balance_after?: number
@@ -69,7 +72,7 @@ export type Database = {
           reason?: string
           ref_id?: string | null
           ref_type?: string | null
-          user_id?: string
+          user_id?: string | null
         }
         Relationships: [
           {
@@ -1642,6 +1645,7 @@ export type Database = {
         }
       }
       complete_onboarding: { Args: never; Returns: string }
+      delete_my_account: { Args: never; Returns: Json }
       evaluate_risk_push: {
         Args: { p_local_date: string; p_user_id: string }
         Returns: Json

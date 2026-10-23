@@ -8,6 +8,7 @@ import { z } from 'zod';
 import type { Database } from '@diktat/db';
 
 import { mutationLimit, queryLimit } from '../rate-limit.js';
+import { serviceRoleClient } from '../supabase.js';
 import { protectedProcedure, router } from '../trpc.js';
 
 type Json = Database['public']['Tables']['users']['Row']['notification_preferences'];
@@ -356,5 +357,102 @@ export const userRouter = router({
         throw new TRPCError({ code: 'NOT_FOUND', message: 'Profile not found.' });
       }
       return { id: ctx.userId, timezone: data };
+    }),
+
+  // Self-serve account deletion. Operator contract (compliance batch):
+  // one plain confirmation on the client, no guilt copy, no retention
+  // nudge. Server-side gates — all enforced in the SECURITY DEFINER
+  // `delete_my_account()` RPC (migration 20261110000000) so a client
+  // that bypasses this resolver and calls PostgREST directly still
+  // hits them:
+  //   1. Recent-auth window. last_sign_in_at within 10 minutes.
+  //   2. No delete mid-live-battle.
+  //   3. Idempotency-key UUID scrub on ap_transactions (keys that
+  //      embed the caller's uuid, e.g. signup_grant:<uuid>, are
+  //      rewritten to deleted:<fresh uuid> so the UNIQUE index is
+  //      satisfied and no residual pointer to the deleted user
+  //      survives in ledger metadata).
+  // The resolver layers one additional check that lives only in
+  // ephemeral state (Upstash):
+  //   4. Not currently queued in matchmaking. A delete that races
+  //      the matcher would strand the queue entry → the pairing
+  //      step would try to join a battle against a vanished user.
+  //
+  // Order of operations:
+  //   a) matchmaking queue check (Redis).
+  //   b) delete_my_account() RPC — gates (1-3) + scrub, atomic.
+  //   c) admin.auth.admin.deleteUser(ctx.userId) — cascade.
+  //
+  // If (c) fails after (b) succeeded, the keys are already anonymised
+  // but auth.users still exists — a forward-only drift, not a leak.
+  // The client prompt is "try again"; a successful retry completes the
+  // cascade. The ledger stays consistent either way.
+  //
+  // EXEMPT from the age-gate middleware for the same reason attestAge
+  // is: a user who hit the gate (blocked, or just unverified-and-
+  // wants-out) must still be able to delete their account. Rate limit
+  // kept tight — 2/min per user — to blunt a compromised-token mass-
+  // deletion vector.
+  deleteAccount: protectedProcedure
+    .use(mutationLimit('user.deleteAccount', { perMin: 2 }))
+    .mutation(async ({ ctx }) => {
+      // (a) Matchmaking queue check — Redis-only state (no durable
+      // row to key off), so this gate lives in the resolver. Both
+      // modes checked; if either returns a score, the caller is
+      // queued and the delete is refused.
+      const tScore = await ctx.redis.zscore('mm:trivia:queue', ctx.userId);
+      const dScore = await ctx.redis.zscore('mm:open_debate:queue', ctx.userId);
+      if (tScore !== null || dScore !== null) {
+        throw new TRPCError({
+          code: 'FORBIDDEN',
+          message: 'Leave the matchmaking queue, then delete your account.',
+          cause: new Error('in_matchmaking'),
+        });
+      }
+
+      // (b) SECURITY DEFINER gate + idempotency-key scrub.
+      const { error: rpcErr } = await ctx.db.rpc('delete_my_account');
+      if (rpcErr) {
+        const code = rpcErr.code;
+        const msg = rpcErr.message ?? '';
+        if (code === 'P0001' && msg.includes('recent_auth_required')) {
+          throw new TRPCError({
+            code: 'UNAUTHORIZED',
+            message: 'Sign in again to delete your account.',
+            cause: new Error('recent_auth_required'),
+          });
+        }
+        if (code === 'P0001' && msg.includes('in_live_battle')) {
+          throw new TRPCError({
+            code: 'FORBIDDEN',
+            message: 'Finish your current battle, then delete your account.',
+            cause: new Error('in_live_battle'),
+          });
+        }
+        if (code === '28000') {
+          throw new TRPCError({
+            code: 'UNAUTHORIZED',
+            message: 'Sign in required.',
+            cause: new Error(code),
+          });
+        }
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message: 'Could not delete account. Try again.',
+          cause: new Error(code ?? 'db_error'),
+        });
+      }
+
+      // (c) Cascade through auth.users.
+      const admin = serviceRoleClient(ctx.env);
+      const { error } = await admin.auth.admin.deleteUser(ctx.userId);
+      if (error) {
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message: 'Could not delete account. Try again.',
+          cause: new Error(error.message ?? 'auth_admin_delete_failed'),
+        });
+      }
+      return { outcome: 'deleted' as const };
     }),
 });
