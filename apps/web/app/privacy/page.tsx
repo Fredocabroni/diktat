@@ -10,7 +10,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 
 const LAST_UPDATED = '2026-10-22';
-const CONTACT = 'CONTACT_EMAIL_PLACEHOLDER';
+const CONTACT = 'support@diktat.app';
 
 export const metadata: Metadata = {
   title: 'Privacy Policy — Diktat',
@@ -99,6 +99,10 @@ export default function PrivacyPage(): React.JSX.Element {
             <strong className="text-text-primary">Upstash</strong> — rate limiting and queueing.
           </li>
           <li>
+            <strong className="text-text-primary">Telegram</strong> — operator alerts when you
+            report a post. We send a report id and the target type and id, not your reason text.
+          </li>
+          <li>
             <strong className="text-text-primary">X / Twitter</strong> — only if you sign in with X.
           </li>
           <li>
@@ -152,14 +156,14 @@ export default function PrivacyPage(): React.JSX.Element {
         <ul className="ml-5 list-disc space-y-1">
           <li>Account data is kept for the life of your account.</li>
           <li>
-            Accounts blocked at the age check are purged within 7 days (the age-check timestamp is
-            the only trace that stays).
+            If you confirm you are under 18 at the age check, we may retain a minimal record to
+            enforce the age requirement.
           </li>
           <li>Short-term security logs rotate within 30 days.</li>
           <li>
-            When you delete your account, we remove your personal data. Arena Points ledger rows
-            that keep the economy auditable are anonymized, not erased — your handle and user ID are
-            stripped from them.
+            When you delete your account, we remove your personal data. Arena Points ledger amounts
+            are kept so the economy stays auditable; the user ID is removed, including from
+            transaction keys.
           </li>
           <li>Backups rotate out within 30 days of a change.</li>
         </ul>

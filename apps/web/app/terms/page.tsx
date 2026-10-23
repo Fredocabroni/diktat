@@ -9,7 +9,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 
 const LAST_UPDATED = '2026-10-22';
-const CONTACT = 'CONTACT_EMAIL_PLACEHOLDER';
+const CONTACT = 'support@diktat.app';
 
 export const metadata: Metadata = {
   title: 'Terms of Service — Diktat',

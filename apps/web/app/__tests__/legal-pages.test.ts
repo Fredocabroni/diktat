@@ -25,9 +25,13 @@ describe('/terms + /privacy — meta', () => {
     expect(PRIVACY).not.toMatch(/^'use client'/m);
   });
 
-  it('both pages reference the CONTACT placeholder (one swap-site at launch)', () => {
-    expect(TERMS).toMatch(/CONTACT_EMAIL_PLACEHOLDER/);
-    expect(PRIVACY).toMatch(/CONTACT_EMAIL_PLACEHOLDER/);
+  it('both pages reference the operator-provided support address', () => {
+    // Swapped from CONTACT_EMAIL_PLACEHOLDER on push 3 (2026-10-22).
+    expect(TERMS).toMatch(/'support@diktat\.app'/);
+    expect(PRIVACY).toMatch(/'support@diktat\.app'/);
+    // Negative-space guard: neither page may ship with the placeholder.
+    expect(TERMS).not.toMatch(/CONTACT_EMAIL_PLACEHOLDER/);
+    expect(PRIVACY).not.toMatch(/CONTACT_EMAIL_PLACEHOLDER/);
   });
 
   it('both pages set a <title> via Next metadata export', () => {
@@ -98,6 +102,7 @@ describe('/privacy — processor list (must match reality)', () => {
       'Resend',
       'Cloudflare Turnstile',
       'Upstash',
+      'Telegram',
       'X / Twitter',
       'Anthropic',
       'Perplexity',
@@ -105,6 +110,13 @@ describe('/privacy — processor list (must match reality)', () => {
     ]) {
       expect(PRIVACY).toMatch(new RegExp(name));
     }
+  });
+
+  it('Telegram processor entry names the report-alert boundary (reason text not sent)', () => {
+    expect(PRIVACY).toMatch(
+      /Telegram[\s\S]{0,80}operator alerts when you[\s\S]{0,40}report a post/,
+    );
+    expect(PRIVACY).toMatch(/not your reason text/);
   });
 });
 
@@ -136,12 +148,26 @@ describe('/privacy — rights block', () => {
 });
 
 describe('/privacy — retention', () => {
-  it('names the 7-day age-blocked purge window', () => {
-    expect(PRIVACY).toMatch(/purged within 7 days/);
+  // 7-day age-blocked purge claim removed on push 3 — PR #289's
+  // minimization sweep is not merged yet, so the policy is reworded
+  // as "may retain a minimal record to enforce the age requirement."
+  it('does not claim an age-block purge window the DB does not yet enforce', () => {
+    expect(PRIVACY).not.toMatch(/purged within 7 days/);
+    expect(PRIVACY).toMatch(
+      /under 18 at the age check[\s\S]{0,80}minimal record to[\s\S]{0,30}enforce the age requirement/,
+    );
   });
 
   it('names the 30-day short-log rotation', () => {
     expect(PRIVACY).toMatch(/security logs rotate within 30 days/);
+  });
+
+  it('states ledger-amount retention + user-ID removal including from transaction keys', () => {
+    // Mirrors #288 behaviour exactly: ledger amounts preserved,
+    // user_id anonymized, idempotency_key UUID scrubbed on delete.
+    expect(PRIVACY).toMatch(
+      /Arena Points ledger[\s\S]{0,40}amounts[\s\S]{0,20}are kept[\s\S]{0,120}user ID is removed, including[\s\S]{0,30}from[\s\S]{0,20}transaction keys/,
+    );
   });
 });
 
