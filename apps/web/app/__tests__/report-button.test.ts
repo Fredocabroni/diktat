@@ -21,7 +21,7 @@ describe('ReportButton — wiring', () => {
   });
 
   it('takes a typed targetType + targetId prop', () => {
-    expect(COMPONENT).toMatch(/'debate_arg' \| 'debate_post' \| 'drop' \| 'user'/);
+    expect(COMPONENT).toMatch(/'debate_arg' \| 'drop' \| 'user'/);
     expect(COMPONENT).toMatch(/targetId: string/);
   });
 
@@ -30,7 +30,14 @@ describe('ReportButton — wiring', () => {
   });
 
   it('uses one submit step (not a two-step "are you sure?" nag)', () => {
-    expect(COMPONENT).toMatch(/type Phase = 'idle' \| 'open' \| 'submitting' \| 'done' \| 'error'/);
+    expect(COMPONENT).toMatch(
+      /type Phase = 'idle' \| 'open' \| 'submitting' \| 'done' \| 'already' \| 'error'/,
+    );
+  });
+
+  it("surfaces outcome='already_reported' as a quiet 'Already reported.' acknowledgment", () => {
+    expect(COMPONENT).toMatch(/result\.outcome === 'already_reported'/);
+    expect(COMPONENT).toMatch(/'Already reported\.'/);
   });
 });
 
@@ -42,7 +49,7 @@ describe('ReportButton — copy invariants', () => {
 
   it('confirmation copy is factual, not performative', () => {
     // "Report sent." — direct, no "Thank you for keeping us safe".
-    expect(COMPONENT).toMatch(/>\s*Report sent\.\s*</);
+    expect(COMPONENT).toMatch(/'Report sent\.'/);
   });
 
   it('is free of guilt / performative / coaching vocabulary', () => {

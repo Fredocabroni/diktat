@@ -1806,7 +1806,7 @@ export type Database = {
       }
       submit_report: {
         Args: { p_target_type: string; p_target_id: string; p_reason: string }
-        Returns: string
+        Returns: Json
       }
       submit_trivia_answer: {
         Args: {

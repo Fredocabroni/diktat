@@ -13,10 +13,10 @@ import { useState } from 'react';
 
 import { trpc } from '../../lib/trpc';
 
-type Phase = 'idle' | 'open' | 'submitting' | 'done' | 'error';
+type Phase = 'idle' | 'open' | 'submitting' | 'done' | 'already' | 'error';
 
 export interface ReportButtonProps {
-  readonly targetType: 'debate_arg' | 'debate_post' | 'drop' | 'user';
+  readonly targetType: 'debate_arg' | 'drop' | 'user';
   readonly targetId: string;
 }
 
@@ -35,9 +35,13 @@ export function ReportButton(props: ReportButtonProps): React.JSX.Element {
     setPhase('submitting');
     setErrorMsg(null);
     try {
-      await submit.mutateAsync({ targetType, targetId, reason });
+      const result = await submit.mutateAsync({ targetType, targetId, reason });
       setReason('');
-      setPhase('done');
+      // 'already_reported' is a quiet success — a user who re-reports
+      // the same target sees a factual acknowledgment, not an error.
+      // The server returns the existing report id and no new row is
+      // created; the operator alert dedup covers the chat-storm side.
+      setPhase(result.outcome === 'already_reported' ? 'already' : 'done');
       // Auto-return to idle after a short beat so the thread stays
       // uncluttered — the confirmation is informational, not a trophy.
       setTimeout(() => setPhase('idle'), 5000);
@@ -47,15 +51,15 @@ export function ReportButton(props: ReportButtonProps): React.JSX.Element {
     }
   }
 
-  if (phase === 'done') {
+  if (phase === 'done' || phase === 'already') {
     return (
       <p
         role="status"
         aria-live="polite"
-        data-component="ReportButton.Done"
+        data-component={phase === 'already' ? 'ReportButton.Already' : 'ReportButton.Done'}
         className="mt-2 text-xs text-text-tertiary"
       >
-        Report sent.
+        {phase === 'already' ? 'Already reported.' : 'Report sent.'}
       </p>
     );
   }
