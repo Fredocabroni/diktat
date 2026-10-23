@@ -54,7 +54,7 @@ begin
   perform set_config('request.jwt.claims', '{}', true);
   perform set_config('role', 'authenticated', true);
   begin
-    perform public.attest_age(date '2000-01-01');
+    perform public.attest_age(date '2000-01-01', true);
     raise exception 'T1: expected 28000, got no error';
   exception when sqlstate '28000' then
     null; -- expected
@@ -67,7 +67,7 @@ do $$
 begin
   perform _test_as('aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa');
   begin
-    perform public.attest_age((current_date + interval '1 day')::date);
+    perform public.attest_age((current_date + interval '1 day')::date, true);
     raise exception 'T2: expected 22023 (future DOB)';
   exception when sqlstate '22023' then
     null;
@@ -80,7 +80,7 @@ do $$
 begin
   perform _test_as('aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa');
   begin
-    perform public.attest_age(date '1899-12-31');
+    perform public.attest_age(date '1899-12-31', true);
     raise exception 'T3: expected 22023 (DOB before 1900)';
   exception when sqlstate '22023' then
     null;
@@ -100,7 +100,7 @@ declare
   v_row public.users%rowtype;
 begin
   perform _test_as('aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa');
-  v_out := public.attest_age((current_date - interval '30 years')::date);
+  v_out := public.attest_age((current_date - interval '30 years')::date, true);
   if v_out->>'outcome' <> 'verified' then
     raise exception 'T4: expected outcome=verified, got %', v_out;
   end if;
@@ -123,7 +123,7 @@ declare
   v_row public.users%rowtype;
 begin
   perform _test_as('bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb');
-  v_out := public.attest_age((current_date - interval '10 years')::date);
+  v_out := public.attest_age((current_date - interval '10 years')::date, true);
   if v_out->>'outcome' <> 'blocked' then
     raise exception 'T5: expected outcome=blocked, got %', v_out;
   end if;
@@ -144,7 +144,7 @@ do $$
 begin
   perform _test_as('bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb');
   begin
-    perform public.attest_age((current_date - interval '40 years')::date);
+    perform public.attest_age((current_date - interval '40 years')::date, true);
     raise exception 'T6: expected P0001 (no further attempts)';
   exception when sqlstate 'P0001' then
     null;
@@ -164,7 +164,7 @@ begin
   select age_verified_at into v_before_at from public.users
    where id = 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa';
   perform _test_as('aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa');
-  v_out := public.attest_age((current_date - interval '25 years')::date);
+  v_out := public.attest_age((current_date - interval '25 years')::date, true);
   if v_out->>'outcome' <> 'already_verified' then
     raise exception 'T7: expected outcome=already_verified, got %', v_out;
   end if;
@@ -271,7 +271,7 @@ do $$
 declare
   v_can boolean;
 begin
-  select has_function_privilege('anon', 'public.attest_age(date)', 'EXECUTE')
+  select has_function_privilege('anon', 'public.attest_age(date, boolean)', 'EXECUTE')
     into v_can;
   if v_can then
     raise exception 'T12: anon unexpectedly has EXECUTE on attest_age';
