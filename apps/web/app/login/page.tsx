@@ -7,6 +7,7 @@
 'use client';
 
 import type { AuthError, Provider } from '@supabase/supabase-js';
+import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 
@@ -330,6 +331,25 @@ function LoginInner() {
           <p className="text-center text-xs text-text-tertiary">X sign-in is not available yet.</p>
         )}
       </div>
+
+      <nav
+        aria-label="Legal"
+        className="mt-10 flex justify-center gap-4 text-xs text-text-tertiary"
+      >
+        <Link
+          href="/terms"
+          className="underline-offset-4 hover:text-text-secondary hover:underline"
+        >
+          Terms
+        </Link>
+        <span aria-hidden>·</span>
+        <Link
+          href="/privacy"
+          className="underline-offset-4 hover:text-text-secondary hover:underline"
+        >
+          Privacy
+        </Link>
+      </nav>
     </main>
   );
 }
