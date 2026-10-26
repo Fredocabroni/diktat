@@ -34,6 +34,7 @@ import { googleTrendsPollHandler } from './heat/google-trends-poll.js';
 import { heatSignalMatchHandler } from './heat/match.js';
 import { wikimediaValidateHandler } from './heat/wikimedia-validate.js';
 import { xTrendsPollHandler } from './heat/x-trends-poll.js';
+import { dataMinimizationSweepHandler } from './data-minimization-sweep.js';
 import { localBoundarySweepHandler } from './local-boundary-sweep.js';
 import { newsDedupRankHandler } from './news-dedup-rank.js';
 import { buildNewsIngestHandler } from './news-ingest.js';
@@ -401,6 +402,7 @@ export const heartbeatHandler: JobHandler = async (row, deps) => {
 export const defaultHandlers: Readonly<Record<string, JobHandler>> = Object.freeze({
   heartbeat: heartbeatHandler,
   local_boundary_sweep: localBoundarySweepHandler,
+  data_minimization_sweep: dataMinimizationSweepHandler,
   risk_push: riskPushHandler,
   fact_check: factCheckOrchestratorHandler,
   news_ingest: buildNewsIngestHandler(),
