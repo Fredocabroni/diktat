@@ -19,6 +19,7 @@
 
 'use client';
 
+import Link from 'next/link';
 import { useEffect, useState } from 'react';
 
 import { DeleteAccount } from '../../../../components/settings/DeleteAccount';
@@ -200,6 +201,22 @@ export default function NotificationsSettingsPage() {
       )}
 
       <DeleteAccount />
+
+      <nav aria-label="Legal" className="mt-10 flex justify-start gap-4 text-xs text-text-tertiary">
+        <Link
+          href="/terms"
+          className="underline-offset-4 hover:text-text-secondary hover:underline"
+        >
+          Terms
+        </Link>
+        <span aria-hidden>·</span>
+        <Link
+          href="/privacy"
+          className="underline-offset-4 hover:text-text-secondary hover:underline"
+        >
+          Privacy
+        </Link>
+      </nav>
     </section>
   );
 }
