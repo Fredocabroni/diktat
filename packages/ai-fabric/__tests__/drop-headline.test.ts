@@ -72,9 +72,12 @@ describe('DROP_HEADLINE_REWRITE_SYSTEM_PROMPT — §11 real-people clause', () =
   });
 
   it('applies to headline, summary, AND fact-check claim', () => {
-    expect(DROP_HEADLINE_REWRITE_SYSTEM_PROMPT).toMatch(
-      /headline, summary, and the fact-check claim/,
-    );
+    // A6 (PR fix) extended the surface list to include the debate
+    // question — the phrasing is now "headline, summary, the fact-
+    // check claim, AND the debate question". The lenient regex here
+    // tolerates both pre- and post-A6 shapes so a future rephrasing
+    // that keeps the semantics doesn't require a lockstep test edit.
+    expect(DROP_HEADLINE_REWRITE_SYSTEM_PROMPT).toMatch(/headline, summary,.*fact-check claim/i);
   });
 
   it('provides the empty-output escape when framing cannot be preserved', () => {
@@ -393,5 +396,48 @@ describe('buildDropHeadlineUserPrompt — M2 (URL re-serialization)', () => {
     });
     // No source_url block appears, rather than a block with garbage.
     expect(user).not.toMatch(/<source_url>/);
+  });
+});
+
+describe('DROP_HEADLINE_REWRITE_SYSTEM_PROMPT — §12 Debate Question (A6)', () => {
+  it('names the §12 DEBATE QUESTION section', () => {
+    expect(DROP_HEADLINE_REWRITE_SYSTEM_PROMPT).toMatch(/12\.\s+DEBATE QUESTION/);
+  });
+
+  it('names the debate_question output field explicitly', () => {
+    expect(DROP_HEADLINE_REWRITE_SYSTEM_PROMPT).toContain('debate_question');
+  });
+
+  it('names the yes/no + ends-with-? shape', () => {
+    const prompt = DROP_HEADLINE_REWRITE_SYSTEM_PROMPT.toLowerCase();
+    expect(prompt).toContain('yes/no');
+    expect(prompt).toMatch(/ends with `\?`/i);
+  });
+
+  it('names the 10-200 character bound', () => {
+    expect(DROP_HEADLINE_REWRITE_SYSTEM_PROMPT).toMatch(/10-?200/);
+  });
+
+  it('explicitly surfaces the empty-question SKIP contract', () => {
+    const prompt = DROP_HEADLINE_REWRITE_SYSTEM_PROMPT.toLowerCase();
+    expect(prompt).toContain('empty-question path');
+    expect(prompt).toContain('skip');
+  });
+
+  it('preserves §11 real-people posture in the question (procedural, not guilt-presuming)', () => {
+    const prompt = DROP_HEADLINE_REWRITE_SYSTEM_PROMPT.toLowerCase();
+    expect(prompt).toMatch(/§11 preservation/i);
+    expect(prompt).toContain('procedural posture');
+  });
+
+  it('names the FAIRNESS rule — neither "agree" nor "disagree" is the correct answer', () => {
+    const prompt = DROP_HEADLINE_REWRITE_SYSTEM_PROMPT.toLowerCase();
+    expect(prompt).toContain('fairness');
+    expect(prompt).toContain('fair to both sides');
+  });
+
+  it('names the OVER-REJECTION bar — empty is reserved for "no fair question", not "hard question"', () => {
+    const prompt = DROP_HEADLINE_REWRITE_SYSTEM_PROMPT.toLowerCase();
+    expect(prompt).toContain('over-rejection');
   });
 });

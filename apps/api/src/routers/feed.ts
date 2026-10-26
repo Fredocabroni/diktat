@@ -61,7 +61,7 @@ const listInputSchema = z
   .optional();
 
 const TOPIC_SELECT =
-  'id, headline, source_title, summary, primary_source_url, category, drop_at, dedup_cluster_id, curation_mode, is_block_exhausted, additional_sources, fact_explainer';
+  'id, headline, source_title, summary, primary_source_url, category, drop_at, dedup_cluster_id, curation_mode, is_block_exhausted, additional_sources, fact_explainer, debate_question';
 
 interface TopicRow {
   id: string;
@@ -79,6 +79,10 @@ interface TopicRow {
   // { for_summary, against_summary, source_url, posture }. See
   // packages/ai-fabric/src/prompts/fact-explainer.ts for the contract.
   fact_explainer: unknown;
+  // A6 (migration 20261013100000): nullable text. 10-200 chars ending
+  // with '?' when non-null, enforced by DB CHECK + the Zod refine on
+  // the write side. The UI renders this ABOVE the stance buttons.
+  debate_question: string | null;
 }
 
 /** Narrow + validate the fact_explainer JSON shape before returning
@@ -131,6 +135,23 @@ function parseFactExplainer(raw: unknown): {
     source_url: sourceUrl,
     posture,
   };
+}
+
+/** A6 — read-side narrow for the debate_question column (migration
+ *  20261013100000). Mirrors the DB CHECK:
+ *    - null → null
+ *    - non-string → null
+ *    - char_length not in [10, 200] → null
+ *    - doesn't end with '?' → null
+ *    - contains '<' or '>' → null
+ *  Belt-and-braces against a direct psql insert that bypassed both
+ *  the Zod refine on the write path and the DB CHECK. */
+function parseDebateQuestion(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  if (raw.length < 10 || raw.length > 200) return null;
+  if (!raw.endsWith('?')) return null;
+  if (raw.includes('<') || raw.includes('>')) return null;
+  return raw;
 }
 
 export const feedRouter = router({
@@ -343,6 +364,10 @@ export const feedRouter = router({
         additionalSources: Array.isArray(row.additional_sources) ? row.additional_sources : [],
         userStance: latestStance[row.id] ?? null,
         factExplainer: parseFactExplainer(row.fact_explainer),
+        // A6 — read-side narrow mirrors the DB CHECK (10-200 chars,
+        // ends with '?'). Belt-and-braces against a direct psql write
+        // that bypassed both the Zod refine and the CHECK.
+        debateQuestion: parseDebateQuestion(row.debate_question),
       }));
 
       return { topics };
