@@ -81,8 +81,13 @@ begin
 end;
 $$;
 
+-- Belt-and-braces: revoke from service_role too so the "owner-only"
+-- intent is enforced by explicit deny, not just absence-of-grant.
+-- The owner (postgres) retains its implicit EXECUTE on its own
+-- functions, so the SECURITY DEFINER owner-chain from
+-- delete_my_account / data_minimization_sweep still works.
 revoke all on function public._scrub_user_ledger_keys(uuid)
-  from public, anon, authenticated;
+  from public, anon, authenticated, service_role;
 
 comment on function public._scrub_user_ledger_keys(uuid) is
   'Internal: anonymizes ap_transactions.idempotency_key for the given '

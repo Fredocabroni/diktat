@@ -461,6 +461,10 @@ begin
        'public._scrub_user_ledger_keys(uuid)', 'EXECUTE') then
     raise exception 'M11: public has EXECUTE on _scrub_user_ledger_keys';
   end if;
+  if has_function_privilege('service_role',
+       'public._scrub_user_ledger_keys(uuid)', 'EXECUTE') then
+    raise exception 'M11: service_role has EXECUTE on _scrub_user_ledger_keys';
+  end if;
 end
 $$;
 
