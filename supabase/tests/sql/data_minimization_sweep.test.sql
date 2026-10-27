@@ -170,16 +170,133 @@ begin
   if v_still_there <> 2 then
     raise exception 'M3: dry-run touched fresh/bot rows';
   end if;
+  -- M8 (dry-run slice): candidate array keys ALWAYS present; array
+  -- length matches candidate count; the >7d human's UUID appears in
+  -- blocked_candidate_ids; neither the bot nor the fresh human appears.
+  if v_out->'blocked_candidate_ids' is null
+     or jsonb_typeof(v_out->'blocked_candidate_ids') <> 'array' then
+    raise exception 'M8: blocked_candidate_ids missing or not an array';
+  end if;
+  if v_out->'pre_launch_candidate_ids' is null
+     or jsonb_typeof(v_out->'pre_launch_candidate_ids') <> 'array' then
+    raise exception 'M8: pre_launch_candidate_ids missing or not an array';
+  end if;
+  if jsonb_array_length(v_out->'blocked_candidate_ids')
+       <> (v_out->>'blocked_candidates')::int then
+    raise exception 'M8: blocked_candidate_ids length <> blocked_candidates';
+  end if;
+  if not (v_out->'blocked_candidate_ids'
+            ? '11111111-aaaa-4111-8111-111111111111') then
+    raise exception 'M8: expected >7d human UUID in blocked_candidate_ids';
+  end if;
+  if v_out->'blocked_candidate_ids'
+       ? '22222222-bbbb-4222-8222-222222222222' then
+    raise exception 'M8: fresh (<7d) human leaked into blocked_candidate_ids';
+  end if;
+  if v_out->'blocked_candidate_ids'
+       ? '33333333-cccc-4333-8333-333333333333' then
+    raise exception 'M8: bot leaked into blocked_candidate_ids';
+  end if;
 end
 $$;
 
 -- --------------------------------------------------------------------
--- M4: live run deletes the age-blocked candidates.
+-- M6: operator allowlist excludes a candidate from BOTH counts and
+--     from the candidate_ids array. Second half re-runs after the
+--     allowlist row is removed, asserting the candidate reappears.
+-- --------------------------------------------------------------------
+do $$
+declare
+  v_out        jsonb;
+  v_before     int;
+  v_after      int;
+begin
+  perform set_config('role', 'postgres', true);
+  -- Baseline count (allowlist is empty): the >7d human must appear.
+  v_out := public.data_minimization_sweep(true);
+  v_before := (v_out->>'blocked_candidates')::int;
+  if v_before < 1 then
+    raise exception 'M6: baseline blocked_candidates was 0, fixtures broken';
+  end if;
+  if not (v_out->'blocked_candidate_ids'
+            ? '11111111-aaaa-4111-8111-111111111111') then
+    raise exception 'M6: baseline missing >7d human in blocked_candidate_ids';
+  end if;
+
+  -- Protect the >7d human.
+  insert into public.sweep_protected_users (user_id, note)
+  values ('11111111-aaaa-4111-8111-111111111111', 'M6 test');
+
+  v_out := public.data_minimization_sweep(true);
+  v_after := (v_out->>'blocked_candidates')::int;
+  if v_after <> v_before - 1 then
+    raise exception 'M6: allowlist did not drop blocked count (before=%, after=%)',
+      v_before, v_after;
+  end if;
+  if v_out->'blocked_candidate_ids'
+       ? '11111111-aaaa-4111-8111-111111111111' then
+    raise exception 'M6: allowlisted user still appears in blocked_candidate_ids';
+  end if;
+
+  -- Also protect the pre-launch orphan and assert exclusion from the
+  -- pre-launch slice. The pre-launch clock gate (current_date > launch
+  -- + 30d) may itself hold the count at 0 depending on wall-clock, so
+  -- we assert the ID-array membership only when a baseline exists.
+  insert into public.sweep_protected_users (user_id, note)
+  values ('44444444-dddd-4444-8444-444444444444', 'M6 pre-launch');
+  v_out := public.data_minimization_sweep(true);
+  if v_out->'pre_launch_candidate_ids'
+       ? '44444444-dddd-4444-8444-444444444444' then
+    raise exception 'M6: allowlisted pre-launch user leaked into pre_launch_candidate_ids';
+  end if;
+
+  -- Remove allowlist rows; the >7d human must reappear.
+  delete from public.sweep_protected_users
+    where user_id in (
+      '11111111-aaaa-4111-8111-111111111111',
+      '44444444-dddd-4444-8444-444444444444'
+    );
+  v_out := public.data_minimization_sweep(true);
+  if (v_out->>'blocked_candidates')::int <> v_before then
+    raise exception 'M6: removing allowlist did not restore count';
+  end if;
+end
+$$;
+
+-- --------------------------------------------------------------------
+-- M7: scrub-on-sweep. A live run must anonymize every
+-- ap_transactions.idempotency_key that contains the victim UUID
+-- BEFORE auth.users DELETE cascades. Seeded here on the >7d human
+-- (id 11111111) so the M4 live-run deletes it with a fully-seeded
+-- idempotency_key ledger behind it.
+-- --------------------------------------------------------------------
+do $$
+declare
+  v_victim text := '11111111-aaaa-4111-8111-111111111111';
+begin
+  perform set_config('role', 'postgres', true);
+  insert into public.ap_transactions
+    (user_id, delta, balance_after, reason, idempotency_key)
+  values
+    ('11111111-aaaa-4111-8111-111111111111', 100, 100, 'admin_adjust',
+     'signup_grant:' || v_victim),
+    ('11111111-aaaa-4111-8111-111111111111', -5, 95, 'battle_loss',
+     'debate_entry:' || v_victim || ':r1')
+  on conflict (idempotency_key) do nothing;
+end
+$$;
+
+-- --------------------------------------------------------------------
+-- M4 + M7 + M9: live run deletes the age-blocked candidates, scrubs
+-- the idempotency keys first, and returns the deleted UUIDs under
+-- blocked_candidate_ids.
 -- --------------------------------------------------------------------
 do $$
 declare
   v_out jsonb;
   v_still_there int;
+  v_residual    int;
+  v_victim text := '11111111-aaaa-4111-8111-111111111111';
 begin
   perform set_config('role', 'postgres', true);
   v_out := public.data_minimization_sweep(false);
@@ -204,6 +321,29 @@ begin
   end if;
   if (v_out->>'deleted_blocked')::int < 1 then
     raise exception 'M4: deleted_blocked count is zero';
+  end if;
+
+  -- M9: live-run candidate array matches deleted_blocked and carries
+  -- the actually-deleted UUID.
+  if jsonb_array_length(v_out->'blocked_candidate_ids')
+       <> (v_out->>'deleted_blocked')::int then
+    raise exception 'M9: blocked_candidate_ids length <> deleted_blocked';
+  end if;
+  if not (v_out->'blocked_candidate_ids'
+            ? '11111111-aaaa-4111-8111-111111111111') then
+    raise exception 'M9: deleted >7d human UUID missing from blocked_candidate_ids';
+  end if;
+
+  -- M7: no residual UUID anywhere in ap_transactions.idempotency_key.
+  -- The ap_transactions rows themselves survive (ON DELETE SET NULL
+  -- anonymizes user_id) but the UUID substring must be gone.
+  select count(*)
+    into v_residual
+    from public.ap_transactions
+    where idempotency_key like '%' || v_victim || '%';
+  if v_residual <> 0 then
+    raise exception 'M7: % residual ap_transactions rows still carry the victim UUID',
+      v_residual;
   end if;
 end
 $$;
@@ -240,6 +380,108 @@ begin
         and created_at < date '2026-10-21'
   ) then
     raise exception 'M5: pre-launch orphan fixture missing expected column shape';
+  end if;
+end
+$$;
+
+-- --------------------------------------------------------------------
+-- M10: delete_my_account behaviour unchanged after helper extraction.
+-- The scrub path still produces 'ok=true', scrubs>=1, and leaves no
+-- residual UUID anywhere in idempotency_key. Covers the extraction
+-- (migration 20261114000000) by exercising delete_my_account end-to-
+-- end with a fresh fixture (the account_deletion_ledger.test.sql
+-- suite already runs D1..D9; this adds a scoped regression here).
+-- --------------------------------------------------------------------
+do $$
+declare
+  v_victim    text := '7a7a7a7a-7777-4777-8777-7a7a7a7a7a7a';
+  v_out       jsonb;
+  v_residual  int;
+begin
+  perform set_config('role', 'postgres', true);
+  perform set_config('request.jwt.claims', '', true);
+
+  insert into auth.users (id, email, aud, role, created_at, updated_at, last_sign_in_at)
+  values (v_victim::uuid, 'm10@test', 'authenticated',
+          'authenticated', now(), now(), now() - interval '2 minutes')
+  on conflict (id) do nothing;
+
+  update public.users
+     set handle = 'm10_u', display_name = 'M10'
+   where id = v_victim::uuid;
+
+  insert into public.ap_transactions
+    (user_id, delta, balance_after, reason, idempotency_key)
+  values
+    (v_victim::uuid, 100, 100, 'admin_adjust', 'signup_grant:' || v_victim),
+    (v_victim::uuid, -5, 95, 'battle_loss', 'debate_entry:' || v_victim || ':r1')
+  on conflict (idempotency_key) do nothing;
+
+  perform set_config('request.jwt.claims',
+    json_build_object('sub', v_victim, 'role', 'authenticated')::text,
+    true);
+  perform set_config('role', 'authenticated', true);
+  v_out := public.delete_my_account();
+
+  if (v_out->>'ok')::boolean is distinct from true then
+    raise exception 'M10: delete_my_account did not return ok=true';
+  end if;
+  if (v_out->>'scrubbed')::int < 1 then
+    raise exception 'M10: scrubbed count was 0, extracted helper did not run';
+  end if;
+
+  perform set_config('role', 'postgres', true);
+  select count(*)
+    into v_residual
+    from public.ap_transactions
+    where idempotency_key like '%' || v_victim || '%';
+  if v_residual <> 0 then
+    raise exception 'M10: % residual rows still carry the victim UUID in idempotency_key',
+      v_residual;
+  end if;
+end
+$$;
+
+-- --------------------------------------------------------------------
+-- M11: internal scrub helper is NOT grantable to clients. anon,
+-- authenticated and public must all lack EXECUTE; the helper is
+-- reachable only via owner-chained SECURITY DEFINER functions.
+-- --------------------------------------------------------------------
+do $$
+begin
+  if has_function_privilege('anon',
+       'public._scrub_user_ledger_keys(uuid)', 'EXECUTE') then
+    raise exception 'M11: anon has EXECUTE on _scrub_user_ledger_keys';
+  end if;
+  if has_function_privilege('authenticated',
+       'public._scrub_user_ledger_keys(uuid)', 'EXECUTE') then
+    raise exception 'M11: authenticated has EXECUTE on _scrub_user_ledger_keys';
+  end if;
+  if has_function_privilege('public',
+       'public._scrub_user_ledger_keys(uuid)', 'EXECUTE') then
+    raise exception 'M11: public has EXECUTE on _scrub_user_ledger_keys';
+  end if;
+end
+$$;
+
+-- --------------------------------------------------------------------
+-- M12: sweep_protected_users table — RLS on, no end-user grants.
+-- --------------------------------------------------------------------
+do $$
+declare v_rls boolean;
+begin
+  select relrowsecurity
+    into v_rls
+    from pg_class
+    where oid = 'public.sweep_protected_users'::regclass;
+  if not v_rls then
+    raise exception 'M12: sweep_protected_users has RLS disabled';
+  end if;
+  if has_table_privilege('anon', 'public.sweep_protected_users', 'SELECT')
+     or has_table_privilege('authenticated', 'public.sweep_protected_users', 'SELECT')
+     or has_table_privilege('anon', 'public.sweep_protected_users', 'INSERT')
+     or has_table_privilege('authenticated', 'public.sweep_protected_users', 'INSERT') then
+    raise exception 'M12: sweep_protected_users exposes SELECT/INSERT to anon or authenticated';
   end if;
 end
 $$;

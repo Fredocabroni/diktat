@@ -57,6 +57,8 @@ const RESULT_SHAPE = {
   pre_launch_candidates: 0,
   deleted_blocked: 0,
   deleted_pre_launch: 0,
+  blocked_candidate_ids: [] as string[],
+  pre_launch_candidate_ids: [] as string[],
   launch_date: '2026-10-21',
   swept_at: '2026-10-22T03:00:00Z',
 };
@@ -130,5 +132,65 @@ describe('dataMinimizationSweepHandler', () => {
     await expect(
       dataMinimizationSweepHandler(row(), { supabase: buildSupabase(rpc), logger: buildLogger() }),
     ).rejects.toThrow(/returned null result/);
+  });
+
+  it('logs candidate UUID arrays and their lengths (migration 20261114000000)', async () => {
+    const blocked = [
+      '11111111-aaaa-4111-8111-111111111111',
+      '22222222-bbbb-4222-8222-222222222222',
+    ];
+    const preLaunch = ['44444444-dddd-4444-8444-444444444444'];
+    const rpc: FakeRpc = {
+      calls: [],
+      next: {
+        data: {
+          ...RESULT_SHAPE,
+          blocked_candidates: blocked.length,
+          pre_launch_candidates: preLaunch.length,
+          blocked_candidate_ids: blocked,
+          pre_launch_candidate_ids: preLaunch,
+        },
+        error: null,
+      },
+    };
+    const logger = buildLogger();
+    await dataMinimizationSweepHandler(row(), { supabase: buildSupabase(rpc), logger });
+    const log = logger.calls.find((c) => c.obj.event === 'data_minimization.sweep');
+    expect(log?.obj).toMatchObject({
+      blockedCandidateIds: blocked,
+      blockedCandidateIdsLength: 2,
+      preLaunchCandidateIds: preLaunch,
+      preLaunchCandidateIdsLength: 1,
+    });
+  });
+
+  it('defaults missing candidate arrays to [] (legacy RPC compatibility)', async () => {
+    // Guards against a stale deployment order where the handler ships
+    // before the migration lands — the handler must not crash reading
+    // an undefined array.
+    const rpc: FakeRpc = {
+      calls: [],
+      next: {
+        data: {
+          dry_run: true,
+          blocked_candidates: 0,
+          pre_launch_candidates: 0,
+          deleted_blocked: 0,
+          deleted_pre_launch: 0,
+          launch_date: '2026-10-21',
+          swept_at: '2026-10-22T03:00:00Z',
+        },
+        error: null,
+      },
+    };
+    const logger = buildLogger();
+    await dataMinimizationSweepHandler(row(), { supabase: buildSupabase(rpc), logger });
+    const log = logger.calls.find((c) => c.obj.event === 'data_minimization.sweep');
+    expect(log?.obj).toMatchObject({
+      blockedCandidateIds: [],
+      blockedCandidateIdsLength: 0,
+      preLaunchCandidateIds: [],
+      preLaunchCandidateIdsLength: 0,
+    });
   });
 });

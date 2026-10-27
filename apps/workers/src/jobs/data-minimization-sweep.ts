@@ -32,6 +32,11 @@ interface SweepRpcResult {
   readonly pre_launch_candidates: number;
   readonly deleted_blocked: number;
   readonly deleted_pre_launch: number;
+  // Dry-run: candidate UUIDs the sweep WOULD delete (capped 500 each).
+  // Live-run: UUIDs the sweep actually deleted (same cap).
+  // Added in migration 20261114000000.
+  readonly blocked_candidate_ids: readonly string[];
+  readonly pre_launch_candidate_ids: readonly string[];
   readonly launch_date: string;
   readonly swept_at: string;
 }
@@ -56,6 +61,12 @@ export const dataMinimizationSweepHandler: JobHandler = async (row, deps) => {
     throw new Error('data_minimization_sweep RPC returned null result');
   }
 
+  // Defend against a legacy RPC version that pre-dates migration
+  // 20261114000000 and omits the arrays — treat missing as empty so
+  // the log line still renders.
+  const blockedIds = result.blocked_candidate_ids ?? [];
+  const preLaunchIds = result.pre_launch_candidate_ids ?? [];
+
   deps.logger.info({
     event: 'data_minimization.sweep',
     jobId: row.id,
@@ -64,6 +75,10 @@ export const dataMinimizationSweepHandler: JobHandler = async (row, deps) => {
     preLaunchCandidates: result.pre_launch_candidates,
     deletedBlocked: result.deleted_blocked,
     deletedPreLaunch: result.deleted_pre_launch,
+    blockedCandidateIds: blockedIds,
+    blockedCandidateIdsLength: blockedIds.length,
+    preLaunchCandidateIds: preLaunchIds,
+    preLaunchCandidateIdsLength: preLaunchIds.length,
     launchDate: result.launch_date,
     sweptAt: result.swept_at,
   });
