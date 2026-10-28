@@ -37,6 +37,13 @@ interface SweepRpcResult {
   // Added in migration 20261114000000.
   readonly blocked_candidate_ids: readonly string[];
   readonly pre_launch_candidate_ids: readonly string[];
+  // Age-block tombstone bookkeeping. Added in migration 20261115000000.
+  // tombstones_written: email-hash rows written on this live age-blocked
+  //   purge. Always 0 on dry-run and on pre-launch-only ticks.
+  // tombstones_expired: expired rows deleted at the top of the function
+  //   on this tick, both dry-run and live.
+  readonly tombstones_written?: number;
+  readonly tombstones_expired?: number;
   readonly launch_date: string;
   readonly swept_at: string;
 }
@@ -62,10 +69,13 @@ export const dataMinimizationSweepHandler: JobHandler = async (row, deps) => {
   }
 
   // Defend against a legacy RPC version that pre-dates migration
-  // 20261114000000 and omits the arrays — treat missing as empty so
-  // the log line still renders.
+  // 20261114000000 (candidate arrays) or 20261115000000 (tombstone
+  // counts) and omits those keys — treat missing arrays as empty and
+  // missing counts as 0 so the log line still renders.
   const blockedIds = result.blocked_candidate_ids ?? [];
   const preLaunchIds = result.pre_launch_candidate_ids ?? [];
+  const tombstonesWritten = result.tombstones_written ?? 0;
+  const tombstonesExpired = result.tombstones_expired ?? 0;
 
   deps.logger.info({
     event: 'data_minimization.sweep',
@@ -79,6 +89,8 @@ export const dataMinimizationSweepHandler: JobHandler = async (row, deps) => {
     blockedCandidateIdsLength: blockedIds.length,
     preLaunchCandidateIds: preLaunchIds,
     preLaunchCandidateIdsLength: preLaunchIds.length,
+    tombstonesWritten,
+    tombstonesExpired,
     launchDate: result.launch_date,
     sweptAt: result.swept_at,
   });
