@@ -44,6 +44,11 @@ interface SweepRpcResult {
   //   on this tick, both dry-run and live.
   readonly tombstones_written?: number;
   readonly tombstones_expired?: number;
+  // Provider-identity tombstone bookkeeping. Added in migration
+  // 20261120000000. One row per auth.identities row per victim on the
+  // live age-blocked purge. Expired-row cleanup runs on every tick.
+  readonly identity_tombstones_written?: number;
+  readonly identity_tombstones_expired?: number;
   readonly launch_date: string;
   readonly swept_at: string;
 }
@@ -76,6 +81,8 @@ export const dataMinimizationSweepHandler: JobHandler = async (row, deps) => {
   const preLaunchIds = result.pre_launch_candidate_ids ?? [];
   const tombstonesWritten = result.tombstones_written ?? 0;
   const tombstonesExpired = result.tombstones_expired ?? 0;
+  const identityTombstonesWritten = result.identity_tombstones_written ?? 0;
+  const identityTombstonesExpired = result.identity_tombstones_expired ?? 0;
 
   deps.logger.info({
     event: 'data_minimization.sweep',
@@ -91,6 +98,8 @@ export const dataMinimizationSweepHandler: JobHandler = async (row, deps) => {
     preLaunchCandidateIdsLength: preLaunchIds.length,
     tombstonesWritten,
     tombstonesExpired,
+    identityTombstonesWritten,
+    identityTombstonesExpired,
     launchDate: result.launch_date,
     sweptAt: result.swept_at,
   });
