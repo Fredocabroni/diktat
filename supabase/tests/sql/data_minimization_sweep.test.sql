@@ -26,6 +26,19 @@
 begin;
 
 -- --------------------------------------------------------------------
+-- Pepper seed. Migration 20261120000000 routes the sweep's live
+-- hash through public._age_block_hash(), which raises if the vault
+-- secret 'age_block_pepper' is missing (fail-closed by design). Seed
+-- a fixed test pepper so M4's live path reaches its deletes.
+-- --------------------------------------------------------------------
+delete from vault.secrets where name = 'age_block_pepper';
+select vault.create_secret(
+  'test-pepper-data-minimization-sweep-fixture-' || repeat('a', 19),
+  'age_block_pepper',
+  'test fixture — not for production use'
+);
+
+-- --------------------------------------------------------------------
 -- Fixtures.
 -- --------------------------------------------------------------------
 -- INSERT auth.users rows. The handle_new_user trigger (migration
@@ -489,5 +502,8 @@ begin
   end if;
 end
 $$;
+
+-- Clean up the test pepper so a re-run starts fresh.
+delete from vault.secrets where name = 'age_block_pepper';
 
 rollback;
