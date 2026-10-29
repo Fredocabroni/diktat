@@ -3,8 +3,8 @@
 --
 -- Covers:
 --   T1  Tombstone written on live age-blocked sweep (one row per
---       victim email, hash matches encode(sha256(lower(btrim(email))),
---       'hex')).
+--       victim email, hash matches public._age_block_hash(email) —
+--       HMAC-SHA256 after migration 20261120000000).
 --   T2  Tombstone NOT written on dry-run (same fixture, counts only).
 --   T3  Tombstone NOT written on pre-launch branch (fixture satisfies
 --       the pre-launch WHERE shape; even if the clock gate fires and
@@ -26,6 +26,22 @@
 -- data_minimization_sweep.test.sql relies on.
 
 begin;
+
+-- --------------------------------------------------------------------
+-- Pepper seed. Migration 20261120000000 moved both the sweep and the
+-- hook off plain SHA-256 to HMAC-SHA256 keyed by vault secret
+-- 'age_block_pepper'. The sweep's live branch raises if the secret
+-- is missing (fail-closed). Seed a fixed test pepper here so this
+-- file keeps exercising the sweep's live path; the hash values are
+-- now computed via public._age_block_hash() instead of inline
+-- sha256(), so plain-SHA-256 expectations are no longer valid.
+-- --------------------------------------------------------------------
+delete from vault.secrets where name = 'age_block_pepper';
+select vault.create_secret(
+  'test-pepper-age-block-tombstone-fixture-' || repeat('a', 23),
+  'age_block_pepper',
+  'test fixture — not for production use'
+);
 
 -- --------------------------------------------------------------------
 -- Fixtures.
@@ -133,13 +149,10 @@ declare
 begin
   perform set_config('role', 'postgres', true);
 
-  -- Normalized hash for the T1 victim's email as auth.users stored it
-  -- ('Victim.T1@Example.COM' — the migration lower+btrims before
-  -- hashing).
-  v_expected_hash := encode(
-    pg_catalog.sha256(lower(btrim('Victim.T1@Example.COM'))::bytea),
-    'hex'
-  );
+  -- Normalized HMAC-SHA256 for the T1 victim's email as auth.users
+  -- stored it ('Victim.T1@Example.COM' — the helper lower+btrims
+  -- before hashing). Keyed by the test pepper seeded above.
+  v_expected_hash := public._age_block_hash('Victim.T1@Example.COM');
 
   v_out := public.data_minimization_sweep(false);
 
@@ -173,10 +186,7 @@ begin
   -- assert no tombstone row exists for its email hash regardless.
   if exists (
     select 1 from public.age_block_tombstones
-    where email_hash = encode(
-      pg_catalog.sha256(lower(btrim('prelaunch.t3@example.com'))::bytea),
-      'hex'
-    )
+    where email_hash = public._age_block_hash('prelaunch.t3@example.com')
   ) then
     raise exception 'T3: pre-launch orphan leaked into age_block_tombstones';
   end if;
@@ -266,10 +276,7 @@ begin
   perform set_config('role', 'postgres', true);
   update public.age_block_tombstones
      set expires_at = now() - interval '1 second'
-   where email_hash = encode(
-     pg_catalog.sha256(lower(btrim('victim.t1@example.com'))::bytea),
-     'hex'
-   );
+   where email_hash = public._age_block_hash('victim.t1@example.com');
   v_out := public.hook_before_user_created(
     jsonb_build_object(
       'user', jsonb_build_object('email', 'victim.t1@example.com')
@@ -290,10 +297,7 @@ do $$
 declare
   v_out            jsonb;
   v_still_there    int;
-  v_expected_hash  text := encode(
-    pg_catalog.sha256(lower(btrim('victim.t1@example.com'))::bytea),
-    'hex'
-  );
+  v_expected_hash  text := public._age_block_hash('victim.t1@example.com');
 begin
   perform set_config('role', 'postgres', true);
   v_out := public.data_minimization_sweep(true);
@@ -354,5 +358,8 @@ begin
   end if;
 end
 $$;
+
+-- Clean up the test pepper so a re-run starts fresh.
+delete from vault.secrets where name = 'age_block_pepper';
 
 rollback;

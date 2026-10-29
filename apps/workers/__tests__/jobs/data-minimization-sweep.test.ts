@@ -61,6 +61,8 @@ const RESULT_SHAPE = {
   pre_launch_candidate_ids: [] as string[],
   tombstones_written: 0,
   tombstones_expired: 0,
+  identity_tombstones_written: 0,
+  identity_tombstones_expired: 0,
   launch_date: '2026-10-21',
   swept_at: '2026-10-22T03:00:00Z',
 };
@@ -197,6 +199,10 @@ describe('dataMinimizationSweepHandler', () => {
       // so the log line still renders.
       tombstonesWritten: 0,
       tombstonesExpired: 0,
+      // Migration 20261120000000 added identity-tombstone counters;
+      // legacy RPC omits them → default to 0.
+      identityTombstonesWritten: 0,
+      identityTombstonesExpired: 0,
     });
   });
 
@@ -223,6 +229,36 @@ describe('dataMinimizationSweepHandler', () => {
     expect(log?.obj).toMatchObject({
       tombstonesWritten: 3,
       tombstonesExpired: 2,
+    });
+  });
+
+  it('logs identity-tombstone counters surfaced by migration 20261120000000', async () => {
+    const rpc: FakeRpc = {
+      calls: [],
+      next: {
+        data: {
+          ...RESULT_SHAPE,
+          dry_run: false,
+          deleted_blocked: 2,
+          tombstones_written: 2,
+          tombstones_expired: 1,
+          identity_tombstones_written: 3,
+          identity_tombstones_expired: 1,
+        },
+        error: null,
+      },
+    };
+    const logger = buildLogger();
+    await dataMinimizationSweepHandler(row({ payload: { dry_run: false } }), {
+      supabase: buildSupabase(rpc),
+      logger,
+    });
+    const log = logger.calls.find((c) => c.obj.event === 'data_minimization.sweep');
+    expect(log?.obj).toMatchObject({
+      tombstonesWritten: 2,
+      tombstonesExpired: 1,
+      identityTombstonesWritten: 3,
+      identityTombstonesExpired: 1,
     });
   });
 });
