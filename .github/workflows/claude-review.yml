@@ -324,30 +324,38 @@ jobs:
           # Haiku is capable at ~5-10× lower per-token cost. Also gated
           # via `changes.outputs.copy` so it only fires when a
           # user-facing surface changed.
-          # Diff-only: prompt tells the agent it can ONLY report findings
-          # on lines that appear in the fed PR diff at `./pr.diff`.
+          # Strict diff-only (2026-10-22 cost cut): prompt forbids any
+          # file read outside the diff. Copy-linter has never needed
+          # cross-file context to catch a real finding — adding the
+          # explicit prohibition closes the biggest exploratory-token
+          # drain seen in the per-PR cost analysis.
           - name: copy-linter
             model: claude-haiku-4-5-20251001
             scope: diff-only
-            prompt: "Run the copy-linter subagent on the PR diff at ./pr.diff. Report findings ONLY on lines added or modified in that diff — never on untouched surrounding code, never on files not in the diff. If a violation is on a line that appears in the diff hunk, include it; if the violation is in a file the diff doesn't touch, omit it entirely. Output ONLY the review report in markdown. The VERY FIRST non-blank line of your output MUST be a markdown header (e.g. '# Copy Review') — do not precede it with any preamble. The VERY LAST non-blank line of your output MUST be EXACTLY `VERDICT: PASS` or `VERDICT: BLOCK` (no decoration, no trailing period, nothing after it). Nothing else — no closing summary, no meta-comment, no note about the report itself. The report + final VERDICT line IS your entire output. Do NOT edit files, request write or file permissions, run shell commands, or take any tool action of any kind. You are a read-only reviewer: if the diff has defects, name them and recommend the fix IN THE REPORT — never apply or offer to apply changes yourself. A human approves every change."
-          # addiction-auditor stays on Sonnet 4.6. Its judgment calls
-          # (§11 anti-patterns, §12 trust test) are load-bearing when
-          # they trigger; it just runs rarely now that it's gated by
-          # `changes.outputs.addiction`.
-          # Diff-only: same constraint as copy-linter.
+            prompt: "Run the copy-linter subagent on the PR diff at ./pr.diff. Report findings ONLY on lines added or modified in that diff — never on untouched surrounding code, never on files not in the diff. If a violation is on a line that appears in the diff hunk, include it; if the violation is in a file the diff doesn't touch, omit it entirely. Do NOT read any repo file that is not in ./pr.diff — the diff hunks carry all the context you need. Output ONLY the review report in markdown. The VERY FIRST non-blank line of your output MUST be a markdown header (e.g. '# Copy Review') — do not precede it with any preamble. The VERY LAST non-blank line of your output MUST be EXACTLY `VERDICT: PASS` or `VERDICT: BLOCK` (no decoration, no trailing period, nothing after it). Nothing else — no closing summary, no meta-comment, no note about the report itself. The report + final VERDICT line IS your entire output. Do NOT edit files, request write or file permissions, run shell commands, or take any tool action of any kind. You are a read-only reviewer: if the diff has defects, name them and recommend the fix IN THE REPORT — never apply or offer to apply changes yourself. A human approves every change."
+          # addiction-auditor → Haiku 4.5 (2026-10-22 cost cut). The
+          # §11 checklist + §12 trust test are structured pattern
+          # matches against named anti-patterns; Haiku handles them
+          # at ~5x lower per-token cost. The judgment calls that
+          # caught real issues (§11.5 silent streak break; §11.7
+          # nag-modal variants) all take the form "match the
+          # checklist item, cite the file:line" — a Haiku-shape task.
+          # Gated via `changes.outputs.addiction` so it fires only
+          # on mechanic-adjacent paths.
+          # Strict diff-only: no cross-file reads.
           - name: addiction-auditor
-            model: claude-sonnet-4-6
+            model: claude-haiku-4-5-20251001
             scope: diff-only
-            prompt: "Run the addiction-auditor subagent on engagement-mechanic changes in the PR diff at ./pr.diff. Report findings ONLY on lines added or modified in that diff — never on untouched surrounding code, never on files not in the diff. If a mechanic is defined on a line that appears in the diff hunk, audit it; if the mechanic is in a file the diff doesn't touch, omit it entirely. Output ONLY the review report in markdown. The VERY FIRST non-blank line of your output MUST be a markdown header (e.g. '# Addiction Audit') — do not precede it with any preamble. The VERY LAST non-blank line of your output MUST be EXACTLY `VERDICT: PASS` or `VERDICT: BLOCK` (no decoration, no trailing period, nothing after it). Nothing else — no closing summary, no meta-comment, no note about the report itself. The report + final VERDICT line IS your entire output. Do NOT edit files, request write or file permissions, run shell commands, or take any tool action of any kind. You are a read-only reviewer: if the diff has defects, name them and recommend the fix IN THE REPORT — never apply or offer to apply changes yourself. A human approves every change."
-          # neutrality-auditor on Sonnet 4.6. Guards the fact-check
-          # integrity contract — the prompt template, the verdict
-          # enum, the retrieval_mode field, and verdict-rendering
-          # copy. The copy-linter guards voice but not epistemology;
-          # the security-reviewer guards secrets, not neutrality.
-          # Gated via `changes.outputs.neutrality` so it fires only
-          # on edits to the three fact-check surfaces (same cost
-          # posture as copy-linter / addiction-auditor).
-          # Diff-only: same constraint as the other advisory reviewers.
+            prompt: "Run the addiction-auditor subagent on engagement-mechanic changes in the PR diff at ./pr.diff. Report findings ONLY on lines added or modified in that diff — never on untouched surrounding code, never on files not in the diff. If a mechanic is defined on a line that appears in the diff hunk, audit it; if the mechanic is in a file the diff doesn't touch, omit it entirely. Do NOT read any repo file that is not in ./pr.diff — the diff hunks carry all the context you need. Output ONLY the review report in markdown. The VERY FIRST non-blank line of your output MUST be a markdown header (e.g. '# Addiction Audit') — do not precede it with any preamble. The VERY LAST non-blank line of your output MUST be EXACTLY `VERDICT: PASS` or `VERDICT: BLOCK` (no decoration, no trailing period, nothing after it). Nothing else — no closing summary, no meta-comment, no note about the report itself. The report + final VERDICT line IS your entire output. Do NOT edit files, request write or file permissions, run shell commands, or take any tool action of any kind. You are a read-only reviewer: if the diff has defects, name them and recommend the fix IN THE REPORT — never apply or offer to apply changes yourself. A human approves every change."
+          # neutrality-auditor stays on Sonnet 4.6 (2026-10-22 cost
+          # cut decision). Guards the fact-check integrity contract —
+          # a weakening that a Haiku pass misses would be real harm,
+          # and this reviewer fires rarely (only on edits to three
+          # fact-check surfaces), so the cost of staying on Sonnet is
+          # negligible per-week.
+          # Context-read allowance stays: the integrity contract
+          # explicitly cites three source-of-truth files the reviewer
+          # must consult to judge weakening.
           - name: neutrality-auditor
             model: claude-sonnet-4-6
             scope: diff-only
@@ -487,7 +495,13 @@ jobs:
       - name: Run ${{ matrix.reviewer.name }}
         if: ${{ env.SHOULD_RUN == 'true' }}
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # 2026-10-22 cost cut: prefer DIKTAT_CI_ANTHROPIC_KEY when
+          # set so CI reviewers and prod workers/api can run on
+          # different Anthropic workspaces / billing. Falls back to
+          # ANTHROPIC_API_KEY so the switch is a one-step rollout:
+          # add the new secret and the next workflow run picks it up;
+          # unset to roll back.
+          ANTHROPIC_API_KEY: ${{ secrets.DIKTAT_CI_ANTHROPIC_KEY || secrets.ANTHROPIC_API_KEY }}
           REVIEW_PROMPT: ${{ matrix.reviewer.prompt }}
           REVIEW_MODEL: ${{ matrix.reviewer.model }}
         # The previous `|| true` swallowed claude -p's exit code,
@@ -517,11 +531,15 @@ jobs:
           # (copy-linter, addiction-auditor, neutrality-auditor) keep
           # the 50 ceiling because their checks are categorically
           # smaller-surface and have never hit it.
-          if [ "${{ matrix.reviewer.name }}" = "security-reviewer" ]; then
-            MAX_TURNS=25
-          else
-            MAX_TURNS=50
-          fi
+          # 2026-10-22 cost cut: hard-cap every reviewer at 10 turns.
+          # Advisory reviewers rarely exceed 8 turns on a well-shaped
+          # diff; security-reviewer "was burning tokens on exploratory
+          # tool-use loops" (prior comment) — tightening from 25 to 10
+          # closes the runaway case. If a reviewer trips the cap, the
+          # output already carries a terminal VERDICT line (empty →
+          # BLOCK via the channel-0 gate), so hitting the ceiling is a
+          # graceful degradation, not a crash.
+          MAX_TURNS=10
           claude -p "$REVIEW_PROMPT" \
             --model "$REVIEW_MODEL" \
             --max-turns "$MAX_TURNS" \
