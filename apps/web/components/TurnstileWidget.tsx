@@ -112,15 +112,38 @@ export function TurnstileWidget(props: TurnstileWidgetProps): React.JSX.Element 
   }, [siteKey, onToken, onExpired, onError, action]);
 
   useEffect(() => {
-    // If the script was already injected by a previous mount (e.g.
-    // user navigated to /login a second time without a full reload),
-    // window.turnstile exists already; render immediately. Otherwise
-    // the Script onReady callback below drives the first render.
+    // next/script dedupes by src: when two <TurnstileWidget>s mount
+    // at once (email OTP + X OAuth on /login), only the first
+    // instance's onReady fires. The second instance must poll for
+    // window.turnstile and render itself once the SDK is present.
+    // Cap at ~10s so a wedged load doesn't poll forever.
+    let pollId: ReturnType<typeof setInterval> | null = null;
     if (window.turnstile) {
       scriptReadyRef.current = true;
       renderWidget();
+    } else {
+      const started = Date.now();
+      pollId = setInterval(() => {
+        if (window.turnstile) {
+          scriptReadyRef.current = true;
+          renderWidget();
+          if (pollId !== null) {
+            clearInterval(pollId);
+            pollId = null;
+          }
+        } else if (Date.now() - started > 10_000) {
+          if (pollId !== null) {
+            clearInterval(pollId);
+            pollId = null;
+          }
+        }
+      }, 100);
     }
     return () => {
+      if (pollId !== null) {
+        clearInterval(pollId);
+        pollId = null;
+      }
       // Clean up the widget on unmount so React 18 Strict-Mode double-
       // mount in dev doesn't leave a zombie iframe.
       if (widgetIdRef.current !== null && window.turnstile) {
@@ -146,8 +169,11 @@ export function TurnstileWidget(props: TurnstileWidgetProps): React.JSX.Element 
       </span>
       <div ref={containerRef} />
       {/* The Script tag is a no-op if a previous mount already
-          injected the SDK (Next ensures one load). onReady fires
-          exactly once per page load, after the SDK global attaches. */}
+          injected the SDK (Next ensures one load). next/script
+          dedupes by src and only the first instance's onReady fires
+          when a second widget mounts while the script is still
+          loading; the mount effect above polls window.turnstile as
+          the fallback render path. */}
       <Script
         src={TURNSTILE_SCRIPT_SRC}
         strategy="afterInteractive"
