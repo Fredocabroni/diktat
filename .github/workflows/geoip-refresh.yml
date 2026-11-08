@@ -12,7 +12,26 @@ name: geoip-refresh
 # Credentials (same as deploy-migrations.yml):
 #   secret   SUPABASE_DB_PASSWORD    – prod DB password
 #   secret   MAXMIND_LICENSE_KEY     – MaxMind account license key
-#   variable SUPABASE_PROJECT_REF    – project ref (host = db.<ref>.supabase.co)
+#   variable SUPABASE_PROJECT_REF    – project ref (used as the pooler
+#                                       username suffix: postgres.<ref>)
+#   variable SUPABASE_POOLER_HOST    – Supabase session-pooler hostname
+#                                       (e.g. aws-1-us-east-1.pooler.supabase.com).
+#                                       REQUIRED because the direct host
+#                                       `db.<ref>.supabase.co` is IPv6-only
+#                                       and GitHub-hosted runners have no
+#                                       IPv6 — a direct connection fails
+#                                       "Network is unreachable" (observed
+#                                       on geoip-refresh run #2). The
+#                                       session pooler (port 5432) is
+#                                       IPv4-reachable and preserves
+#                                       per-session state, so `\copy` and
+#                                       the surrounding single transaction
+#                                       work the same as against the
+#                                       direct host. Transaction mode
+#                                       (port 6543) multiplexes at
+#                                       statement boundaries and must NOT
+#                                       be used — it breaks `\copy` and
+#                                       any multi-statement transaction.
 #
 # Activation safety: all `uses:` refs are SHA-pinned to match the
 # repo-wide pin policy enforced by
@@ -169,17 +188,28 @@ jobs:
           # is exactly 64 lowercase hex chars (defends against a
           # malformed server response), compute the archive's actual
           # sha256, and fail loudly on any mismatch.
+          #
+          # Hardening (PR #304 security review, LOW): on the
+          # regex-fail branch `$expected` is still untrusted
+          # server-supplied data — it could contain newlines or GHA
+          # workflow-command sequences (e.g. `::set-env::`).
+          # Sanitize it to printable hex-only and cap length before
+          # interpolating into the `::error::` annotation, so a
+          # malicious response cannot inject workflow commands into
+          # the runner log. The validated-success paths quote the
+          # already-hex-only values as a shell-hardening baseline.
           expected=$(awk 'NR==1 {print $1; exit}' geolite2.zip.sha256)
           if ! printf '%s' "$expected" | grep -Eq '^[0-9a-f]{64}$'; then
-            echo "::error::MaxMind .sha256 file did not yield a 64-char lowercase hex digest (got: '$expected')"
+            safe_expected=$(printf '%s' "$expected" | tr -dc '0-9a-f' | head -c 80)
+            echo "::error::MaxMind .sha256 file did not yield a 64-char lowercase hex digest (sanitized: \"${safe_expected}\")"
             exit 1
           fi
           actual=$(sha256sum geolite2.zip | awk '{print $1}')
           if [ "$actual" != "$expected" ]; then
-            echo "::error::geolite2.zip sha256 mismatch: expected=$expected actual=$actual"
+            echo "::error::geolite2.zip sha256 mismatch: expected=\"${expected}\" actual=\"${actual}\""
             exit 1
           fi
-          echo "::notice::geolite2.zip sha256 verified: expected=$expected actual=$actual"
+          echo "::notice::geolite2.zip sha256 verified: expected=\"${expected}\" actual=\"${actual}\""
 
           unzip -q geolite2.zip -d "$RUNNER_TEMP/geoip/extract"
           # The zip extracts into a single directory named
@@ -328,6 +358,7 @@ jobs:
         env:
           STAGING_PATH: ${{ runner.temp }}/geoip/geoip.csv
           PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+          POOLER_HOST: ${{ vars.SUPABASE_POOLER_HOST }}
           PGPASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
           PGSSLMODE: require
         run: |
@@ -336,16 +367,30 @@ jobs:
             echo "::error::SUPABASE_PROJECT_REF is not set"
             exit 1
           fi
-          HOST="db.${PROJECT_REF}.supabase.co"
+          # GitHub-hosted runners have no IPv6, and the direct host
+          # `db.<ref>.supabase.co` is IPv6-only — a direct connection
+          # fails "Network is unreachable" (observed on geoip-refresh
+          # run #2). Route through the Supabase session pooler, which
+          # is IPv4-reachable. Port 5432 = session mode: the pooler
+          # binds a backend to the connection for its lifetime, so
+          # `\copy` and the single multi-statement transaction below
+          # behave the same as against the direct host. Port 6543
+          # (transaction mode) multiplexes at statement boundaries
+          # and would break both — do NOT substitute it here.
+          if [ -z "$POOLER_HOST" ]; then
+            echo "::error::SUPABASE_POOLER_HOST is not set — the direct host is IPv6-only and will fail from GitHub runners. Set the repository variable to e.g. aws-1-us-east-1.pooler.supabase.com."
+            exit 1
+          fi
           # One psql invocation, one transaction. The staging CSV is
           # copied into a TEMP table first; a defense-in-depth count
           # assertion fires before TRUNCATE; the public table is then
           # atomically rewritten. Any failure in this block rolls back
           # cleanly, so the live table is never partially-loaded.
+          # Pooler username convention: `postgres.<project-ref>`.
           psql \
-            --host="$HOST" \
+            --host="$POOLER_HOST" \
             --port=5432 \
-            --username=postgres \
+            --username="postgres.${PROJECT_REF}" \
             --dbname=postgres \
             --no-psqlrc \
             --set=ON_ERROR_STOP=1 \
