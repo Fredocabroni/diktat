@@ -39,10 +39,14 @@ function describeOtpError(err: AuthError): string {
 const CALLBACK_ERRORS: Record<string, string> = {
   missing_code: 'Sign-in link was incomplete. Request a new code.',
   exchange_failed: 'Sign-in link expired or already used. Request a new code.',
-  not_us: 'Diktat is currently available in the US only.',
+  // Wording is kept in lockstep with the Before-User-Created hook's
+  // country-gate reject message (migration 20261124000000) so the user
+  // sees one consistent sentence across the edge-side block, the
+  // callback bounce, and the hook reject.
+  not_us: 'Diktat is only available in the US right now.',
 };
 
-const US_ONLY_NOTICE = 'Diktat is currently available in the US only.';
+const US_ONLY_NOTICE = 'Diktat is only available in the US right now.';
 
 // Three states: unknown (initial / local dev / lookup failed), US (allow),
 // non-US (block the form). The /api/geo route returns '' on unknown; the
