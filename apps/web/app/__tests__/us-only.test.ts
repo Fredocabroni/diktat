@@ -55,13 +55,13 @@ describe('/login — client-side geo gate', () => {
   });
 
   it('shows the US-only notice copy when geoBlocked', () => {
-    expect(LOGIN).toMatch(/Diktat is currently available in the US only\./);
+    expect(LOGIN).toMatch(/Diktat is only available in the US right now\./);
     expect(LOGIN).toMatch(/\{geoBlocked && \(/);
     expect(LOGIN).toMatch(/\{US_ONLY_NOTICE\}/);
   });
 
   it('maps the ?error=not_us callback bounce to the same notice', () => {
-    expect(LOGIN).toMatch(/not_us:\s*'Diktat is currently available in the US only\.'/);
+    expect(LOGIN).toMatch(/not_us:\s*'Diktat is only available in the US right now\.'/);
   });
 
   it('refuses to call signInWithOtp when geoBlocked (defence-in-depth)', () => {
