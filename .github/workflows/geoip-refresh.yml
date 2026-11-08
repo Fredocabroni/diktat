@@ -381,12 +381,67 @@ jobs:
             echo "::error::SUPABASE_POOLER_HOST is not set — the direct host is IPv6-only and will fail from GitHub runners. Set the repository variable to e.g. aws-1-us-east-1.pooler.supabase.com."
             exit 1
           fi
+          # Format guard (follow-up from PR #305's security review): the
+          # pooler host is a repository *variable*, not a secret. Lock
+          # its value to the Supabase pooler domain so an accidental
+          # typo (or a misconfigured var set by a repo admin who is
+          # NOT on the `prod-migrations` reviewer list) cannot redirect
+          # the psql connection — PGPASSWORD is sent in the wire
+          # protocol to whatever `--host` resolves.
+          if ! printf '%s' "$POOLER_HOST" | grep -Eq '^[a-z0-9-]+\.pooler\.supabase\.com$'; then
+            echo "::error::SUPABASE_POOLER_HOST does not match ^[a-z0-9-]+\\.pooler\\.supabase\\.com\$ — refusing to send DB credentials to an unexpected host."
+            exit 1
+          fi
           # One psql invocation, one transaction. The staging CSV is
-          # copied into a TEMP table first; a defense-in-depth count
-          # assertion fires before TRUNCATE; the public table is then
-          # atomically rewritten. Any failure in this block rolls back
-          # cleanly, so the live table is never partially-loaded.
+          # streamed on psql's stdin and read via `\copy ... from
+          # pstdin`; the TEMP table is then counted (defense-in-depth
+          # floor check), the public table TRUNCATEd, and the final
+          # rows INSERTed. Any failure rolls back cleanly, so the
+          # live table is never partially-loaded.
+          #
+          # Why pstdin and not `\copy ... from :'STAGING_PATH'`: psql
+          # variable interpolation (`:'VAR'`) is NOT performed inside
+          # `\copy`'s argument list (it is a client meta-command that
+          # parses its own line before `:`-expansion runs). Run #3
+          # failed `error: :: No such file or directory` on exactly
+          # that pattern. Streaming the file on stdin bypasses the
+          # issue and has no interpolation surface at all.
+          # The SQL body is written to a file (quoted heredoc —
+          # nothing in it is shell-expanded) so psql --file + stdin
+          # redirect are cleanly separable.
           # Pooler username convention: `postgres.<project-ref>`.
+          SQL_PATH="$RUNNER_TEMP/geoip_load.sql"
+          cat > "$SQL_PATH" << 'SQL'
+          begin;
+
+          create temp table _geoip_staging (
+            network     cidr,
+            country_iso char(2)
+          ) on commit drop;
+
+          \copy _geoip_staging (network, country_iso) from pstdin with (format csv)
+
+          do $$
+          declare
+            v_count int;
+          begin
+            select count(*) into v_count from _geoip_staging;
+            if v_count < 300000 then
+              raise exception 'geoip_refresh: staging row count % is below the 300000 floor', v_count;
+            end if;
+          end
+          $$;
+
+          truncate public.geoip_country_blocks;
+
+          insert into public.geoip_country_blocks (network, country_iso)
+          select network, country_iso
+            from _geoip_staging
+           on conflict (network) do nothing;
+
+          commit;
+          SQL
+
           psql \
             --host="$POOLER_HOST" \
             --port=5432 \
@@ -394,34 +449,5 @@ jobs:
             --dbname=postgres \
             --no-psqlrc \
             --set=ON_ERROR_STOP=1 \
-            --set=STAGING_PATH="$STAGING_PATH" \
-            --file=- << 'SQL'
-            begin;
-
-            create temp table _geoip_staging (
-              network     cidr,
-              country_iso char(2)
-            ) on commit drop;
-
-            \copy _geoip_staging (network, country_iso) from :'STAGING_PATH' csv
-
-            do $$
-            declare
-              v_count int;
-            begin
-              select count(*) into v_count from _geoip_staging;
-              if v_count < 300000 then
-                raise exception 'geoip_refresh: staging row count % is below the 300000 floor', v_count;
-              end if;
-            end
-            $$;
-
-            truncate public.geoip_country_blocks;
-
-            insert into public.geoip_country_blocks (network, country_iso)
-            select network, country_iso
-              from _geoip_staging
-             on conflict (network) do nothing;
-
-            commit;
-          SQL
+            --file="$SQL_PATH" \
+            < "$STAGING_PATH"
