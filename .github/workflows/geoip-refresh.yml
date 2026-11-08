@@ -96,21 +96,74 @@ jobs:
       # (per the untrusted-data rule) and keep the download tooling in
       # a sibling directory. Interpreters never run from inside the
       # extracted tree.
-      - name: Download GeoLite2-Country-CSV
+      #
+      # The MaxMind license key never appears on the curl command line:
+      # it goes into a curl `--config` file (mode 600, under $RUNNER_TEMP
+      # which is scoped to this job) via a process-substitution-equivalent
+      # pattern. That closes the step-debug / --verbose / redirect-error
+      # URL-leak vector GHA's output masker can't help with. The config
+      # file is removed in the same step so it does not outlive the
+      # download.
+      #
+      # Integrity: MaxMind publishes a `*.zip.sha256` sibling alongside
+      # each edition. We download both, verify the archive against the
+      # published hash with `sha256sum -c`, and abort the entire job
+      # before any downstream step (parse, upload, apply) runs on a
+      # tampered archive. TLS alone is a liveness guarantee, not an
+      # integrity one — a compromised mirror or a MITM with a valid cert
+      # on a lookalike CA would silently flip US-only enforcement in
+      # PR 2 without this check.
+      - name: Download GeoLite2-Country-CSV + verify SHA256
         env:
           MAXMIND_LICENSE_KEY: ${{ secrets.MAXMIND_LICENSE_KEY }}
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/geoip/dl" "$RUNNER_TEMP/geoip/extract"
           cd "$RUNNER_TEMP/geoip/dl"
-          # Permanent redirect; -L follows. The license key is passed as a
-          # URL parameter per MaxMind's documented pattern. Never echoed:
-          # curl with secrets in the URL would surface via CI logging only
-          # if `--verbose` were on (it is not) — the redacted-env masking
-          # also hides it.
-          curl --silent --show-error --fail --location \
-            --output geolite2.zip \
-            "https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-Country-CSV&license_key=${MAXMIND_LICENSE_KEY}&suffix=zip"
+
+          # curl --config files: the full URL (including the license
+          # key) lives inside a config file, not on the command line.
+          # The file is written with mode 600 inside $RUNNER_TEMP
+          # (job-scoped, wiped by the runner on job end) and deleted
+          # immediately after curl exits, so the secret never appears
+          # in the process table, in post-step logs, or in a
+          # step-debug trace of the command.
+          base='https://download.maxmind.com/app/geoip_download'
+          qs='edition_id=GeoLite2-Country-CSV'
+          cfg_zip="$RUNNER_TEMP/geoip/dl/.curl-zip.cfg"
+          cfg_sha="$RUNNER_TEMP/geoip/dl/.curl-sha.cfg"
+          umask 077
+          {
+            printf 'silent\n'
+            printf 'show-error\n'
+            printf 'fail\n'
+            printf 'location\n'
+            printf 'output = "geolite2.zip"\n'
+            printf 'url = "%s?%s&license_key=%s&suffix=zip"\n' \
+              "$base" "$qs" "$MAXMIND_LICENSE_KEY"
+          } > "$cfg_zip"
+          {
+            printf 'silent\n'
+            printf 'show-error\n'
+            printf 'fail\n'
+            printf 'location\n'
+            printf 'output = "geolite2.zip.sha256"\n'
+            printf 'url = "%s?%s&license_key=%s&suffix=zip.sha256"\n' \
+              "$base" "$qs" "$MAXMIND_LICENSE_KEY"
+          } > "$cfg_sha"
+
+          curl --config "$cfg_zip"
+          curl --config "$cfg_sha"
+
+          # Scrub the config files. $RUNNER_TEMP is also wiped at job
+          # end, so this is belt-and-braces.
+          rm -f "$cfg_zip" "$cfg_sha"
+
+          # MaxMind's `.sha256` file is the standard `<hash>  <filename>`
+          # format. `sha256sum -c` honors the filename it points to, so
+          # it checks against geolite2.zip in the current directory.
+          sha256sum -c geolite2.zip.sha256
+
           unzip -q geolite2.zip -d "$RUNNER_TEMP/geoip/extract"
           # The zip extracts into a single directory named
           # GeoLite2-Country-CSV_YYYYMMDD. Resolve it.
@@ -119,7 +172,15 @@ jobs:
             echo "::error::MaxMind archive did not contain an expected GeoLite2-Country-CSV_* directory"
             exit 1
           fi
-          echo "EXTRACTED_DIR=$extracted_dir" >> "$GITHUB_ENV"
+          # Multiline-safe heredoc write to $GITHUB_ENV (per the
+          # github-documented safe pattern; the single-line `KEY=VALUE`
+          # form is vulnerable to newline injection if the value is
+          # ever attacker-influenceable).
+          {
+            printf 'EXTRACTED_DIR<<__GEOIP_EOF__\n'
+            printf '%s\n' "$extracted_dir"
+            printf '__GEOIP_EOF__\n'
+          } >> "$GITHUB_ENV"
 
       # Parse Blocks-IPv4 + Blocks-IPv6 joined to Locations into a two-
       # column CSV (network, country_iso). Written in stdlib Python so no
