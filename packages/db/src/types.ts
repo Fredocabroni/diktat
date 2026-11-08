@@ -34,6 +34,48 @@ export type Database = {
   }
   public: {
     Tables: {
+      age_block_identity_tombstones: {
+        Row: {
+          created_at: string
+          expires_at: string
+          identity_hash: string
+          key_version: number
+        }
+        Insert: {
+          created_at?: string
+          expires_at?: string
+          identity_hash: string
+          key_version?: number
+        }
+        Update: {
+          created_at?: string
+          expires_at?: string
+          identity_hash?: string
+          key_version?: number
+        }
+        Relationships: []
+      }
+      age_block_tombstones: {
+        Row: {
+          created_at: string
+          email_hash: string
+          expires_at: string
+          key_version: number
+        }
+        Insert: {
+          created_at?: string
+          email_hash: string
+          expires_at?: string
+          key_version?: number
+        }
+        Update: {
+          created_at?: string
+          email_hash?: string
+          expires_at?: string
+          key_version?: number
+        }
+        Relationships: []
+      }
       ap_transactions: {
         Row: {
           balance_after: number
@@ -621,6 +663,21 @@ export type Database = {
             referencedColumns: ["global_event_id"]
           },
         ]
+      }
+      geoip_country_blocks: {
+        Row: {
+          country_iso: string
+          network: unknown
+        }
+        Insert: {
+          country_iso: string
+          network: unknown
+        }
+        Update: {
+          country_iso?: string
+          network?: unknown
+        }
+        Relationships: []
       }
       news_adapter_health: {
         Row: {
@@ -1716,6 +1773,7 @@ export type Database = {
           tier_id: number
         }[]
       }
+      geoip_country: { Args: { ip: unknown }; Returns: string }
       increment_take5_progress: {
         Args: { p_topic_id: string; p_user_id: string }
         Returns: Json

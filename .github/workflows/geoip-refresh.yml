@@ -1,0 +1,365 @@
+name: geoip-refresh
+
+# Monthly refresh of public.geoip_country_blocks from the MaxMind
+# GeoLite2-Country CSV.
+#
+# Flow: fetch → parse (Blocks-IPv4 + Blocks-IPv6 ⨝ Locations on
+# geoname_id with a registered_country_geoname_id fallback) → row-count
+# floor check → upload artifact → [prod-migrations environment:
+# required reviewer] → psql into prod, truncate + copy in ONE
+# transaction.
+#
+# Credentials (same as deploy-migrations.yml):
+#   secret   SUPABASE_DB_PASSWORD    – prod DB password
+#   secret   MAXMIND_LICENSE_KEY     – MaxMind account license key
+#   variable SUPABASE_PROJECT_REF    – project ref (host = db.<ref>.supabase.co)
+#
+# Activation safety: all `uses:` refs are SHA-pinned to match the
+# repo-wide pin policy enforced by
+# .github/scripts/check-activation-safety.sh for the deploy workflows.
+# The apply job runs under the `prod-migrations` environment so the
+# required-reviewer gate pauses every run — scheduled and manual — until
+# a human approves in the Actions UI.
+
+on:
+  schedule:
+    # Every Wednesday at 09:00 UTC. The 'first Wednesday of the month'
+    # restriction is enforced by the `gate` job below — POSIX cron ORs
+    # day-of-month and day-of-week, so a 'DOM 1-7 / DOW 3' pattern
+    # fires every day 1-7 OR every Wednesday (not the intersection).
+    # Gating in a job avoids that trap.
+    - cron: '0 9 * * 3'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: geoip-refresh
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 0) GATE — a scheduled run proceeds only when the current UTC day-of-
+  #    month is 1-7 (i.e. the first Wednesday, since the cron already
+  #    pins weekday=Wed). A workflow_dispatch run always proceeds.
+  # ---------------------------------------------------------------------------
+  gate:
+    name: first-wednesday gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    outputs:
+      proceed: ${{ steps.check.outputs.proceed }}
+    steps:
+      - name: Check trigger + first-Wednesday-of-month
+        id: check
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "::notice::manual dispatch — gate opens"
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          dom=$(date -u +%d)
+          dom=${dom#0}
+          if [ "$dom" -le 7 ]; then
+            echo "::notice::scheduled Wednesday with DOM=$dom (first Wednesday of month) — gate opens"
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::scheduled Wednesday with DOM=$dom (not the first) — gate closes; workflow is a no-op"
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ---------------------------------------------------------------------------
+  # 1) FETCH + PARSE — downloads MaxMind, parses into (network, country_iso)
+  #    rows, asserts the row-count floor, uploads the staging CSV as an
+  #    artifact. No prod credentials in this job.
+  # ---------------------------------------------------------------------------
+  build:
+    name: fetch + parse
+    needs: gate
+    if: needs.gate.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      row_count: ${{ steps.parse.outputs.row_count }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # Fetch the CSV edition into a fresh, isolated working directory
+      # (per the untrusted-data rule) and keep the download tooling in
+      # a sibling directory. Interpreters never run from inside the
+      # extracted tree.
+      #
+      # The MaxMind license key never appears on the curl command line:
+      # it goes into a curl `--config` file (mode 600, under $RUNNER_TEMP
+      # which is scoped to this job) via a process-substitution-equivalent
+      # pattern. That closes the step-debug / --verbose / redirect-error
+      # URL-leak vector GHA's output masker can't help with. The config
+      # file is removed in the same step so it does not outlive the
+      # download.
+      #
+      # Integrity: MaxMind publishes a `*.zip.sha256` sibling alongside
+      # each edition. We download both, verify the archive against the
+      # published hash with `sha256sum -c`, and abort the entire job
+      # before any downstream step (parse, upload, apply) runs on a
+      # tampered archive. TLS alone is a liveness guarantee, not an
+      # integrity one — a compromised mirror or a MITM with a valid cert
+      # on a lookalike CA would silently flip US-only enforcement in
+      # PR 2 without this check.
+      - name: Download GeoLite2-Country-CSV + verify SHA256
+        env:
+          MAXMIND_LICENSE_KEY: ${{ secrets.MAXMIND_LICENSE_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/geoip/dl" "$RUNNER_TEMP/geoip/extract"
+          cd "$RUNNER_TEMP/geoip/dl"
+
+          # curl --config files: the full URL (including the license
+          # key) lives inside a config file, not on the command line.
+          # The file is written with mode 600 inside $RUNNER_TEMP
+          # (job-scoped, wiped by the runner on job end) and deleted
+          # immediately after curl exits, so the secret never appears
+          # in the process table, in post-step logs, or in a
+          # step-debug trace of the command.
+          base='https://download.maxmind.com/app/geoip_download'
+          qs='edition_id=GeoLite2-Country-CSV'
+          cfg_zip="$RUNNER_TEMP/geoip/dl/.curl-zip.cfg"
+          cfg_sha="$RUNNER_TEMP/geoip/dl/.curl-sha.cfg"
+          umask 077
+          {
+            printf 'silent\n'
+            printf 'show-error\n'
+            printf 'fail\n'
+            printf 'location\n'
+            printf 'output = "geolite2.zip"\n'
+            printf 'url = "%s?%s&license_key=%s&suffix=zip"\n' \
+              "$base" "$qs" "$MAXMIND_LICENSE_KEY"
+          } > "$cfg_zip"
+          {
+            printf 'silent\n'
+            printf 'show-error\n'
+            printf 'fail\n'
+            printf 'location\n'
+            printf 'output = "geolite2.zip.sha256"\n'
+            printf 'url = "%s?%s&license_key=%s&suffix=zip.sha256"\n' \
+              "$base" "$qs" "$MAXMIND_LICENSE_KEY"
+          } > "$cfg_sha"
+
+          curl --config "$cfg_zip"
+          curl --config "$cfg_sha"
+
+          # Scrub the config files. $RUNNER_TEMP is also wiped at job
+          # end, so this is belt-and-braces.
+          rm -f "$cfg_zip" "$cfg_sha"
+
+          # MaxMind's `.sha256` file is the standard `<hash>  <filename>`
+          # format. `sha256sum -c` honors the filename it points to, so
+          # it checks against geolite2.zip in the current directory.
+          sha256sum -c geolite2.zip.sha256
+
+          unzip -q geolite2.zip -d "$RUNNER_TEMP/geoip/extract"
+          # The zip extracts into a single directory named
+          # GeoLite2-Country-CSV_YYYYMMDD. Resolve it.
+          extracted_dir=$(ls -d "$RUNNER_TEMP/geoip/extract"/GeoLite2-Country-CSV_* | head -n 1)
+          if [ -z "$extracted_dir" ]; then
+            echo "::error::MaxMind archive did not contain an expected GeoLite2-Country-CSV_* directory"
+            exit 1
+          fi
+          # Multiline-safe heredoc write to $GITHUB_ENV (per the
+          # github-documented safe pattern; the single-line `KEY=VALUE`
+          # form is vulnerable to newline injection if the value is
+          # ever attacker-influenceable).
+          {
+            printf 'EXTRACTED_DIR<<__GEOIP_EOF__\n'
+            printf '%s\n' "$extracted_dir"
+            printf '__GEOIP_EOF__\n'
+          } >> "$GITHUB_ENV"
+
+      # Parse Blocks-IPv4 + Blocks-IPv6 joined to Locations into a two-
+      # column CSV (network, country_iso). Written in stdlib Python so no
+      # pip install is needed. Script is NOT inside the untrusted extract
+      # directory; MaxMind CSVs are passed as arguments and the
+      # interpreter runs with -I so sys.path doesn't pick up anything
+      # from the extract directory. Safety belt against a planted module.
+      - name: Parse to staging CSV
+        id: parse
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/geoip/staging"
+          cat > "$RUNNER_TEMP/geoip/parse.py" << 'PY'
+          import csv
+          import os
+          import sys
+
+          extracted_dir = os.environ['EXTRACTED_DIR']
+          out_path = os.environ['OUT_PATH']
+
+          locations_path = os.path.join(extracted_dir, 'GeoLite2-Country-Locations-en.csv')
+          blocks_v4_path = os.path.join(extracted_dir, 'GeoLite2-Country-Blocks-IPv4.csv')
+          blocks_v6_path = os.path.join(extracted_dir, 'GeoLite2-Country-Blocks-IPv6.csv')
+
+          # geoname_id (as string, verbatim) -> ISO-3166-1 alpha-2.
+          loc = {}
+          with open(locations_path, newline='', encoding='utf-8') as fh:
+              reader = csv.DictReader(fh)
+              for row in reader:
+                  gid = row['geoname_id']
+                  iso = (row.get('country_iso_code') or '').strip()
+                  if gid and iso and len(iso) == 2:
+                      loc[gid] = iso
+
+          written = 0
+          skipped_no_iso = 0
+          with open(out_path, 'w', newline='', encoding='utf-8') as out_fh:
+              writer = csv.writer(out_fh)
+              for blocks_path in (blocks_v4_path, blocks_v6_path):
+                  with open(blocks_path, newline='', encoding='utf-8') as fh:
+                      reader = csv.DictReader(fh)
+                      for row in reader:
+                          network = row['network']
+                          gid = row.get('geoname_id') or ''
+                          iso = loc.get(gid) if gid else None
+                          if not iso:
+                              rgid = row.get('registered_country_geoname_id') or ''
+                              if rgid:
+                                  iso = loc.get(rgid)
+                          if not iso:
+                              skipped_no_iso += 1
+                              continue
+                          writer.writerow([network, iso])
+                          written += 1
+
+          sys.stdout.write(f'rows_written={written}\n')
+          sys.stdout.write(f'rows_skipped_no_iso={skipped_no_iso}\n')
+          PY
+          OUT_PATH="$RUNNER_TEMP/geoip/staging/geoip.csv" \
+          EXTRACTED_DIR="$EXTRACTED_DIR" \
+            python3 -I "$RUNNER_TEMP/geoip/parse.py" | tee "$RUNNER_TEMP/geoip/parse.out"
+          row_count=$(grep '^rows_written=' "$RUNNER_TEMP/geoip/parse.out" | cut -d= -f2)
+          echo "row_count=$row_count" >> "$GITHUB_OUTPUT"
+
+      - name: Row-count floor
+        env:
+          ROW_COUNT: ${{ steps.parse.outputs.row_count }}
+        run: |
+          set -euo pipefail
+          if [ -z "$ROW_COUNT" ]; then
+            echo "::error::parse step produced no row count"
+            exit 1
+          fi
+          if [ "$ROW_COUNT" -lt 300000 ]; then
+            echo "::error::parsed row count $ROW_COUNT is below the 300000 floor; aborting without touching prod"
+            exit 1
+          fi
+          echo "::notice::parsed row count $ROW_COUNT is above the 300000 floor; artifact uploaded for apply job"
+
+      - name: Upload staging artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: geoip-staging
+          path: ${{ runner.temp }}/geoip/staging/geoip.csv
+          retention-days: 7
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # 2) APPLY — psql into prod, truncate + copy in one transaction. Gated by
+  #    the `prod-migrations` environment required-reviewer: the run PAUSES
+  #    here until a human approves in the Actions UI.
+  # ---------------------------------------------------------------------------
+  apply:
+    name: apply to prod
+    needs: [gate, build]
+    if: needs.gate.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: prod-migrations
+    permissions:
+      contents: read
+    steps:
+      - name: Install psql
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client
+
+      - name: Download staging artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: geoip-staging
+          path: ${{ runner.temp }}/geoip
+
+      - name: Row-count floor (re-check on the artifact)
+        env:
+          STAGING_PATH: ${{ runner.temp }}/geoip/geoip.csv
+        run: |
+          set -euo pipefail
+          lines=$(wc -l < "$STAGING_PATH")
+          if [ "$lines" -lt 300000 ]; then
+            echo "::error::staging artifact row count $lines is below the 300000 floor; aborting without touching prod"
+            exit 1
+          fi
+          echo "::notice::staging artifact row count $lines"
+
+      - name: Load into prod (truncate + copy in one transaction)
+        env:
+          STAGING_PATH: ${{ runner.temp }}/geoip/geoip.csv
+          PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+          PGPASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+          PGSSLMODE: require
+        run: |
+          set -euo pipefail
+          if [ -z "$PROJECT_REF" ]; then
+            echo "::error::SUPABASE_PROJECT_REF is not set"
+            exit 1
+          fi
+          HOST="db.${PROJECT_REF}.supabase.co"
+          # One psql invocation, one transaction. The staging CSV is
+          # copied into a TEMP table first; a defense-in-depth count
+          # assertion fires before TRUNCATE; the public table is then
+          # atomically rewritten. Any failure in this block rolls back
+          # cleanly, so the live table is never partially-loaded.
+          psql \
+            --host="$HOST" \
+            --port=5432 \
+            --username=postgres \
+            --dbname=postgres \
+            --no-psqlrc \
+            --set=ON_ERROR_STOP=1 \
+            --set=STAGING_PATH="$STAGING_PATH" \
+            --file=- << 'SQL'
+            begin;
+
+            create temp table _geoip_staging (
+              network     cidr,
+              country_iso char(2)
+            ) on commit drop;
+
+            \copy _geoip_staging (network, country_iso) from :'STAGING_PATH' csv
+
+            do $$
+            declare
+              v_count int;
+            begin
+              select count(*) into v_count from _geoip_staging;
+              if v_count < 300000 then
+                raise exception 'geoip_refresh: staging row count % is below the 300000 floor', v_count;
+              end if;
+            end
+            $$;
+
+            truncate public.geoip_country_blocks;
+
+            insert into public.geoip_country_blocks (network, country_iso)
+            select network, country_iso
+              from _geoip_staging
+             on conflict (network) do nothing;
+
+            commit;
+          SQL
