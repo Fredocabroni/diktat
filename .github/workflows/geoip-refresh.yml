@@ -160,9 +160,26 @@ jobs:
           rm -f "$cfg_zip" "$cfg_sha"
 
           # MaxMind's `.sha256` file is the standard `<hash>  <filename>`
-          # format. `sha256sum -c` honors the filename it points to, so
-          # it checks against geolite2.zip in the current directory.
-          sha256sum -c geolite2.zip.sha256
+          # format where <filename> is the original archive name
+          # (e.g. `GeoLite2-Country-CSV_20261106.zip`), NOT the name we
+          # saved it as (`geolite2.zip`). `sha256sum -c` checks against
+          # the embedded filename, so it fails with "No such file or
+          # directory" on our renamed archive. Compare by value instead:
+          # extract the expected hex from the .sha256 file, validate it
+          # is exactly 64 lowercase hex chars (defends against a
+          # malformed server response), compute the archive's actual
+          # sha256, and fail loudly on any mismatch.
+          expected=$(awk 'NR==1 {print $1; exit}' geolite2.zip.sha256)
+          if ! printf '%s' "$expected" | grep -Eq '^[0-9a-f]{64}$'; then
+            echo "::error::MaxMind .sha256 file did not yield a 64-char lowercase hex digest (got: '$expected')"
+            exit 1
+          fi
+          actual=$(sha256sum geolite2.zip | awk '{print $1}')
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::geolite2.zip sha256 mismatch: expected=$expected actual=$actual"
+            exit 1
+          fi
+          echo "::notice::geolite2.zip sha256 verified: expected=$expected actual=$actual"
 
           unzip -q geolite2.zip -d "$RUNNER_TEMP/geoip/extract"
           # The zip extracts into a single directory named
