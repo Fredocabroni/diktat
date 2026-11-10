@@ -88,8 +88,11 @@ describe('DropFeedClient — choose-then-lock-in wiring', () => {
 
   it('onStance only touches local state — never calls the mutation', () => {
     // The onStance handler must not reference recordShift; the only
-    // mutation call site is in onLockIn.
-    const onStance = DROP_FEED.match(/const onStance = useCallback\([\s\S]*?\}, \[\]\);/);
+    // mutation call site is in onLockIn. The dep array now carries
+    // `[onSkip]` (the skip branch delegates to onSkip — see
+    // feed-skip.test.ts), so match up to the useCallback close
+    // paren that comes right after the dep list.
+    const onStance = DROP_FEED.match(/const onStance = useCallback\([\s\S]*?\[onSkip\],\s*\);/);
     expect(onStance).not.toBeNull();
     expect(onStance![0]!).not.toContain('recordShift');
     expect(onStance![0]!).not.toContain('mutateAsync');
