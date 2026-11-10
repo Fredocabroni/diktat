@@ -12,6 +12,9 @@
 --       drop function public.create_comment(uuid, uuid, text);
 --       revert reports.submit_report to the pre-comment definition and
 --       drop 'comment' from the target_type CHECK;
+--       drop trigger comments_reply_recount_after;
+--       drop function public.comments_reply_recount();
+--       drop trigger comments_set_updated_at;
 --       drop trigger comment_likes_recount_after;
 --       drop function public.comment_likes_recount();
 --       drop table public.comment_likes;
@@ -84,8 +87,21 @@ create table public.comments (
   -- denorm lets the list query sort `top` without a correlated
   -- subquery.
   like_count  integer not null default 0 check (like_count >= 0),
-  created_at  timestamptz not null default now()
+  -- Denormalised count of replies (top-level rows only; always 0 on a
+  -- reply). Maintained by `comments_reply_recount`. Lets the list
+  -- read show "N replies" without loading every reply row, so the
+  -- inline-preview fetch can stay bounded at a few rows per parent.
+  -- Soft-deleted replies still count (they render as "deleted").
+  reply_count integer not null default 0 check (reply_count >= 0),
+  created_at  timestamptz not null default now(),
+  -- Mutable table (soft delete, like/reply recounts) → updated_at,
+  -- stamped by the shared public.set_updated_at() trigger below.
+  updated_at  timestamptz not null default now()
 );
+
+create trigger comments_set_updated_at
+  before update on public.comments
+  for each row execute function public.set_updated_at();
 
 -- (topic_id, created_at desc) supports the `sort = 'new'` list.
 create index comments_topic_created_idx
@@ -176,6 +192,39 @@ $$;
 create trigger comment_likes_recount_after
   after insert or delete on public.comment_likes
   for each row execute function public.comment_likes_recount();
+
+-- reply_count trigger. Fires only for reply rows (parent_id not null).
+-- A hard delete of a reply (e.g. account deletion cascade) decrements
+-- its parent; a parent's own cascade delete takes its replies with it.
+create function public.comments_reply_recount()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  if tg_op = 'INSERT' then
+    if new.parent_id is not null then
+      update public.comments
+         set reply_count = reply_count + 1
+       where id = new.parent_id;
+    end if;
+    return new;
+  elsif tg_op = 'DELETE' then
+    if old.parent_id is not null then
+      update public.comments
+         set reply_count = greatest(reply_count - 1, 0)
+       where id = old.parent_id;
+    end if;
+    return old;
+  end if;
+  return null;
+end;
+$$;
+
+create trigger comments_reply_recount_after
+  after insert or delete on public.comments
+  for each row execute function public.comments_reply_recount();
 
 -- ---------------------------------------------------------------------
 -- 4) RPC: create_comment.
@@ -452,6 +501,7 @@ revoke all on function public.create_comment(uuid, uuid, text)        from publi
 revoke all on function public.delete_own_comment(uuid)                from public, anon;
 revoke all on function public.toggle_comment_like(uuid)               from public, anon;
 revoke all on function public.comment_likes_recount()                 from public, anon;
+revoke all on function public.comments_reply_recount()                from public, anon;
 
 grant execute on function public.create_comment(uuid, uuid, text)     to authenticated, service_role;
 grant execute on function public.delete_own_comment(uuid)             to authenticated, service_role;
@@ -504,7 +554,7 @@ begin
   end if;
 
   if p_target_type not in ('debate_arg', 'drop', 'user', 'comment') then
-    raise exception 'reports: unknown target_type %', p_target_type
+    raise exception 'reports: unknown target_type'
       using errcode = '22023';
   end if;
 

@@ -39,6 +39,9 @@ interface CommentRow {
   readonly body: string;
   readonly deleted_at: string | null;
   readonly like_count: number;
+  // Denormalised by the comments_reply_recount trigger. Optional so
+  // reply rows (which never carry replies) and older fixtures type-check.
+  readonly reply_count?: number;
   readonly created_at: string;
 }
 
@@ -141,7 +144,7 @@ export const commentsRouter = router({
       let q = (ctx.db as any)
         .from('comments')
         .select(
-          'id, topic_id, parent_id, user_id, handle, stance, body, deleted_at, like_count, created_at',
+          'id, topic_id, parent_id, user_id, handle, stance, body, deleted_at, like_count, reply_count, created_at',
         )
         .eq('topic_id', input.topicId)
         .is('parent_id', null)
@@ -182,42 +185,43 @@ export const commentsRouter = router({
       const rows = data ?? [];
       const hasMore = rows.length > LIST_PAGE_SIZE;
       const pageRows = hasMore ? rows.slice(0, LIST_PAGE_SIZE) : rows;
-      const topLevelIds = pageRows.map((r) => r.id);
 
-      // Fetch replies + reply counts in bulk. We pull every reply row
-      // whose parent is on this page, then slice INLINE_REPLY_PREVIEW
-      // per parent in memory + count the rest. Avoids N+1.
-      let replyRows: CommentRow[] = [];
-      if (topLevelIds.length > 0) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const { data: rData, error: rErr } = (await (ctx.db as any)
-          .from('comments')
-          .select(
-            'id, topic_id, parent_id, user_id, handle, stance, body, deleted_at, like_count, created_at',
-          )
-          .in('parent_id', topLevelIds)
-          .order('created_at', { ascending: true })) as {
-          data: CommentRow[] | null;
-          error: { code?: string; message: string } | null;
-        };
-        if (rErr) {
-          console.warn(
-            JSON.stringify({
-              event: 'comments.replies_lookup_failed',
-              code: rErr.code ?? 'unknown',
-            }),
-          );
-        } else {
-          replyRows = rData ?? [];
-        }
-      }
-
-      const repliesByParent: Record<string, CommentRow[]> = {};
-      for (const r of replyRows) {
-        const pid = r.parent_id;
-        if (!pid) continue;
-        (repliesByParent[pid] = repliesByParent[pid] ?? []).push(r);
-      }
+      // Inline reply previews. reply_count is denormalised on the parent
+      // row (comments_reply_recount trigger), so we only fetch preview
+      // rows for parents that have replies, each capped at
+      // INLINE_REPLY_PREVIEW. Worst case per call: LIST_PAGE_SIZE small
+      // bounded queries in parallel; the total row count is a constant
+      // (LIST_PAGE_SIZE * INLINE_REPLY_PREVIEW) no matter how many
+      // replies a popular comment accumulates.
+      const parentsWithReplies = pageRows.filter((r) => (r.reply_count ?? 0) > 0);
+      const previewResults = await Promise.all(
+        parentsWithReplies.map(async (parent) => {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const { data: rData, error: rErr } = (await (ctx.db as any)
+            .from('comments')
+            .select(
+              'id, topic_id, parent_id, user_id, handle, stance, body, deleted_at, like_count, created_at',
+            )
+            .eq('parent_id', parent.id)
+            .order('created_at', { ascending: true })
+            .limit(INLINE_REPLY_PREVIEW)) as {
+            data: CommentRow[] | null;
+            error: { code?: string; message: string } | null;
+          };
+          if (rErr) {
+            console.warn(
+              JSON.stringify({
+                event: 'comments.replies_lookup_failed',
+                code: rErr.code ?? 'unknown',
+              }),
+            );
+            return [parent.id, [] as CommentRow[]] as const;
+          }
+          return [parent.id, (rData ?? []).slice(0, INLINE_REPLY_PREVIEW)] as const;
+        }),
+      );
+      const repliesByParent: Record<string, CommentRow[]> = Object.fromEntries(previewResults);
+      const replyRows: CommentRow[] = previewResults.flatMap(([, rows]) => rows);
 
       const everyRowId = [...pageRows.map((r) => r.id), ...replyRows.map((r) => r.id)];
       const likedSet = await fetchLikedSet(
@@ -230,10 +234,8 @@ export const commentsRouter = router({
         const kids = repliesByParent[row.id] ?? [];
         return {
           ...toCommentOut(row, ctx.userId, likedSet),
-          replyCount: kids.length,
-          replies: kids
-            .slice(0, INLINE_REPLY_PREVIEW)
-            .map((k) => toCommentOut(k, ctx.userId, likedSet)),
+          replyCount: Math.max(row.reply_count ?? 0, kids.length),
+          replies: kids.map((k) => toCommentOut(k, ctx.userId, likedSet)),
         };
       });
 
@@ -274,6 +276,9 @@ export const commentsRouter = router({
         error: { code?: string; message: string } | null;
       };
       if (error) {
+        console.warn(
+          JSON.stringify({ event: 'comments.list_replies_failed', code: error.code ?? 'unknown' }),
+        );
         throw new TRPCError({
           code: 'INTERNAL_SERVER_ERROR',
           message: 'Failed to load replies.',

@@ -347,8 +347,10 @@ export type Database = {
           id: string
           like_count: number
           parent_id: string | null
+          reply_count: number
           stance: string
           topic_id: string
+          updated_at: string
           user_id: string
         }
         Insert: {
@@ -359,8 +361,10 @@ export type Database = {
           id?: string
           like_count?: number
           parent_id?: string | null
+          reply_count?: number
           stance: string
           topic_id: string
+          updated_at?: string
           user_id: string
         }
         Update: {
@@ -371,8 +375,10 @@ export type Database = {
           id?: string
           like_count?: number
           parent_id?: string | null
+          reply_count?: number
           stance?: string
           topic_id?: string
+          updated_at?: string
           user_id?: string
         }
         Relationships: [

@@ -329,6 +329,7 @@ describe('comments.list', () => {
       id: '00000000-0000-4000-8000-000000000010',
       parent_id: null,
       like_count: 5,
+      reply_count: 1,
     };
     const REPLY = {
       ...OK_ROW,
@@ -346,6 +347,48 @@ describe('comments.list', () => {
     expect(r.items[0]!.replies).toHaveLength(1);
     expect(r.items[0]!.replyCount).toBe(1);
     expect(r.items[0]!.replies[0]!.body).toBe('reply');
+  });
+
+  it('reports the denormalised reply_count and caps the inline preview', async () => {
+    const TOP = {
+      ...OK_ROW,
+      id: '00000000-0000-4000-8000-000000000030',
+      parent_id: null,
+      reply_count: 7,
+    };
+    const replies = [1, 2, 3, 4].map((n) => ({
+      ...OK_ROW,
+      id: `00000000-0000-4000-8000-00000000003${n}`,
+      parent_id: TOP.id,
+      body: `reply ${n}`,
+    }));
+    const db = commentsDb({
+      // Even if the DB returned more than the limit, the preview is capped.
+      commentsSelects: [{ data: [TOP] }, { data: replies }],
+      commentLikesSelects: [{ data: [] }],
+    });
+    const caller = appRouter.createCaller(makeCtx({ db, redis: fakeRedis() }));
+    const r = await caller.comments.list({ topicId: TOPIC_ID, sort: 'new' });
+    expect(r.items[0]!.replyCount).toBe(7);
+    expect(r.items[0]!.replies).toHaveLength(3);
+  });
+
+  it('skips the preview query for parents with no replies', async () => {
+    const TOP = {
+      ...OK_ROW,
+      id: '00000000-0000-4000-8000-000000000040',
+      parent_id: null,
+      reply_count: 0,
+    };
+    // Only ONE comments select is stubbed; a reply query would reject.
+    const db = commentsDb({
+      commentsSelects: [{ data: [TOP] }],
+      commentLikesSelects: [{ data: [] }],
+    });
+    const caller = appRouter.createCaller(makeCtx({ db, redis: fakeRedis() }));
+    const r = await caller.comments.list({ topicId: TOPIC_ID, sort: 'new' });
+    expect(r.items[0]!.replyCount).toBe(0);
+    expect(r.items[0]!.replies).toHaveLength(0);
   });
 
   it('hides body on soft-deleted rows (defence-in-depth on top of SQL clear)', async () => {
