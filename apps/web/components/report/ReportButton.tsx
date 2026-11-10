@@ -16,7 +16,7 @@ import { trpc } from '../../lib/trpc';
 type Phase = 'idle' | 'open' | 'submitting' | 'done' | 'already' | 'error';
 
 export interface ReportButtonProps {
-  readonly targetType: 'debate_arg' | 'drop' | 'user';
+  readonly targetType: 'debate_arg' | 'drop' | 'user' | 'comment';
   readonly targetId: string;
 }
 

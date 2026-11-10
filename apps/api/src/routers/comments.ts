@@ -118,6 +118,39 @@ function cursorFromRow(row: CommentRow): string {
 }
 
 export const commentsRouter = router({
+  // Non-deleted top-level comment count for a topic. Used by the UI
+  // affordance "comments · N" under the vote/split area so the toggle
+  // can render the count before the panel is expanded. The query is a
+  // single count aggregate on `(topic_id, parent_id is null,
+  // deleted_at is null)` — covered by `comments_topic_created_idx`;
+  // negligible per-call cost.
+  count: protectedProcedure
+    .use(queryLimit('comments.count', { perMin: 120 }))
+    .input(z.object({ topicId: z.string().uuid() }))
+    .query(async ({ ctx, input }) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const { count, error } = (await (ctx.db as any)
+        .from('comments')
+        .select('id', { count: 'exact', head: true })
+        .eq('topic_id', input.topicId)
+        .is('parent_id', null)
+        .is('deleted_at', null)) as {
+        count: number | null;
+        error: { code?: string; message: string } | null;
+      };
+      if (error) {
+        console.warn(
+          JSON.stringify({ event: 'comments.count_failed', code: error.code ?? 'unknown' }),
+        );
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message: 'Failed to load comment count.',
+          cause: new Error(error.code ?? 'db_error'),
+        });
+      }
+      return { count: count ?? 0 };
+    }),
+
   // Top-level list for a topic, with up to INLINE_REPLY_PREVIEW
   // replies inlined under each comment plus a total reply count so
   // the client can decide to render "see N more replies" affordances.

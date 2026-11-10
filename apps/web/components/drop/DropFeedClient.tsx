@@ -38,6 +38,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { trpc } from '../../lib/trpc';
 
+import { CommentsPanel } from '../comments/CommentsPanel';
+
 import { BlockExhaustedBanner } from './BlockExhaustedBanner';
 import { DropCard, type DropCardVariant, type SelectedStance, type StanceAction } from './DropCard';
 import { NextDropCountdown } from './NextDropCountdown';
@@ -355,6 +357,7 @@ function DropFlow({
           Save failed. Lock it in to retry.
         </p>
       ) : null}
+      <CommentsPanel topicId={topic.id} userLocked={locked !== null} />
       {variant === 'pre_drop' ? <NextDropCountdown /> : null}
     </div>
   );
