@@ -22,6 +22,7 @@
 
 import type { ReactNode } from 'react';
 
+import { SplitBar, type SplitState } from './SplitBar';
 import { WhySourcesDialog } from './WhySourcesDialog';
 
 export type DropCardVariant = 'live' | 'pre_drop';
@@ -50,19 +51,51 @@ export type SelectedStance = 'agree' | 'disagree' | null;
 export interface DropCardProps {
   readonly topic: DropCardTopic;
   readonly variant: DropCardVariant;
+  /** Choose-step tap. For Agree/Disagree this flips local selection
+   *  only (no mutation). Skip is still a visual no-op. The parent
+   *  owns the selection state so a revisit to the topic keeps the
+   *  current choice. */
   readonly onStance: (action: StanceAction) => void;
   readonly disabled?: boolean;
   readonly banner?: ReactNode;
-  /** User's current stance for this topic. Non-null → that button
-   *  renders in a sticky-on "selected" visual and a lowercase
-   *  confirmation pill appears below the button grid. Derived from
-   *  `feed.list` server state on first render + overridden with the
-   *  freshly-tapped stance after a successful mutation. (P2.a.) */
-  readonly selected?: SelectedStance;
+  /** The user's current locked-in stance for this topic. Non-null →
+   *  the card renders in locked mode: the matching button is sticky-
+   *  on, the others are dimmed AND disabled (locked view), the
+   *  stance-confirmation pill shows "locked · agree|disagree", and
+   *  the split bar renders under the grid. "Changed my mind" opens
+   *  editing. Server state (`feed.list.topics[*].userStance`) is the
+   *  source on first load; the parent overrides it optimistically on
+   *  successful Lock-it-in. */
+  readonly locked?: SelectedStance;
+  /** User's current CHOICE — the local, pre-submit selection. Non-
+   *  null → shows "Lock it in" button under the grid. Ignored while
+   *  `locked !== null && !editing` (locked view wins). */
+  readonly chosen?: SelectedStance;
+  /** True when the parent put the card into editing mode after a
+   *  "Changed my mind" tap. In this mode the split bar is hidden,
+   *  the stance grid is tappable, and the "Changed my mind" link
+   *  disappears until a new Lock-it-in resolves. */
+  readonly editing?: boolean;
+  /** Tapping this fires the actual recordShift mutation. Always
+   *  gated on `chosen !== null` by the parent; the card renders
+   *  the button only when a choice is pending. */
+  readonly onLockIn?: () => void;
+  /** Mutation currently in flight. Disables both the stance grid
+   *  and the Lock-it-in button. */
+  readonly submitting?: boolean;
+  /** The split payload for this topic (from feed.getSplit). The
+   *  card renders this below the grid only in locked, non-editing
+   *  mode. `undefined` → still loading (no bar shown); explicit
+   *  state → render SplitBar. Parent decides when to fetch. */
+  readonly split?: SplitState;
+  /** Tapping "Changed my mind". Only rendered when `locked !== null
+   *  && !editing`. */
+  readonly onChangeMind?: () => void;
   /** No-Drop-day replay mode (P4 PR B). Hides the stance grid, the
-   *  stance-confirmation pill and the Battle footer entirely so the
-   *  card renders as a non-interactive receipt of yesterday's Drop.
-   *  `onStance` is never called in this mode. */
+   *  stance-confirmation pill, Lock-it-in, SplitBar and the Battle
+   *  footer entirely so the card renders as a non-interactive
+   *  receipt of yesterday's Drop. `onStance` is never called in
+   *  this mode. */
   readonly readOnly?: boolean;
 }
 
@@ -122,12 +155,28 @@ export function DropCard({
   onStance,
   disabled,
   banner,
-  selected = null,
+  locked = null,
+  chosen = null,
+  editing = false,
+  onLockIn,
+  submitting = false,
+  split,
+  onChangeMind,
   readOnly = false,
 }: DropCardProps): React.JSX.Element {
   const source = parsePrimaryUrl(topic.primarySourceUrl);
   const categoryLabel = topic.category ? (CATEGORY_LABELS[topic.category] ?? topic.category) : null;
   const ritualKicker = variant === 'live' ? "Tonight's Drop" : "Yesterday's Drop";
+
+  // Display mode:
+  //   locked view    → `locked !== null && !editing`
+  //   choose view    → anything else (fresh, editing, or no server stance)
+  // Which button is visually "on":
+  //   locked view    → the locked stance
+  //   choose view    → the chosen stance (local, pre-submit)
+  const isLockedView = locked !== null && !editing;
+  const visualSelection: SelectedStance = isLockedView ? locked : chosen;
+  const stanceButtonsDisabled = disabled || submitting || isLockedView;
 
   return (
     <article
@@ -135,6 +184,7 @@ export function DropCard({
       aria-labelledby={`drop-headline-${topic.id}`}
       data-component="DropCard"
       data-variant={variant}
+      data-mode={readOnly ? 'read_only' : isLockedView ? 'locked' : 'choose'}
       className="flex flex-col gap-5 rounded-2xl border border-ink-300 bg-surface-card p-6 shadow-lg"
     >
       {banner}
@@ -184,40 +234,70 @@ export function DropCard({
           <StanceButton
             label="Disagree"
             tone="danger"
-            disabled={disabled}
-            selected={selected === 'disagree'}
-            dimmed={selected !== null && selected !== 'disagree'}
+            disabled={stanceButtonsDisabled}
+            selected={visualSelection === 'disagree'}
+            dimmed={visualSelection !== null && visualSelection !== 'disagree'}
             onClick={() => onStance('disagree')}
           />
           <StanceButton
             label="Skip"
             tone="neutral"
-            disabled={disabled}
+            disabled={stanceButtonsDisabled}
             selected={false}
-            dimmed={selected !== null}
+            dimmed={visualSelection !== null}
             onClick={() => onStance('skip')}
           />
           <StanceButton
             label="Agree"
             tone="success"
-            disabled={disabled}
-            selected={selected === 'agree'}
-            dimmed={selected !== null && selected !== 'agree'}
+            disabled={stanceButtonsDisabled}
+            selected={visualSelection === 'agree'}
+            dimmed={visualSelection !== null && visualSelection !== 'agree'}
             onClick={() => onStance('agree')}
           />
         </div>
       )}
 
-      {!readOnly && selected !== null ? (
-        <p
-          role="status"
-          aria-live="polite"
-          data-component="DropCard.StanceConfirmation"
-          data-stance={selected}
-          className="-mt-2 text-sm text-text-secondary"
+      {/* Lock-it-in CTA. Only appears in the choose-step view with a
+          pending (non-locked) selection. Full width per the spec. */}
+      {!readOnly && !isLockedView && chosen !== null ? (
+        <button
+          type="button"
+          data-component="DropCard.LockItInButton"
+          data-stance={chosen}
+          onClick={() => onLockIn?.()}
+          disabled={submitting}
+          className="rounded-xl bg-brand-accent px-4 py-3 text-sm font-semibold text-brand-accent-fg disabled:cursor-not-allowed disabled:opacity-60"
         >
-          {`recorded · ${selected}`}
-        </p>
+          {submitting ? 'locking in.' : 'Lock it in'}
+        </button>
+      ) : null}
+
+      {/* Locked confirmation + split bar + "changed my mind" link.
+          Rendered only in locked view (post-successful lock-in or
+          server-side stance on reload). */}
+      {!readOnly && isLockedView ? (
+        <div className="-mt-2 flex flex-col gap-3">
+          <p
+            role="status"
+            aria-live="polite"
+            data-component="DropCard.StanceConfirmation"
+            data-stance={locked}
+            className="text-sm text-text-secondary"
+          >
+            {`locked · ${locked}`}
+          </p>
+          {split ? <SplitBar split={split} /> : null}
+          <button
+            type="button"
+            data-component="DropCard.ChangeMindButton"
+            onClick={() => onChangeMind?.()}
+            disabled={submitting}
+            className="self-start text-xs text-text-tertiary underline underline-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            Changed my mind
+          </button>
+        </div>
       ) : null}
 
       {readOnly ? (
