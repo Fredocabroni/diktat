@@ -40,17 +40,20 @@ run_case() {
   local expected_exit="$6"
   local expected_stderr_substr="${7:-}" # optional
 
-  # Migration flag/file are optional overrides (MIG_ENABLE / MIG_FILE). They
-  # default OFF, so every existing case leaves the migration check skipped and
-  # is unaffected; migration cases set them inline before calling run_case.
+  # Migration + geoip flag/file are optional overrides (MIG_ENABLE/MIG_FILE,
+  # GEOIP_ENABLE/GEOIP_FILE). They default OFF, so every existing case leaves
+  # those checks skipped and is unaffected; migration + geoip cases set them
+  # inline before calling run_case.
   local actual_exit actual_stderr
   actual_stderr=$(
     ENABLE_RAILWAY_DEPLOY="$enable_railway" \
     ENABLE_VERCEL_DEPLOY="$enable_vercel" \
     ENABLE_MIGRATION_DEPLOY="${MIG_ENABLE:-}" \
+    ENABLE_GEOIP_REFRESH="${GEOIP_ENABLE:-}" \
     RAILWAY_WORKFLOW_FILE="$railway_file" \
     VERCEL_WORKFLOW_FILE="$vercel_file" \
     MIGRATION_WORKFLOW_FILE="${MIG_FILE:-$vercel_file}" \
+    GEOIP_WORKFLOW_FILE="${GEOIP_FILE:-$vercel_file}" \
       bash "$SCRIPT" 2>&1 >/dev/null
   ) && actual_exit=0 || actual_exit=$?
 
@@ -284,6 +287,48 @@ YAML
   printf '%s' "$out"
 }
 
+write_geoip_pinned() {
+  # geoip-refresh shape: SHA-pinned uses, no CLI install. The GREEN
+  # baseline for ENABLE_GEOIP_REFRESH.
+  local out="$FIX_DIR/geoip-pinned.yml"
+  cat > "$out" <<'YAML'
+name: geoip-refresh
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 12 * * 1'
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install psql
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Apply
+        run: psql --host "$POOLER_HOST" --port 5432 --username "postgres.$PROJECT_REF" --dbname postgres --file /tmp/apply.sql
+YAML
+  printf '%s' "$out"
+}
+
+write_geoip_floating_uses() {
+  # Regress the checkout ref to a floating @v4 tag — the detector must
+  # surface it once ENABLE_GEOIP_REFRESH=true.
+  local out="$FIX_DIR/geoip-floating-uses.yml"
+  cat > "$out" <<'YAML'
+name: geoip-refresh
+on:
+  workflow_dispatch:
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install psql
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+YAML
+  printf '%s' "$out"
+}
+
 write_migration_floating_uses() {
   # Regress only the setup-cli ref to a floating @v2.1.1 tag — the detector
   # must surface it once ENABLE_MIGRATION_DEPLOY=true.
@@ -317,6 +362,8 @@ RAILWAY_CLI_LATEST=$(write_railway_cli_latest)
 RAILWAY_CLI_BETA=$(write_railway_cli_beta)
 MIGRATION_PINNED=$(write_migration_pinned)
 MIGRATION_FLOATING_USES=$(write_migration_floating_uses)
+GEOIP_PINNED=$(write_geoip_pinned)
+GEOIP_FLOATING_USES=$(write_geoip_floating_uses)
 RAILWAY_CLI_NEXT=$(write_railway_cli_next)
 RAILWAY_CURL_SH=$(write_railway_curl_sh)
 RAILWAY_BARE_NPM=$(write_railway_bare_npm)
@@ -488,6 +535,31 @@ MIG_ENABLE="true" MIG_FILE="$MIGRATION_FLOATING_USES" run_case \
 
 MIG_ENABLE="true" MIG_FILE="$FIX_DIR/does-not-exist.yml" run_case \
   "ENABLE_MIGRATION_DEPLOY='true' + missing migration workflow → exit 1 (RED)" \
+  "" "" \
+  "$RAILWAY_PINNED" "$VERCEL_PINNED" \
+  1 \
+  "is missing"
+
+# --- geoip-refresh flag (geoip-refresh.yml) ---------------------------------
+# GEOIP_ENABLE / GEOIP_FILE feed the optional geoip overrides in run_case.
+# The schedule + manual-dispatch workflow writes to prod via psql on a
+# cron, so once ops arms this flag the pin bar must stay green.
+
+GEOIP_ENABLE="true" GEOIP_FILE="$GEOIP_PINNED" run_case \
+  "ENABLE_GEOIP_REFRESH='true' + pinned geoip workflow → exit 0 (GREEN)" \
+  "" "" \
+  "$RAILWAY_PINNED" "$VERCEL_PINNED" \
+  0
+
+GEOIP_ENABLE="true" GEOIP_FILE="$GEOIP_FLOATING_USES" run_case \
+  "ENABLE_GEOIP_REFRESH='true' + floating uses: in geoip workflow → exit 1 (RED)" \
+  "" "" \
+  "$RAILWAY_PINNED" "$VERCEL_PINNED" \
+  1 \
+  "floating"
+
+GEOIP_ENABLE="true" GEOIP_FILE="$FIX_DIR/does-not-exist.yml" run_case \
+  "ENABLE_GEOIP_REFRESH='true' + missing geoip workflow → exit 1 (RED)" \
   "" "" \
   "$RAILWAY_PINNED" "$VERCEL_PINNED" \
   1 \

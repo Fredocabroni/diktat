@@ -367,6 +367,15 @@ jobs:
             echo "::error::SUPABASE_PROJECT_REF is not set"
             exit 1
           fi
+          # Format guard: Supabase project refs are exactly 20 lowercase
+          # alphanumeric characters. A free-form repo variable is one
+          # typo away from being `postgres.<arbitrary-text>` in the
+          # psql username — locking the shape here means PGPASSWORD
+          # can never land on a user that was never authorized.
+          if ! printf '%s' "$PROJECT_REF" | grep -qE '^[a-z0-9]{20}$'; then
+            echo "::error::SUPABASE_PROJECT_REF has the wrong shape (expected 20 lowercase alphanumeric chars)."
+            exit 1
+          fi
           # GitHub-hosted runners have no IPv6, and the direct host
           # `db.<ref>.supabase.co` is IPv6-only — a direct connection
           # fails "Network is unreachable" (observed on geoip-refresh
