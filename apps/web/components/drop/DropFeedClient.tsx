@@ -302,15 +302,20 @@ function DropFlow({
 
   // After a successful lock-in, the locked stance changes — refetch
   // the split so the card shows the user's own vote reflected.
+  // `splitQuery.refetch` is memoised by react-query (stable across
+  // renders unless the query key changes), so including it in the
+  // dep array is correct: the effect only re-fires when the locked
+  // stance or isLockedView flips, not on every render. Pulling it
+  // into a local variable also keeps the next lint cycle happy
+  // without an inline eslint-disable (the `react-hooks/exhaustive-
+  // deps` rule is not loaded in Next's build-time lint config, so
+  // a disable comment there crashes the build).
+  const refetchSplit = splitQuery.refetch;
   useEffect(() => {
     if (isLockedView) {
-      void splitQuery.refetch();
+      void refetchSplit();
     }
-    // We intentionally depend only on the locked stance identity,
-    // not on the query object itself (which is a fresh ref each
-    // render).
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [locked, isLockedView]);
+  }, [locked, isLockedView, refetchSplit]);
 
   const split: SplitState | undefined = (() => {
     const data = splitQuery.data;
