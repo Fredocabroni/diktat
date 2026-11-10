@@ -454,6 +454,7 @@ const QUERY_FAN_OUT: Record<string, number> = {
   // fan out per call.
   'comments.list': 3,
   'comments.listReplies': 2, // 1 page scan + 1 comment_likes membership
+  'comments.count': 1, // single count aggregate
   'factCheck.getVerdict': 1, // defensive default; no client caller today
   'pushSubscriptions.listMine': 1, // defensive default; no client caller today
   'wallet.balance': 2, // wallets + users in parallel
