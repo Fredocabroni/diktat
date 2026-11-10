@@ -1,4 +1,4 @@
--- Up / Down
+-- Migration: drop_bp_insert_self
 --
 -- Up:   drop the `bp_insert_self` client-side INSERT policy on
 --       public.battle_participants. The only intended writer is the
