@@ -48,6 +48,13 @@ export default function OnboardWelcomePage() {
         >
           Pick a tribe
         </Link>
+        <Link
+          href="/peek"
+          data-component="OnboardWelcome.PeekLink"
+          className="rounded-full border border-ink-300 px-4 py-3 text-center text-sm font-semibold text-text-secondary transition hover:text-text-primary"
+        >
+          look around first
+        </Link>
         <button
           type="button"
           onClick={() => complete.mutate()}
