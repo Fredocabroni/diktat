@@ -86,8 +86,12 @@ describe('DropCard — readOnly prop (P4 PR B)', () => {
     expect(DROP_CARD).toMatch(/role="group" aria-label="Stance"/);
   });
 
-  it('hides the stance-confirmation pill when readOnly is true', () => {
-    expect(DROP_CARD).toMatch(/\{!readOnly && selected !== null \?/);
+  it('hides the locked-stance confirmation pill when readOnly is true', () => {
+    // The locked pill ("locked · agree|disagree") is guarded by
+    // !readOnly so the no-Drop-day replay never surfaces a
+    // confirmation that implies action. The pin matches whatever
+    // the formatter produced (a trailing newline or `(` after `?`).
+    expect(DROP_CARD).toMatch(/\{!readOnly && isLockedView/);
   });
 
   it('hides the locked-Battle CTA when readOnly is true', () => {

@@ -2,31 +2,46 @@
 // into one of three render states, and wires stance actions to
 // trpc.feed.recordShift. Sits inside the (app) auth-gated layout.
 //
+// Vote interaction is TWO-STEP: choose then lock in.
+//
+//   1. Tapping Agree/Disagree selects locally. No API call. Tapping
+//      the same button again deselects; tapping the other side
+//      switches. A "Lock it in" button appears while a selection is
+//      pending.
+//   2. Lock it in fires `feed.recordShift`. On success the card flips
+//      to a locked view with the selected button sticky-on, others
+//      dimmed and disabled, and the aggregate split (feed.getSplit)
+//      appears below.
+//   3. "Changed my mind" reopens the choose view, pre-selecting the
+//      currently-locked stance. Locking again writes a new shift with
+//      a fresh clientKey (change of mind IS a new row).
+//
 // Per-submit idempotency (#127 H11 PR B2):
-//   * On tap, generate crypto.randomUUID() as `clientKey` unless there is
-//     already a pending key for this topic (i.e. a prior tap that hasn't
-//     resolved yet — either mid-flight or failed with the button now
-//     showing "tap to retry"). In that case reuse the SAME key so the
-//     retry hits the server's 23505 idempotency path and returns the
-//     original row instead of writing a duplicate.
-//   * On success, delete the key. The NEXT tap on the same topic — a
-//     genuine change-of-mind — mints a fresh key and writes a new row.
-//   * On failure, keep the key AND surface a small inline "couldn't
-//     save — tap to retry" affordance so the user knows the stance did
-//     not stick. `.mutateAsync` inside try/catch is the only path so a
-//     rejected promise cannot silently die like the pre-fix `.mutate()`
-//     did.
+//   * The clientKey map survives the choose step. A pending key for a
+//     topic is minted on the first lock-in tap and reused on any
+//     retry after an error. On success the key is cleared so the next
+//     lock-in (a change of mind) mints a fresh one and writes a new
+//     row rather than idempotently returning the previous one.
+//   * On failure, the pending key is kept and the choose state is
+//     kept (editing stays true), so the user can retry by tapping
+//     Lock it in again — the reused key hits the server's 23505 path
+//     if the write actually landed, or writes afresh if it did not.
+//
+// On reload: `feed.list` returns the user's latest stance in
+// `topic.userStance`. Non-null → the card mounts in locked view and
+// the split loads immediately.
 
 'use client';
 
 import Link from 'next/link';
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { trpc } from '../../lib/trpc';
 
 import { BlockExhaustedBanner } from './BlockExhaustedBanner';
 import { DropCard, type DropCardVariant, type SelectedStance, type StanceAction } from './DropCard';
 import { NextDropCountdown } from './NextDropCountdown';
+import type { SplitState } from './SplitBar';
 
 interface DropTopic {
   readonly id: string;
@@ -38,10 +53,9 @@ interface DropTopic {
   readonly dropAt: string | null;
   readonly isBlockExhausted: boolean;
   /** User's latest stance on this topic from feed.list. null = user
-   *  hasn't shifted on this topic yet. (P2.a server-side load.) */
+   *  hasn't locked a stance yet. */
   readonly userStance: SelectedStance;
-  /** A4 fact explainer. Null when generation failed or row pre-dates
-   *  A4 — DropCard falls through to the raw primary_source_url link. */
+  /** A4 fact explainer. */
   readonly factExplainer: {
     readonly for_summary: string;
     readonly against_summary: string;
@@ -56,25 +70,14 @@ type DropState =
   | { kind: 'empty' }
   | { kind: 'live'; topic: DropTopic }
   | { kind: 'pre_drop'; topic: DropTopic }
-  /** No Drop was published for today's ET date — the heat score skipped
-   *  the day. The most-recent past Drop is still rendered, read-only,
-   *  below an honest banner and a Take 5 CTA. P4 PR B. */
   | { kind: 'no_drop_today'; topic: DropTopic };
 
 function classify(topic: DropTopic | undefined, now: Date): DropState {
   if (!topic) return { kind: 'empty' };
   if (!topic.dropAt) return { kind: 'empty' };
   if (Date.parse(topic.dropAt) > now.getTime()) {
-    // Future-dated drop_at: the pipeline doesn't produce these today
-    // (drop_publish stamps at publish time), but defend against the
-    // case anyway so a stale clock doesn't surface as "live."
     return { kind: 'pre_drop', topic };
   }
-  // The drop_at has passed. If it belongs to today's ET calendar day,
-  // it's live; otherwise today's slot is empty and we're looking at a
-  // past Drop (yesterday's or earlier) — the "no Drop today" state.
-  // The server-side query already returns the most-recent past Drop,
-  // so we only need to compare ET dates here.
   const todayEtYmd = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'America/New_York',
     year: 'numeric',
@@ -94,36 +97,47 @@ export function DropFeedClient(): React.JSX.Element {
   const list = trpc.feed.list.useQuery();
   const recordShift = trpc.feed.recordShift.useMutation();
 
-  // Pending client_key per topic. A ref (not state) because updates
-  // don't need to trigger a re-render; the mutation object's own
-  // isPending / the `saveError` state below drive the UI.
+  // Pending clientKey per topic. Ref (not state) because its updates
+  // don't need to trigger a re-render.
   const pendingKeys = useRef<Map<string, string>>(new Map());
+  // Local, pre-submit selection per topic.
+  const [chosen, setChosen] = useState<Record<string, SelectedStance>>({});
+  // Edit-mode flag per topic. When true for a topic that has a locked
+  // stance, the card shows the choose view with the current locked
+  // stance pre-selected.
+  const [editing, setEditing] = useState<Record<string, boolean>>({});
+  // Optimistic locked stance per topic after a successful lock-in.
+  // Falls through to server state (`topic.userStance`) when absent.
+  const [lockedOptimistic, setLockedOptimistic] = useState<
+    Record<string, SelectedStance | undefined>
+  >({});
   // Per-topic "last save failed" flag so the UI can show a retry
   // affordance. Cleared on the next successful save for that topic.
   const [saveErrorTopicId, setSaveErrorTopicId] = useState<string | null>(null);
-  // Per-topic optimistic selected stance. P2.a: the moment the user
-  // taps, this map holds the chosen stance so the button goes sticky-
-  // on immediately. On success it stays set (matching what the server
-  // now holds); on failure it's reverted and the red "couldn't save"
-  // affordance renders instead. Server-side `userStance` from feed.list
-  // is the baseline on first render and on reload — this map only
-  // overrides it mid-session.
-  const [optimisticStance, setOptimisticStance] = useState<Record<string, SelectedStance>>({});
 
-  const onStance = useCallback(
-    async (topicId: string, action: StanceAction) => {
-      if (action === 'skip') return;
-      // Optimistic selected state. Flipped BEFORE the mutation so the
-      // UI responds instantly to the tap; reverted in the catch below
-      // if the write fails.
-      const newStance: SelectedStance = action === 'agree' ? 'agree' : 'disagree';
-      const priorOptimistic = optimisticStance[topicId];
-      setOptimisticStance((current) => ({ ...current, [topicId]: newStance }));
-      // Reuse an existing pending key for this topic (a retry after a
-      // failed submit) OR mint a new one. On success we clear the entry
-      // so the NEXT tap always gets a fresh key — which is what makes
-      // change-of-mind write a new row rather than idempotently return
-      // the previous one.
+  const onStance = useCallback((topicId: string, action: StanceAction) => {
+    if (action === 'skip') return;
+    const next: SelectedStance = action === 'agree' ? 'agree' : 'disagree';
+    setChosen((current) => {
+      const prev = current[topicId] ?? null;
+      // Tapping the already-chosen button clears the selection. Any
+      // other tap sets / switches.
+      if (prev === next) {
+        const draft = { ...current };
+        delete draft[topicId];
+        return draft;
+      }
+      return { ...current, [topicId]: next };
+    });
+  }, []);
+
+  const onLockIn = useCallback(
+    async (topicId: string) => {
+      const chosenStance = chosen[topicId];
+      if (!chosenStance) return;
+      // Reuse a pending clientKey if a prior lock-in for this topic
+      // failed. On success we delete the entry so the NEXT lock-in
+      // (a change of mind) mints a fresh key and writes a new row.
       let clientKey = pendingKeys.current.get(topicId);
       if (!clientKey) {
         clientKey = crypto.randomUUID();
@@ -132,36 +146,41 @@ export function DropFeedClient(): React.JSX.Element {
       try {
         await recordShift.mutateAsync({
           topicId,
-          // beforePosition is derived server-side from the user's latest
-          // shift on this topic (#136 / H13). Any client-sent value is
-          // ignored anyway; dropping it keeps the type contract honest.
-          afterPosition: action === 'agree' ? 1 : -1,
+          afterPosition: chosenStance === 'agree' ? 1 : -1,
           clientKey,
         });
         pendingKeys.current.delete(topicId);
-        // Clear any stale error banner for THIS topic; other topics'
-        // errors are unaffected.
+        setLockedOptimistic((current) => ({ ...current, [topicId]: chosenStance }));
+        setChosen((current) => {
+          const draft = { ...current };
+          delete draft[topicId];
+          return draft;
+        });
+        setEditing((current) => {
+          if (!current[topicId]) return current;
+          const draft = { ...current };
+          delete draft[topicId];
+          return draft;
+        });
         setSaveErrorTopicId((current) => (current === topicId ? null : current));
       } catch {
-        // Revert optimistic selection to whatever it was before the tap
-        // (either a prior optimistic stance or `undefined`, which falls
-        // through to the server-side baseline).
-        setOptimisticStance((current) => {
-          const next = { ...current };
-          if (priorOptimistic === undefined) delete next[topicId];
-          else next[topicId] = priorOptimistic;
-          return next;
-        });
-        // Retain the pending key. The next tap on this topic reuses it,
-        // so the server's 23505 idempotency path returns the original
-        // row if the failure was after the write hit the DB, or a
-        // fresh insert if it was earlier. Either way the user does not
-        // double-write.
+        // Keep chosen + editing so the choose view stays open with
+        // the selection visible. The pending clientKey is retained so
+        // a retry hits the server's idempotency path if the write
+        // actually landed.
         setSaveErrorTopicId(topicId);
       }
     },
-    [recordShift, optimisticStance],
+    [chosen, recordShift],
   );
+
+  const onChangeMind = useCallback((topicId: string, currentLocked: SelectedStance) => {
+    setEditing((current) => ({ ...current, [topicId]: true }));
+    setChosen((current) => ({ ...current, [topicId]: currentLocked }));
+    // Clear any stale error — the user is restarting the choose
+    // step for this topic.
+    setSaveErrorTopicId((current) => (current === topicId ? null : current));
+  }, []);
 
   const state: DropState = list.isLoading
     ? { kind: 'loading' }
@@ -192,15 +211,14 @@ export function DropFeedClient(): React.JSX.Element {
         <DropFlow
           topic={state.topic}
           variant={state.kind === 'live' ? 'live' : 'pre_drop'}
-          onStance={(action) => void onStance(state.topic.id, action)}
-          disabled={recordShift.isPending}
+          chosen={chosen[state.topic.id] ?? null}
+          editing={Boolean(editing[state.topic.id])}
+          lockedOverride={lockedOptimistic[state.topic.id]}
           saveError={saveErrorTopicId === state.topic.id}
-          selected={
-            // Optimistic selection overrides server state so the UI
-            // responds instantly to a tap; server state is the baseline
-            // on first render and after reload.
-            optimisticStance[state.topic.id] ?? state.topic.userStance
-          }
+          submitting={recordShift.isPending}
+          onStance={(action) => onStance(state.topic.id, action)}
+          onLockIn={() => void onLockIn(state.topic.id)}
+          onChangeMind={(currentLocked) => onChangeMind(state.topic.id, currentLocked)}
         />
       ) : null}
       {state.kind === 'no_drop_today' ? <NoDropTodayPanel topic={state.topic} /> : null}
@@ -212,11 +230,6 @@ interface NoDropTodayPanelProps {
   readonly topic: DropTopic;
 }
 
-/** Home surface for an ET day the heat score skipped. Honest banner,
- *  read-only replay of the most-recent past Drop, primary CTA to the
- *  /take5 archive stack. Deliberately omits NextDropCountdown — the
- *  user said no "come back tomorrow" nudges on this state. The CTA
- *  is primary but tappable-past: the user keeps full autonomy. */
 function NoDropTodayPanel({ topic }: NoDropTodayPanelProps): React.JSX.Element {
   return (
     <div className="flex flex-col gap-4">
@@ -244,7 +257,7 @@ function NoDropTodayPanel({ topic }: NoDropTodayPanelProps): React.JSX.Element {
         onStance={() => {
           /* read-only: no stance on the no-Drop replay */
         }}
-        selected={topic.userStance}
+        locked={topic.userStance}
         readOnly
         banner={topic.isBlockExhausted ? <BlockExhaustedBanner /> : null}
       />
@@ -255,28 +268,82 @@ function NoDropTodayPanel({ topic }: NoDropTodayPanelProps): React.JSX.Element {
 interface DropFlowProps {
   readonly topic: DropTopic;
   readonly variant: DropCardVariant;
-  readonly onStance: (action: StanceAction) => void;
-  readonly disabled: boolean;
+  readonly chosen: SelectedStance;
+  readonly editing: boolean;
+  readonly lockedOverride: SelectedStance | undefined;
   readonly saveError: boolean;
-  readonly selected: SelectedStance;
+  readonly submitting: boolean;
+  readonly onStance: (action: StanceAction) => void;
+  readonly onLockIn: () => void;
+  readonly onChangeMind: (currentLocked: SelectedStance) => void;
 }
 
 function DropFlow({
   topic,
   variant,
-  onStance,
-  disabled,
+  chosen,
+  editing,
+  lockedOverride,
   saveError,
-  selected,
+  submitting,
+  onStance,
+  onLockIn,
+  onChangeMind,
 }: DropFlowProps): React.JSX.Element {
+  // The effective locked stance for this render: an optimistic post-
+  // lock-in override beats the server baseline from feed.list.
+  const locked: SelectedStance = lockedOverride !== undefined ? lockedOverride : topic.userStance;
+  const isLockedView = locked !== null && !editing;
+
+  // Fetch split only when we're in locked view. Keeping the query
+  // disabled while the user is still choosing avoids wasted calls
+  // and keeps the <5 band private on first render.
+  const splitQuery = trpc.feed.getSplit.useQuery({ topicId: topic.id }, { enabled: isLockedView });
+
+  // After a successful lock-in, the locked stance changes — refetch
+  // the split so the card shows the user's own vote reflected.
+  // `splitQuery.refetch` is memoised by react-query (stable across
+  // renders unless the query key changes), so including it in the
+  // dep array is correct: the effect only re-fires when the locked
+  // stance or isLockedView flips, not on every render. Pulling it
+  // into a local variable also keeps the next lint cycle happy
+  // without an inline eslint-disable (the `react-hooks/exhaustive-
+  // deps` rule is not loaded in Next's build-time lint config, so
+  // a disable comment there crashes the build).
+  const refetchSplit = splitQuery.refetch;
+  useEffect(() => {
+    if (isLockedView) {
+      void refetchSplit();
+    }
+  }, [locked, isLockedView, refetchSplit]);
+
+  const split: SplitState | undefined = (() => {
+    const data = splitQuery.data;
+    if (!data) return undefined;
+    if (data.early) return { kind: 'early' };
+    return {
+      kind: 'full',
+      agreePct: data.agreePct,
+      disagreePct: data.disagreePct,
+      total: data.total,
+    };
+  })();
+
   return (
     <div className="flex flex-col gap-4">
       <DropCard
         topic={topic}
         variant={variant}
         onStance={onStance}
-        disabled={disabled}
-        selected={selected}
+        onLockIn={onLockIn}
+        onChangeMind={() => {
+          if (locked !== null) onChangeMind(locked);
+        }}
+        chosen={chosen}
+        locked={locked}
+        editing={editing}
+        submitting={submitting}
+        split={split}
         banner={topic.isBlockExhausted ? <BlockExhaustedBanner /> : null}
       />
       {saveError ? (
@@ -285,7 +352,7 @@ function DropFlow({
           aria-live="polite"
           className="rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger"
         >
-          Couldn&rsquo;t save your stance. Tap again to retry.
+          Save failed. Lock it in to retry.
         </p>
       ) : null}
       {variant === 'pre_drop' ? <NextDropCountdown /> : null}

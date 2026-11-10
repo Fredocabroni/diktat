@@ -444,6 +444,11 @@ const QUERY_FAN_OUT: Record<string, number> = {
   // a Redis-down fail-open window reflects worst case. (security-
   // reviewer PR #196 v3 Medium.)
   'feed.list': 51,
+  // Single RPC call to topic_stance_split, one row back. Explicit
+  // entry per security-reviewer on the v1 branch of this feature
+  // (feat/post-vote-split, PR #308) so Redis-down observability
+  // reflects the real fan-out instead of the default `1`.
+  'feed.getSplit': 1,
   'factCheck.getVerdict': 1, // defensive default; no client caller today
   'pushSubscriptions.listMine': 1, // defensive default; no client caller today
   'wallet.balance': 2, // wallets + users in parallel
