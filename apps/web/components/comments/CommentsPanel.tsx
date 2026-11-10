@@ -100,7 +100,7 @@ export function CommentsPanel({ topicId, userLocked }: CommentsPanelProps): Reac
               data-component="CommentsPanel.LockedNotice"
               className="rounded-xl border border-ink-300 bg-surface-raised px-3 py-2 text-sm text-text-secondary"
             >
-              lock in a vote to join the discussion
+              lock in a vote to comment
             </p>
           )}
 
@@ -217,7 +217,7 @@ function Composer({ topicId, parentId, onPosted, onCancel }: ComposerProps): Rea
       if (msg.toLowerCase().includes('too many')) {
         setErrorMsg('slow down. try again in a minute.');
       } else if (msg.toLowerCase().includes('lock in')) {
-        setErrorMsg('lock in a vote to join the discussion');
+        setErrorMsg('lock in a vote to comment');
       } else {
         setErrorMsg("couldn't post. try again.");
       }

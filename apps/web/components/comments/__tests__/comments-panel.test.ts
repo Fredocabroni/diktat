@@ -22,7 +22,7 @@ describe('CommentsPanel — source invariants', () => {
     expect(SRC).toMatch(/userLocked\s*\?\s*\(?/);
     expect(SRC).toMatch(/<Composer[\s\S]{0,200}topicId=\{topicId\}/);
     expect(SRC).toMatch(/data-component="CommentsPanel\.LockedNotice"/);
-    expect(SRC).toContain('lock in a vote to join the discussion');
+    expect(SRC).toContain('lock in a vote to comment');
   });
 
   it('live counter + 0/500 cap; post button disabled on empty / over-limit / pending', () => {
