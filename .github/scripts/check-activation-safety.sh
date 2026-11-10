@@ -35,10 +35,17 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RAILWAY_WORKFLOW="${RAILWAY_WORKFLOW_FILE:-${REPO_ROOT}/.github/workflows/deploy-railway.yml}"
 VERCEL_WORKFLOW="${VERCEL_WORKFLOW_FILE:-${REPO_ROOT}/.github/workflows/deploy-vercel.yml}"
 MIGRATION_WORKFLOW="${MIGRATION_WORKFLOW_FILE:-${REPO_ROOT}/.github/workflows/deploy-migrations.yml}"
+GEOIP_WORKFLOW="${GEOIP_WORKFLOW_FILE:-${REPO_ROOT}/.github/workflows/geoip-refresh.yml}"
 
 ENABLE_RAILWAY_DEPLOY="${ENABLE_RAILWAY_DEPLOY:-}"
 ENABLE_VERCEL_DEPLOY="${ENABLE_VERCEL_DEPLOY:-}"
 ENABLE_MIGRATION_DEPLOY="${ENABLE_MIGRATION_DEPLOY:-}"
+# geoip-refresh runs on a cron + manual dispatch and writes to prod via
+# psql. No per-run toggle in the workflow itself; we gate its activation-
+# safety check on this flag so the pin bar is enforced only once ops
+# arms the schedule. Stays unset (skipped-green) while this is a
+# dev-only harness.
+ENABLE_GEOIP_REFRESH="${ENABLE_GEOIP_REFRESH:-}"
 
 # Internal: flips to 1 on the first failure; the script exits with this
 # code at the end so all violations across both workflows surface in one
@@ -201,5 +208,6 @@ check_flag() {
 check_flag "ENABLE_RAILWAY_DEPLOY"   "$ENABLE_RAILWAY_DEPLOY"   "$RAILWAY_WORKFLOW"
 check_flag "ENABLE_VERCEL_DEPLOY"    "$ENABLE_VERCEL_DEPLOY"    "$VERCEL_WORKFLOW"
 check_flag "ENABLE_MIGRATION_DEPLOY" "$ENABLE_MIGRATION_DEPLOY" "$MIGRATION_WORKFLOW"
+check_flag "ENABLE_GEOIP_REFRESH"    "$ENABLE_GEOIP_REFRESH"    "$GEOIP_WORKFLOW"
 
 exit "$exit_code"
