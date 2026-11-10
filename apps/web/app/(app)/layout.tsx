@@ -10,14 +10,18 @@ import type { ReactNode } from 'react';
 import { InstallPrompt } from '../../components/InstallPrompt';
 import { SessionLengthNudge } from '../../components/SessionLengthNudge';
 import { TierUpCelebration } from '../../components/tier-up/TierUpCelebration';
+import { isOpenDebateEnabled } from '../../lib/flags';
 import { getServerSupabaseClient } from '../../lib/supabase/server';
 
-const TABS = [
+// Primary bottom-tab shelf. The Battles tab is flag-gated: pre-launch
+// (NEXT_PUBLIC_OPEN_DEBATE_ENABLED !== 'true') the tab is omitted and
+// the /battles + /play/open-debate routes redirect to Home.
+const BASE_TABS = [
   { href: '/', label: 'Home' },
-  { href: '/battles', label: 'Battles' },
   { href: '/wallet', label: 'Wallet' },
   { href: '/profile', label: 'Profile' },
 ] as const;
+const BATTLES_TAB = { href: '/battles', label: 'Battles' } as const;
 
 export default async function AppLayout({ children }: { children: ReactNode }) {
   const supabase = await getServerSupabaseClient();
@@ -108,6 +112,10 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
   if (!profile.age_verified_at) redirect('/onboard/age');
   if (!profile.onboarded_at) redirect('/onboard/welcome');
 
+  const tabs = isOpenDebateEnabled()
+    ? [BASE_TABS[0], BATTLES_TAB, ...BASE_TABS.slice(1)]
+    : BASE_TABS;
+
   return (
     <>
       <main className="min-h-dvh pb-[calc(env(safe-area-inset-bottom)+72px)] pt-[env(safe-area-inset-top)]">
@@ -121,7 +129,7 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
         className="fixed inset-x-0 bottom-0 z-30 border-t border-ink-300 bg-surface-app/90 pb-[env(safe-area-inset-bottom)] backdrop-blur"
       >
         <ul className="mx-auto flex max-w-md items-stretch justify-between px-4 py-2">
-          {TABS.map((tab) => (
+          {tabs.map((tab) => (
             <li key={tab.href} className="flex-1">
               <Link
                 href={tab.href}

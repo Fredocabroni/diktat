@@ -5,12 +5,16 @@
 // Topic-picker stub: 4.6 lists `news_topics` as-is. PR 4.2 will replace
 // this entry path with embedded "Battle This" CTAs on Drop content.
 
+import { redirect } from 'next/navigation';
+
+import { isOpenDebateEnabled } from '../../../../lib/flags';
 import { getServerSupabaseClient } from '../../../../lib/supabase/server';
 import { MatchmakingEntry, type TopicRow } from './MatchmakingEntry';
 
 export const dynamic = 'force-dynamic';
 
 export default async function OpenDebateEntryPage() {
+  if (!isOpenDebateEnabled()) redirect('/');
   const supabase = await getServerSupabaseClient();
   const { data: topics } = await supabase
     .from('news_topics')
