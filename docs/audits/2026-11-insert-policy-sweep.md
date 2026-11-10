@@ -28,14 +28,14 @@ pre-merge; its migration adds no client INSERT policy (writes go through
 
 ## Live policies on `main`
 
-| #   | Table                            | Policy                                | `with check`                                                                             | Verdict                                            |
-| --- | -------------------------------- | ------------------------------------- | ---------------------------------------------------------------------------------------- | -------------------------------------------------- |
-| 1   | `public.sessions`                | `sessions_insert_self`                | `is_self(user_id) and started_at <= now() and started_at >= now() - interval '1 minute'` | **INERT**                                          |
-| 2   | `public.battle_participants`     | `bp_insert_self`                      | `is_self(user_id)`                                                                       | **FIXED** — dropped `20261127000000` (this PR)     |
-| 3   | `public.tribe_memberships`       | `tribe_memberships_insert_self`       | `is_self(user_id) and weekly_ap = 0 and is_primary = false`                              | **INERT**                                          |
-| 4   | `public.debate_arguments`        | `debate_args_insert_self`             | `is_self(user_id)`                                                                       | **H3-SHAPED — follow-up** (open from #115 backlog) |
-| 5   | `public.user_push_subscriptions` | `user_push_subscriptions_insert_self` | `is_self(user_id)`                                                                       | **INERT**                                          |
-| 6   | `public.trivia_answers`          | `trivia_a_no_direct_insert`           | `false`                                                                                  | **DENY — by design**                               |
+| #   | Table                            | Policy                                | `with check`                                                                             | Verdict                                              |
+| --- | -------------------------------- | ------------------------------------- | ---------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| 1   | `public.sessions`                | `sessions_insert_self`                | `is_self(user_id) and started_at <= now() and started_at >= now() - interval '1 minute'` | **INERT**                                            |
+| 2   | `public.battle_participants`     | `bp_insert_self`                      | `is_self(user_id)`                                                                       | **FIXED** — dropped `20261127000000` (this PR)       |
+| 3   | `public.tribe_memberships`       | `tribe_memberships_insert_self`       | `is_self(user_id) and weekly_ap = 0 and is_primary = false`                              | **INERT**                                            |
+| 4   | `public.debate_arguments`        | `debate_args_insert_self`             | `is_self(user_id)`                                                                       | **FIXED** — RPC + dropped `20261128000000` (this PR) |
+| 5   | `public.user_push_subscriptions` | `user_push_subscriptions_insert_self` | `is_self(user_id)`                                                                       | **INERT**                                            |
+| 6   | `public.trivia_answers`          | `trivia_a_no_direct_insert`           | `false`                                                                                  | **DENY — by design**                                 |
 
 Policies dropped in a later migration (recorded for the sweep's audit
 trail; no longer a live surface):
@@ -44,6 +44,7 @@ trail; no longer a live surface):
 - `debate_votes_insert_self` → dropped `20260730120000` (PR #114).
 - `opinion_shifts_insert_self` → dropped `20261010100000`.
 - `bp_insert_self` → dropped `20261127000000` (F1 of this sweep).
+- `debate_args_insert_self` → dropped `20261128000000` (F2 of this sweep).
 
 ## Findings
 
@@ -97,34 +98,37 @@ bp_insert_self on public.battle_participants;`. Keep the service-role
 grant. Keep `bp_select_self`. Re-run the fresh-apply gate; no
 code changes.
 
-### F2 — `debate_args_insert_self` remains H3-shaped (open from #115 backlog)
+### F2 — `debate_args_insert_self` was H3-shaped — **FIXED**
 
-**Table.** `public.debate_arguments`.
-**Migration.** `supabase/migrations/20260523_open_debate_schema.sql:81`.
-**`with check`.** `public.is_self(user_id)` — bare ownership.
-
-**Why H3.** The tRPC resolver `debates.submitArgument`
-(`apps/api/src/routers/debates.ts:167`) enforces four preconditions
-the RLS does not: round exists and is in `awaiting_arguments`, not past
+Routed through the SECURITY DEFINER RPC `public.submit_debate_argument`
+in migration `supabase/migrations/20261128000000_debate_args_submit_rpc.sql`.
+The dropped `debate_args_insert_self` policy's `with check` was
+`is_self(user_id)` only — bare ownership — while the tRPC resolver
+`debates.submitArgument` enforced four coupled invariants RLS cannot
+express: round exists and is in `awaiting_arguments`, not past
 `deadline_at`, not the verdict round, caller is a battle participant.
-A hostile client that skips tRPC can insert arguments past the
+A hostile client that skipped tRPC could insert arguments past the
 deadline (snipe the opponent's reveal), on a `settled` round, or
-without being a participant at all. A unique `(round_id, user_id)`
-index prevents a same-seat second submission, but nothing prevents a
-non-participant from inserting at all.
+without being a participant at all. The unique `(round_id, user_id)`
+index only blocked a same-seat second submission.
 
-**Status.** Already in the #115 backlog as "H3-shaped — open." The
-sweep confirms it is still open on `main` as of 2026-11-10 and
-re-prioritizes alongside F1.
+Pattern repeat of PR #114 (`cast_debate_vote`): the RPC derives the
+submitter from `auth.uid()`, reads the round and participation
+server-side, and enforces the four gates in one transaction. `set
+search_path = ''`, EXECUTE revoked from `public` and granted to
+`authenticated` + `service_role`. The INSERT grant on
+`public.debate_arguments` is revoked so even an accidental future
+policy recreation stays unreachable.
 
-**Follow-up.** Pattern repeat of PR #114 (`cast_debate_vote`): a
-`submit_debate_argument` SECURITY DEFINER RPC that reads the round
-and participation server-side, enforces the four gates in one
-transaction, and drops `debate_args_insert_self`. `set search_path =
-''`, `revoke` from `public`, `grant execute` to `authenticated` and
-`service_role`. Migration timestamp must sort after every open PR's
-migration (the next-available slot at sweep time is
-`20261127000000`, but renumber on landing).
+The same migration also revokes the now-unreachable INSERT grant on
+`public.battle_participants` (follow-on from F1 / security-reviewer
+note on PR #322 — one-liner).
+
+Behavioral test: `supabase/tests/sql/submit_debate_argument.test.sql`
+(non-participant → DA004; past-deadline → DA003; participant before
+deadline → accepted with server-derived `user_id`; direct
+authenticated INSERT → 42501; catalog check: no authenticated/anon
+INSERT policy remains).
 
 ## Inert policies (no action)
 

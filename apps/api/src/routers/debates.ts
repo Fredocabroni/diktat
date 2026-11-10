@@ -28,18 +28,10 @@ import { z } from 'zod';
 import { mutationLimit, queryLimit } from '../rate-limit.js';
 import { protectedProcedure, router } from '../trpc.js';
 
-const VERDICT_ROUND_NO = 3;
 const ARGUMENT_MIN = 100;
 const ARGUMENT_MAX = 2000;
 
 const argumentSchema = z.string().min(ARGUMENT_MIN).max(ARGUMENT_MAX);
-
-interface RoundShape {
-  id: string;
-  round_no: number;
-  payload: Record<string, unknown> | null;
-  deadline_at: string | null;
-}
 
 export const debatesRouter = router({
   /**
@@ -174,83 +166,51 @@ export const debatesRouter = router({
       }),
     )
     .mutation(async ({ ctx, input }) => {
-      // 1. Round must exist, be in awaiting_arguments, and not past deadline.
-      const { data: round, error: roundErr } = await ctx.db
-        .from('battle_rounds')
-        .select('id, battle_id, round_no, payload, deadline_at')
-        .eq('id', input.roundId)
-        .maybeSingle<RoundShape & { battle_id: string }>();
-      if (roundErr) {
-        throw new TRPCError({
-          code: 'INTERNAL_SERVER_ERROR',
-          message: 'Failed to read round.',
-          cause: roundErr,
-        });
-      }
-      if (!round) {
-        throw new TRPCError({ code: 'NOT_FOUND', message: 'Round not found.' });
-      }
-      if (round.round_no >= VERDICT_ROUND_NO) {
-        throw new TRPCError({ code: 'BAD_REQUEST', message: 'Cannot submit on verdict round.' });
-      }
-      const state = roundState(round.payload);
-      if (state !== 'awaiting_arguments') {
-        throw new TRPCError({
-          code: 'BAD_REQUEST',
-          message: `Round is not accepting arguments (state=${state}).`,
-        });
-      }
-      if (round.deadline_at && new Date(round.deadline_at).getTime() <= Date.now()) {
-        throw new TRPCError({ code: 'BAD_REQUEST', message: 'Round deadline has passed.' });
-      }
-
-      // 2. Caller must be a participant.
-      const { data: participation, error: pErr } = await ctx.db
-        .from('battle_participants')
-        .select('user_id, seat')
-        .eq('battle_id', round.battle_id)
-        .eq('user_id', ctx.userId!)
-        .maybeSingle();
-      if (pErr) {
-        throw new TRPCError({
-          code: 'INTERNAL_SERVER_ERROR',
-          message: 'Failed to verify participation.',
-          cause: pErr,
-        });
-      }
-      if (!participation) {
-        throw new TRPCError({
-          code: 'FORBIDDEN',
-          message: 'Only debate participants can submit arguments.',
-        });
-      }
-
-      // 3. Insert. The unique (round_id, user_id) index makes a second
-      //    submission from the same seat fail at the DB layer (23505).
-      const { data, error } = await ctx.db
-        .from('debate_arguments')
-        .insert({
-          battle_id: round.battle_id,
-          round_id: round.id,
-          user_id: ctx.userId!,
-          text: input.text,
-        })
-        .select('id, submitted_at')
-        .maybeSingle();
+      // Arguments route through the SECURITY DEFINER `submit_debate_argument`
+      // RPC (sweep F2, migration 20261128000000). The RPC derives the
+      // submitter from auth.uid() and enforces round state, deadline, the
+      // non-verdict-round gate, and participation in one transaction. There
+      // is no direct `debate_arguments` insert path anymore
+      // (`debate_args_insert_self` dropped + INSERT grant revoked), so this
+      // thin wrapper is the only writer. We map the RPC's raised SQLSTATEs
+      // to the same user-facing errors the prior resolver-side checks
+      // returned.
+      const { data, error } = await ctx.db.rpc('submit_debate_argument', {
+        p_round_id: input.roundId,
+        p_text: input.text,
+      });
       if (error) {
-        if (error.code === '23505') {
-          throw new TRPCError({
-            code: 'CONFLICT',
-            message: 'You already submitted an argument this round.',
-          });
+        switch (error.code) {
+          case 'P0002': // round not found
+            throw new TRPCError({ code: 'NOT_FOUND', message: 'Round not found.' });
+          case 'DA001': // verdict round
+            throw new TRPCError({
+              code: 'BAD_REQUEST',
+              message: 'Cannot submit on verdict round.',
+            });
+          case 'DA002': // wrong state
+            throw new TRPCError({ code: 'BAD_REQUEST', message: error.message });
+          case 'DA003': // deadline passed
+            throw new TRPCError({ code: 'BAD_REQUEST', message: 'Round deadline has passed.' });
+          case 'DA004': // non-participant
+            throw new TRPCError({
+              code: 'FORBIDDEN',
+              message: 'Only debate participants can submit arguments.',
+            });
+          case '23505': // unique (round_id, user_id) — already submitted this round
+            throw new TRPCError({
+              code: 'CONFLICT',
+              message: 'You already submitted an argument this round.',
+            });
+          default:
+            throw new TRPCError({
+              code: 'INTERNAL_SERVER_ERROR',
+              message: 'Failed to save argument.',
+              cause: error,
+            });
         }
-        throw new TRPCError({
-          code: 'INTERNAL_SERVER_ERROR',
-          message: 'Failed to save argument.',
-          cause: error,
-        });
       }
-      return { ok: true, argumentId: data?.id, submittedAt: data?.submitted_at };
+      return { ok: true, argumentId: (data as string | null) ?? undefined };
     }),
 
   /**
@@ -323,9 +283,3 @@ export const debatesRouter = router({
       return { ok: true, voteId: (data as string | null) ?? undefined };
     }),
 });
-
-function roundState(payload: Record<string, unknown> | null | undefined): string {
-  if (!payload || typeof payload !== 'object') return '';
-  const state = (payload as { state?: unknown }).state;
-  return typeof state === 'string' ? state : '';
-}

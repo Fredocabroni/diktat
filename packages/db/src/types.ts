@@ -2013,6 +2013,10 @@ export type Database = {
         Args: { p_at?: string; p_global_event_id: string }
         Returns: boolean
       }
+      submit_debate_argument: {
+        Args: { p_round_id: string; p_text: string }
+        Returns: string
+      }
       submit_report: {
         Args: { p_target_type: string; p_target_id: string; p_reason: string }
         Returns: Json
