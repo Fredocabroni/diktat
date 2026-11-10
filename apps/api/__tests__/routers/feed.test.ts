@@ -685,3 +685,119 @@ describe('feedRouter.list', () => {
     expect(result.topics[0]?.userStance).toBeNull();
   });
 });
+
+describe('feedRouter.getSplit', () => {
+  // The getSplit handler drives ctx.db.rpc('topic_stance_split', ...)
+  // and returns either:
+  //   { total, early: true }                — total < 5 privacy floor
+  //   { agreePct, disagreePct, total, early: false }
+  // Same rpcFake shape as recordShift, but with a single-row payload
+  // from the SETOF RPC (PostgREST sometimes wraps as array — the
+  // handler tolerates both).
+  it('maps a full split (>=5 votes) to whole-integer percentages that sum to 100', async () => {
+    const { db, calls } = rpcFake([
+      { data: [{ agree_count: 62, disagree_count: 38, total: 100 }], error: null },
+    ]);
+    const caller = appRouter.createCaller(makeCtx({ db }));
+    const result = await caller.feed.getSplit({ topicId: TOPIC_ID });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.fn).toBe('topic_stance_split');
+    expect(calls[0]!.args).toEqual({ p_topic_id: TOPIC_ID });
+    expect(result).toEqual({ agreePct: 62, disagreePct: 38, total: 100, early: false });
+  });
+
+  it('privacy floor: total < 5 returns { total, early: true } with no percentages', async () => {
+    const { db } = rpcFake([
+      { data: [{ agree_count: 2, disagree_count: 2, total: 4 }], error: null },
+    ]);
+    const caller = appRouter.createCaller(makeCtx({ db }));
+    const result = await caller.feed.getSplit({ topicId: TOPIC_ID });
+    expect(result).toEqual({ total: 4, early: true });
+    // No agreePct / disagreePct keys at all — the UI is driven off
+    // the `early` discriminator and must never see a number to
+    // anchor on in this band.
+    expect(result).not.toHaveProperty('agreePct');
+    expect(result).not.toHaveProperty('disagreePct');
+  });
+
+  it('exactly 5 votes clears the floor and renders percentages', async () => {
+    const { db } = rpcFake([
+      { data: [{ agree_count: 3, disagree_count: 2, total: 5 }], error: null },
+    ]);
+    const caller = appRouter.createCaller(makeCtx({ db }));
+    const result = await caller.feed.getSplit({ topicId: TOPIC_ID });
+    expect(result).toEqual({ agreePct: 60, disagreePct: 40, total: 5, early: false });
+  });
+
+  it('percentages always sum to exactly 100 under rounding (floor agree, remainder to disagree)', async () => {
+    const { db } = rpcFake([
+      // 1/3 agree — naive rounding would give 33/67 = 100, but
+      // 2/3 agree → 66.66..% / 33.33..%. Handler: floor agree (66),
+      // disagree = 100 - 66 = 34. Sum = 100 exactly.
+      { data: [{ agree_count: 2, disagree_count: 1, total: 3 }], error: null },
+      { data: [{ agree_count: 20, disagree_count: 10, total: 30 }], error: null },
+    ]);
+    const caller = appRouter.createCaller(makeCtx({ db }));
+    const belowFloor = await caller.feed.getSplit({ topicId: TOPIC_ID });
+    expect(belowFloor).toEqual({ total: 3, early: true });
+    const aboveFloor = await caller.feed.getSplit({ topicId: TOPIC_ID });
+    if (aboveFloor.early) throw new Error('expected full split');
+    expect(aboveFloor.agreePct + aboveFloor.disagreePct).toBe(100);
+    expect(aboveFloor).toEqual({ agreePct: 66, disagreePct: 34, total: 30, early: false });
+  });
+
+  it('tolerates PostgREST returning a single-row object (not wrapped in an array)', async () => {
+    const { db } = rpcFake([
+      { data: { agree_count: 6, disagree_count: 4, total: 10 }, error: null },
+    ]);
+    const caller = appRouter.createCaller(makeCtx({ db }));
+    const result = await caller.feed.getSplit({ topicId: TOPIC_ID });
+    expect(result).toEqual({ agreePct: 60, disagreePct: 40, total: 10, early: false });
+  });
+
+  it('numeric-string counts (Postgres bigint over the wire) parse as numbers', async () => {
+    // `count(*)` returns bigint; supabase-js serializes bigint as a
+    // string. The handler normalises so the client never sees a
+    // string masquerading as a number.
+    const { db } = rpcFake([
+      { data: [{ agree_count: '60', disagree_count: '40', total: '100' }], error: null },
+    ]);
+    const caller = appRouter.createCaller(makeCtx({ db }));
+    const result = await caller.feed.getSplit({ topicId: TOPIC_ID });
+    expect(result).toEqual({ agreePct: 60, disagreePct: 40, total: 100, early: false });
+  });
+
+  it('db error → INTERNAL_SERVER_ERROR; raw message is never echoed to the wire', async () => {
+    const { db } = rpcFake([
+      {
+        data: null,
+        error: {
+          code: '42P01',
+          message: 'relation "opinion_shifts" does not exist in schema public (sensitive)',
+        },
+      },
+    ]);
+    const caller = appRouter.createCaller(makeCtx({ db }));
+    const err: TRPCError = await caller.feed
+      .getSplit({ topicId: TOPIC_ID })
+      .then(() => {
+        throw new Error('expected throw');
+      })
+      .catch((e: unknown) => e as TRPCError);
+    expect(err).toBeInstanceOf(TRPCError);
+    expect(err.code).toBe('INTERNAL_SERVER_ERROR');
+    expect(err.message).toBe('Failed to load split.');
+    // The sensitive bit from the PG message does not appear anywhere
+    // on the thrown error.
+    expect(JSON.stringify(err)).not.toContain('opinion_shifts');
+  });
+
+  it('rejects a non-UUID topicId at the schema layer', async () => {
+    const { db } = rpcFake([]);
+    const caller = appRouter.createCaller(makeCtx({ db }));
+    await expect(
+      // @ts-expect-error — intentional runtime schema violation
+      caller.feed.getSplit({ topicId: 'not-a-uuid' }),
+    ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+  });
+});

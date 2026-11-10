@@ -11,78 +11,154 @@ import { describe, expect, it } from 'vitest';
 const DROP_CARD = readFileSync(new URL('../DropCard.tsx', import.meta.url), 'utf8');
 const DROP_FEED = readFileSync(new URL('../DropFeedClient.tsx', import.meta.url), 'utf8');
 
-describe('DropCard — P2.a selected-state surface', () => {
-  it('accepts a `selected` prop with values "agree" | "disagree" | null', () => {
+describe('DropCard — choose-then-lock-in surface', () => {
+  it('accepts `locked` + `chosen` props typed as SelectedStance', () => {
     expect(DROP_CARD).toMatch(/export type SelectedStance = 'agree' \| 'disagree' \| null/);
-    expect(DROP_CARD).toMatch(/readonly selected\?: SelectedStance/);
+    expect(DROP_CARD).toMatch(/readonly locked\?: SelectedStance/);
+    expect(DROP_CARD).toMatch(/readonly chosen\?: SelectedStance/);
+    expect(DROP_CARD).toMatch(/readonly editing\?: boolean/);
   });
 
-  it('passes the selected flag down to each stance button', () => {
-    // Agree + Disagree buttons receive a boolean `selected` prop
-    // computed from the top-level `selected` value. Skip is never
-    // selectable but gains the dimmed treatment when another stance
-    // is active.
-    expect(DROP_CARD).toMatch(/selected={selected === 'agree'}/);
-    expect(DROP_CARD).toMatch(/selected={selected === 'disagree'}/);
-    expect(DROP_CARD).toMatch(/dimmed={selected !== null/);
+  it('visualSelection: locked view uses `locked`; choose view uses `chosen`', () => {
+    // The card computes a single `visualSelection` that drives the
+    // sticky-on button. In locked view (locked !== null && !editing)
+    // it reflects the server/optimistic stance; otherwise the
+    // pre-submit `chosen`.
+    expect(DROP_CARD).toMatch(/isLockedView = locked !== null && !editing/);
+    expect(DROP_CARD).toMatch(/visualSelection: SelectedStance = isLockedView \? locked : chosen/);
+    expect(DROP_CARD).toMatch(/selected={visualSelection === 'agree'}/);
+    expect(DROP_CARD).toMatch(/selected={visualSelection === 'disagree'}/);
   });
 
-  it('renders a lowercase confirmation pill below the button grid when a stance is selected', () => {
-    // "recorded · agree" / "recorded · disagree" — lowercase per voice
-    // guide (apps/web should pass copy-linter on this template).
-    expect(DROP_CARD).toMatch(/`recorded · \$\{selected\}`/);
-    // The confirmation IS gated on selected !== null — unselected
-    // state renders no pill.
-    expect(DROP_CARD).toMatch(/selected !== null \? \(/);
+  it('renders the Lock-it-in button only when a choice is pending and the card is not locked', () => {
+    expect(DROP_CARD).toMatch(/LockItInButton/);
+    // Gated on (!readOnly && !isLockedView && chosen !== null).
+    expect(DROP_CARD).toMatch(/!readOnly && !isLockedView && chosen !== null/);
+    // Label is "Lock it in" in the idle state and switches to the
+    // lowercase "locking in." while submitting.
+    expect(DROP_CARD).toContain("'Lock it in'");
+    expect(DROP_CARD).toContain("'locking in.'");
   });
 
-  it('refuses engagement anti-patterns (no confetti / urgency / exclamation on confirmation)', () => {
-    // Explicit assertion: no celebratory language on the confirmation
-    // template. The copy-linter CI gate is the authoritative check,
-    // but we pin a few of the common anti-patterns here so a future
-    // DropCard edit can't quietly introduce them.
+  it('stance buttons are disabled in locked view so tapping cannot bypass "Changed my mind"', () => {
+    expect(DROP_CARD).toMatch(/stanceButtonsDisabled = disabled \|\| submitting \|\| isLockedView/);
+    expect(DROP_CARD).toMatch(/disabled={stanceButtonsDisabled}/);
+  });
+
+  it('renders a lowercase "locked · <stance>" pill in locked view', () => {
+    expect(DROP_CARD).toMatch(/`locked · \$\{locked\}`/);
+    // The pill only appears in locked view.
+    expect(DROP_CARD).toMatch(/!readOnly && isLockedView/);
+  });
+
+  it('shows "Changed my mind" link in locked view, hidden in choose view', () => {
+    expect(DROP_CARD).toMatch(/ChangeMindButton/);
+    expect(DROP_CARD).toMatch(/Changed my mind/);
+    // Wired to the onChangeMind callback; disabled while submitting.
+    expect(DROP_CARD).toMatch(/onClick={\(\) => onChangeMind\?\.\(\)}/);
+  });
+
+  it('renders SplitBar only when in locked view AND a split payload is present', () => {
+    expect(DROP_CARD).toMatch(/\{split \? <SplitBar split=\{split\} \/> : null\}/);
+  });
+
+  it('refuses engagement anti-patterns on the confirmation + lock-in templates', () => {
     const forbidden = ['confetti', '🎉', '🔥', '🏆', 'Nice', 'awesome', 'Only', 'left', "You've"];
-    const template = DROP_CARD.match(/`recorded · \$\{selected\}`/);
-    expect(template).not.toBeNull();
+    const lockedPill = DROP_CARD.match(/`locked · \$\{locked\}`/);
+    const lockBtn = DROP_CARD.match(/LockItInButton[\s\S]*?Lock it in/);
+    expect(lockedPill).not.toBeNull();
+    expect(lockBtn).not.toBeNull();
     for (const bad of forbidden) {
-      // The confirmation template is the pin point, not the whole
-      // file (header copy contains "You" references elsewhere, etc.).
-      expect(template![0]!).not.toContain(bad);
+      expect(lockedPill![0]!).not.toContain(bad);
+      expect(lockBtn![0]!).not.toContain(bad);
     }
   });
 
-  it('StanceButton exposes aria-pressed on the selected state', () => {
-    // Accessibility invariant: a sticky-on button must announce
-    // state via aria-pressed. The visual ring alone is not enough.
+  it('StanceButton still exposes aria-pressed on the selected state', () => {
     expect(DROP_CARD).toMatch(/aria-pressed=\{selected\}/);
   });
 });
 
-describe('DropFeedClient — P2.a wiring', () => {
-  it('reads server-side userStance from feed.list topics', () => {
-    expect(DROP_FEED).toMatch(/readonly userStance: SelectedStance/);
-    expect(DROP_FEED).toMatch(/state\.topic\.userStance/);
+describe('DropFeedClient — choose-then-lock-in wiring', () => {
+  it('maintains per-topic chosen / editing / lockedOptimistic state maps', () => {
+    expect(DROP_FEED).toMatch(/setChosen/);
+    expect(DROP_FEED).toMatch(/setEditing/);
+    expect(DROP_FEED).toMatch(/setLockedOptimistic/);
   });
 
-  it('maintains per-topic optimistic selected state keyed by topicId', () => {
-    expect(DROP_FEED).toMatch(/optimisticStance/);
-    expect(DROP_FEED).toMatch(/setOptimisticStance/);
+  it('onStance only touches local state — never calls the mutation', () => {
+    // The onStance handler must not reference recordShift; the only
+    // mutation call site is in onLockIn.
+    const onStance = DROP_FEED.match(/const onStance = useCallback\([\s\S]*?\}, \[\]\);/);
+    expect(onStance).not.toBeNull();
+    expect(onStance![0]!).not.toContain('recordShift');
+    expect(onStance![0]!).not.toContain('mutateAsync');
   });
 
-  it('optimistic selection overrides the server stance so the UI responds instantly', () => {
-    // The resolver pattern: optimisticStance[topicId] ?? state.topic.userStance.
-    expect(DROP_FEED).toMatch(/optimisticStance\[state\.topic\.id\] \?\? state\.topic\.userStance/);
+  it('onLockIn is the ONLY place that calls recordShift.mutateAsync', () => {
+    // The onLockIn useCallback block is where the mutation fires.
+    expect(DROP_FEED).toMatch(/const onLockIn = useCallback\(/);
+    expect(DROP_FEED).toMatch(/recordShift\.mutateAsync/);
+    // Exactly one mutation call across the file.
+    const mutateHits = (DROP_FEED.match(/recordShift\.mutateAsync/g) ?? []).length;
+    expect(mutateHits).toBe(1);
   });
 
-  it('reverts optimistic selection on mutation failure (prior value or absent key)', () => {
-    expect(DROP_FEED).toMatch(/priorOptimistic/);
-    // The catch block cleans up the optimistic entry rather than
-    // leaving the UI stuck on an unsaved selection.
-    expect(DROP_FEED).toMatch(/if \(priorOptimistic === undefined\) delete next\[topicId\]/);
+  it('tapping the already-chosen button deselects (sets chosen[topic] to absent)', () => {
+    // The toggle contract: prev === next → drop the key; else set
+    // to the new stance. Pin both branches so a future edit can't
+    // quietly make tapping Agree twice write.
+    expect(DROP_FEED).toMatch(/if \(prev === next\) \{/);
+    expect(DROP_FEED).toMatch(/delete draft\[topicId\]/);
   });
 
-  it('keeps the existing red "couldn\'t save" affordance on error', () => {
-    expect(DROP_FEED).toMatch(/Couldn&rsquo;t save your stance/);
+  it('on successful lock-in: clears chosen + editing, sets lockedOptimistic', () => {
+    expect(DROP_FEED).toMatch(
+      /setLockedOptimistic\(\(current\) => \(\{ \.\.\.current, \[topicId\]: chosenStance \}\)\)/,
+    );
+  });
+
+  it('on lock-in failure: keeps chosen + editing so the retry is one tap on Lock it in', () => {
+    // The catch block only flips saveErrorTopicId — it must not
+    // wipe chosen / editing / lockedOptimistic.
+    const catchBlock = DROP_FEED.match(/\} catch \{[\s\S]*?\}/);
+    expect(catchBlock).not.toBeNull();
+    expect(catchBlock![0]!).not.toContain('setChosen');
+    expect(catchBlock![0]!).not.toContain('setEditing');
+    expect(catchBlock![0]!).not.toContain('setLockedOptimistic');
+  });
+
+  it('onChangeMind pre-selects the current locked stance in chosen + flips editing=true', () => {
+    expect(DROP_FEED).toMatch(
+      /setEditing\(\(current\) => \(\{ \.\.\.current, \[topicId\]: true \}\)\)/,
+    );
+    expect(DROP_FEED).toMatch(
+      /setChosen\(\(current\) => \(\{ \.\.\.current, \[topicId\]: currentLocked \}\)\)/,
+    );
+  });
+
+  it('effective locked = optimistic override ?? server userStance (reload path)', () => {
+    // The DropFlow derives locked from the override map first,
+    // falling through to topic.userStance. This is what makes a
+    // reload of an already-voted topic render as locked.
+    expect(DROP_FEED).toMatch(/lockedOverride !== undefined \? lockedOverride : topic\.userStance/);
+  });
+
+  it('getSplit query is gated on isLockedView — no fetch while the user is still choosing', () => {
+    expect(DROP_FEED).toMatch(/trpc\.feed\.getSplit\.useQuery\(/);
+    expect(DROP_FEED).toMatch(/enabled: isLockedView/);
+  });
+
+  it('keeps the red "couldn\'t save" affordance on error; copy points to Lock it in', () => {
+    expect(DROP_FEED).toMatch(/Couldn&rsquo;t save your stance\. Tap Lock it in to retry/);
+  });
+
+  it('fresh clientKey is minted on first lock-in; retained on failure for idempotent retry', () => {
+    // Reuse-if-present pattern is preserved so a mid-flight failure
+    // does not cause a double-write after retry.
+    expect(DROP_FEED).toMatch(/pendingKeys\.current\.get\(topicId\)/);
+    expect(DROP_FEED).toMatch(/pendingKeys\.current\.set\(topicId, clientKey\)/);
+    expect(DROP_FEED).toMatch(/pendingKeys\.current\.delete\(topicId\)/);
   });
 });
 

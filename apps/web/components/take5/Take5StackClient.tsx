@@ -149,7 +149,6 @@ export function Take5StackClient(): React.JSX.Element {
         variant="pre_drop"
         onStance={(action) => void onStance(card, action)}
         disabled={recordShift.isPending}
-        selected={null}
       />
       {saveError ? (
         <p
