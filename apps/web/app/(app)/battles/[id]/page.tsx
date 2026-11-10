@@ -3,9 +3,10 @@
 // need to know which mode they're pointing at -- the server segment
 // reads `battles.mode` once and renders the right client island.
 
-import { notFound } from 'next/navigation';
+import { notFound, redirect } from 'next/navigation';
 
 import { OpenDebateClient } from '../../../../components/open-debate/OpenDebateClient';
+import { isOpenDebateEnabled } from '../../../../lib/flags';
 import { getServerSupabaseClient } from '../../../../lib/supabase/server';
 
 import { BattleClient } from './BattleClient';
@@ -19,6 +20,7 @@ interface BattleModeRow {
 }
 
 export default async function BattleByIdPage({ params }: PageProps) {
+  if (!isOpenDebateEnabled()) redirect('/');
   const { id } = await params;
   const supabase = await getServerSupabaseClient();
   const {
