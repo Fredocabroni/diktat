@@ -449,6 +449,11 @@ const QUERY_FAN_OUT: Record<string, number> = {
   // (feat/post-vote-split, PR #308) so Redis-down observability
   // reflects the real fan-out instead of the default `1`.
   'feed.getSplit': 1,
+  // comments.list: 1 top-level page scan + 1 bulk-replies scan (bounded
+  // to ≤20 parents) + 1 bulk comment_likes membership scan. Three reads
+  // fan out per call.
+  'comments.list': 3,
+  'comments.listReplies': 2, // 1 page scan + 1 comment_likes membership
   'factCheck.getVerdict': 1, // defensive default; no client caller today
   'pushSubscriptions.listMine': 1, // defensive default; no client caller today
   'wallet.balance': 2, // wallets + users in parallel

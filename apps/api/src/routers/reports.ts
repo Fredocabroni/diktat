@@ -19,7 +19,7 @@ import { protectedProcedure, router } from '../trpc.js';
 // lands here in the same PR as its UI call site. `debate_post` is
 // intentionally omitted today; add it back together with the
 // matching public.debate_posts table.
-const TARGET_TYPES = ['debate_arg', 'drop', 'user'] as const;
+const TARGET_TYPES = ['debate_arg', 'drop', 'user', 'comment'] as const;
 
 // Module-level alerter instance. The alerter carries its own dedup +
 // per-window rate cap, so a module-scope singleton is correct — a
