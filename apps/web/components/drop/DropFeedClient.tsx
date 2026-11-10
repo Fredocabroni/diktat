@@ -30,6 +30,18 @@
 // On reload: `feed.list` returns the user's latest stance in
 // `topic.userStance`. Non-null → the card mounts in locked view and
 // the split loads immediately.
+//
+// Skip. Tapping Skip collapses the topic card to a slim one-line row
+// via `SkippedCard` and smooth-scrolls the next topic container into
+// view (with `prefers-reduced-motion` respected — no smooth scroll
+// for users who have opted out). Skip NEVER calls recordShift and
+// NEVER counts as a stance; if the user has already locked a vote,
+// Skip only collapses — the locked stance stands and `undo` restores
+// the full locked view in place. Skipped topic ids are persisted in
+// sessionStorage under `SKIPPED_STORAGE_KEY` so a same-tab reload
+// keeps collapsed cards collapsed; a new tab / new session starts
+// clean. Storage access is wrapped in try/catch; failures are no-op
+// (private windows, disabled site data).
 
 'use client';
 
@@ -41,7 +53,46 @@ import { trpc } from '../../lib/trpc';
 import { BlockExhaustedBanner } from './BlockExhaustedBanner';
 import { DropCard, type DropCardVariant, type SelectedStance, type StanceAction } from './DropCard';
 import { NextDropCountdown } from './NextDropCountdown';
+import { SkippedCard } from './SkippedCard';
 import type { SplitState } from './SplitBar';
+
+// sessionStorage key for the array of skipped topic ids. Namespaced
+// so a schema change (v1 → v2) can expire old entries by bumping
+// the suffix without wiping the whole storage.
+const SKIPPED_STORAGE_KEY = 'diktat:feed:skipped:v1';
+
+function readSkippedFromStorage(): string[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = window.sessionStorage.getItem(SKIPPED_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((v): v is string => typeof v === 'string');
+  } catch {
+    return [];
+  }
+}
+
+function writeSkippedToStorage(ids: string[]): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.sessionStorage.setItem(SKIPPED_STORAGE_KEY, JSON.stringify(ids));
+  } catch {
+    // Private window / blocked site data / quota — skip state falls
+    // back to in-memory-only for this session. No user-visible
+    // failure.
+  }
+}
+
+function prefersReducedMotion(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  } catch {
+    return false;
+  }
+}
 
 interface DropTopic {
   readonly id: string;
@@ -114,22 +165,90 @@ export function DropFeedClient(): React.JSX.Element {
   // Per-topic "last save failed" flag so the UI can show a retry
   // affordance. Cleared on the next successful save for that topic.
   const [saveErrorTopicId, setSaveErrorTopicId] = useState<string | null>(null);
+  // Set of topic ids currently in the collapsed "skipped" state.
+  // Hydrated once from sessionStorage on mount; updates write back.
+  // The write is best-effort (private windows etc. — see
+  // writeSkippedToStorage).
+  const [skipped, setSkipped] = useState<Record<string, boolean>>({});
+  useEffect(() => {
+    const ids = readSkippedFromStorage();
+    if (ids.length === 0) return;
+    setSkipped(Object.fromEntries(ids.map((id) => [id, true])));
+  }, []);
+  // Per-topic DOM wrapper refs so skip can smooth-scroll the NEXT
+  // topic card into view. Keyed by topic id; cleaned up as the list
+  // changes. Using a Map in a ref avoids a re-render when a wrapper
+  // registers.
+  const topicRefs = useRef<Map<string, HTMLElement | null>>(new Map());
+  const registerTopicRef = useCallback((id: string, node: HTMLElement | null) => {
+    if (node === null) topicRefs.current.delete(id);
+    else topicRefs.current.set(id, node);
+  }, []);
 
-  const onStance = useCallback((topicId: string, action: StanceAction) => {
-    if (action === 'skip') return;
-    const next: SelectedStance = action === 'agree' ? 'agree' : 'disagree';
-    setChosen((current) => {
-      const prev = current[topicId] ?? null;
-      // Tapping the already-chosen button clears the selection. Any
-      // other tap sets / switches.
-      if (prev === next) {
-        const draft = { ...current };
-        delete draft[topicId];
-        return draft;
+  const onSkip = useCallback(
+    (topicId: string, allTopicIds: readonly string[]) => {
+      setSkipped((current) => {
+        if (current[topicId]) return current;
+        const nextState = { ...current, [topicId]: true };
+        writeSkippedToStorage(Object.keys(nextState));
+        return nextState;
+      });
+      // Find the next not-yet-skipped topic that isn't this one and
+      // scroll its wrapper into view. "Last card" (no next topic
+      // AFTER this one) → no scroll by design.
+      const myIdx = allTopicIds.indexOf(topicId);
+      if (myIdx === -1 || myIdx === allTopicIds.length - 1) return;
+      const nextId = allTopicIds.slice(myIdx + 1).find((id) => !skipped[id]);
+      if (!nextId) return;
+      const nextNode = topicRefs.current.get(nextId);
+      if (!nextNode) return;
+      // scrollIntoView `behavior: 'smooth'` honors the OS/browser
+      // reduced-motion setting on modern engines, but we gate here as
+      // a belt-and-braces so behaviour is predictable regardless of
+      // engine. 'auto' == instant jump.
+      try {
+        nextNode.scrollIntoView({
+          behavior: prefersReducedMotion() ? 'auto' : 'smooth',
+          block: 'start',
+        });
+      } catch {
+        // scrollIntoView can throw in exotic iframe contexts; no-op.
       }
-      return { ...current, [topicId]: next };
+    },
+    [skipped],
+  );
+
+  const onUndoSkip = useCallback((topicId: string) => {
+    setSkipped((current) => {
+      if (!current[topicId]) return current;
+      const draft = { ...current };
+      delete draft[topicId];
+      writeSkippedToStorage(Object.keys(draft));
+      return draft;
     });
   }, []);
+
+  const onStance = useCallback(
+    (topicId: string, action: StanceAction, allTopicIds: readonly string[]) => {
+      if (action === 'skip') {
+        onSkip(topicId, allTopicIds);
+        return;
+      }
+      const next: SelectedStance = action === 'agree' ? 'agree' : 'disagree';
+      setChosen((current) => {
+        const prev = current[topicId] ?? null;
+        // Tapping the already-chosen button clears the selection. Any
+        // other tap sets / switches.
+        if (prev === next) {
+          const draft = { ...current };
+          delete draft[topicId];
+          return draft;
+        }
+        return { ...current, [topicId]: next };
+      });
+    },
+    [onSkip],
+  );
 
   const onLockIn = useCallback(
     async (topicId: string) => {
@@ -208,18 +327,38 @@ export function DropFeedClient(): React.JSX.Element {
         </div>
       ) : null}
       {state.kind === 'live' || state.kind === 'pre_drop' ? (
-        <DropFlow
-          topic={state.topic}
-          variant={state.kind === 'live' ? 'live' : 'pre_drop'}
-          chosen={chosen[state.topic.id] ?? null}
-          editing={Boolean(editing[state.topic.id])}
-          lockedOverride={lockedOptimistic[state.topic.id]}
-          saveError={saveErrorTopicId === state.topic.id}
-          submitting={recordShift.isPending}
-          onStance={(action) => onStance(state.topic.id, action)}
-          onLockIn={() => void onLockIn(state.topic.id)}
-          onChangeMind={(currentLocked) => onChangeMind(state.topic.id, currentLocked)}
-        />
+        <div
+          data-component="DropFeedClient.TopicWrapper"
+          data-topic-id={state.topic.id}
+          ref={(node) => registerTopicRef(state.topic.id, node)}
+        >
+          {skipped[state.topic.id] ? (
+            <SkippedCard
+              topicId={state.topic.id}
+              headline={state.topic.headline}
+              onUndo={() => onUndoSkip(state.topic.id)}
+            />
+          ) : (
+            <DropFlow
+              topic={state.topic}
+              variant={state.kind === 'live' ? 'live' : 'pre_drop'}
+              chosen={chosen[state.topic.id] ?? null}
+              editing={Boolean(editing[state.topic.id])}
+              lockedOverride={lockedOptimistic[state.topic.id]}
+              saveError={saveErrorTopicId === state.topic.id}
+              submitting={recordShift.isPending}
+              onStance={(action) =>
+                // feed.list currently returns at most one topic;
+                // pass the single-element id array so the skip
+                // next-card scroll logic works forward-compatibly
+                // when limit > 1 lands.
+                onStance(state.topic.id, action, [state.topic.id])
+              }
+              onLockIn={() => void onLockIn(state.topic.id)}
+              onChangeMind={(currentLocked) => onChangeMind(state.topic.id, currentLocked)}
+            />
+          )}
+        </div>
       ) : null}
       {state.kind === 'no_drop_today' ? <NoDropTodayPanel topic={state.topic} /> : null}
     </section>
