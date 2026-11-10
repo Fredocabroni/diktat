@@ -31,7 +31,7 @@ pre-merge; its migration adds no client INSERT policy (writes go through
 | #   | Table                            | Policy                                | `with check`                                                                             | Verdict                                            |
 | --- | -------------------------------- | ------------------------------------- | ---------------------------------------------------------------------------------------- | -------------------------------------------------- |
 | 1   | `public.sessions`                | `sessions_insert_self`                | `is_self(user_id) and started_at <= now() and started_at >= now() - interval '1 minute'` | **INERT**                                          |
-| 2   | `public.battle_participants`     | `bp_insert_self`                      | `is_self(user_id)`                                                                       | **H3-SHAPED — follow-up**                          |
+| 2   | `public.battle_participants`     | `bp_insert_self`                      | `is_self(user_id)`                                                                       | **FIXED** — dropped `20261127000000` (this PR)     |
 | 3   | `public.tribe_memberships`       | `tribe_memberships_insert_self`       | `is_self(user_id) and weekly_ap = 0 and is_primary = false`                              | **INERT**                                          |
 | 4   | `public.debate_arguments`        | `debate_args_insert_self`             | `is_self(user_id)`                                                                       | **H3-SHAPED — follow-up** (open from #115 backlog) |
 | 5   | `public.user_push_subscriptions` | `user_push_subscriptions_insert_self` | `is_self(user_id)`                                                                       | **INERT**                                          |
@@ -43,10 +43,23 @@ trail; no longer a live surface):
 - `predictions_insert_self` → dropped `20260729120000` (PR #107, the H3 reference).
 - `debate_votes_insert_self` → dropped `20260730120000` (PR #114).
 - `opinion_shifts_insert_self` → dropped `20261010100000`.
+- `bp_insert_self` → dropped `20261127000000` (F1 of this sweep).
 
 ## Findings
 
-### F1 — `bp_insert_self` is H3-shaped today (not just the-day-entry_ap-becomes-a-stake)
+### F1 — `bp_insert_self` is H3-shaped today (not just the-day-entry_ap-becomes-a-stake) — **FIXED**
+
+Dropped in migration `supabase/migrations/20261127000000_drop_bp_insert_self.sql`.
+Pre-fix grep confirmed no user-scoped Supabase client inserts into
+`battle_participants` — the three in-tree writers (the matchmaker at
+`apps/workers/src/jobs/matchmake.ts:391`, the probe script at
+`apps/api/scripts/probe-trivia-correct-index-runtime.ts:123`, and the
+open-debate resume validator at
+`apps/workers/scripts/validate-open-debate-resume.ts:168`) all use the
+service-role client and bypass RLS, so dropping the client INSERT
+policy is pure attack-surface removal. SELECT policies
+(`bp_select_self`, `battle_participants_select_open_debate_observers`)
+unchanged.
 
 **Table.** `public.battle_participants`.
 **Migration.** `supabase/migrations/20260420090004_battles_and_trivia.sql:43`.

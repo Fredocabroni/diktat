@@ -1,8 +1,12 @@
--- RLS behavioral test: battle_participants (bp_select_self, bp_insert_self,
+-- RLS behavioral test: battle_participants (bp_select_self,
 -- battle_participants_select_open_debate_observers). Phase 1 seeds as
 -- postgres (RLS bypassed); Phase 2 runs as role=authenticated, simulating
 -- each user via `request.jwt.claims.sub` (what `auth.uid()` / `public.is_self()`
 -- read). RLS is enforced for every Phase-2 statement.
+--
+-- bp_insert_self was dropped in migration 20261127000000 (insert-policy
+-- sweep F1). A7/A8 below now both assert RLS denies the INSERT — the
+-- matchmaker (service role) is the only writer.
 --
 -- Fixture topology (UUIDs are fixed literals; psql :'var' does NOT
 -- interpolate inside $$…$$ dollar-quoted bodies, so every statement
@@ -18,8 +22,9 @@
 --     a1  participant (seat 0) in all three battles
 --     b2  participant (seat 1) in all three battles
 --     c3  non-participant; used as the observer-perspective persona
---     d4  non-participant; used for the bp_insert_self self-insert (A6)
---     e5  non-participant; used as the target of d4's cross-user insert (A7)
+--     d4  non-participant; used to prove the self-insert path is now
+--         denied (A7) after migration 20261127000000 dropped bp_insert_self
+--     e5  non-participant; used as the target of d4's cross-user insert (A8)
 --
 -- The handle_new_user() trigger on auth.users INSERT auto-creates the
 -- public.users / streaks / wallets / ap_transactions rows (see PR #72
@@ -164,15 +169,20 @@ end $$;
 -- ===========================================================================
 set local request.jwt.claims = '{"sub":"d4444444-4444-4444-4444-444444444444","role":"authenticated"}';
 
--- A7: d4 inserts ITSELF into B_queued (self-join). `bp_insert_self`
--- with check (is_self(user_id)) admits.
-insert into public.battle_participants (battle_id, user_id, seat, entry_ap)
-  values ('bb000002-0000-0000-0000-000000000002', 'd4444444-4444-4444-4444-444444444444', 2, 100);
-\echo 'A7 PASS'
+-- A7: d4 tries to insert ITSELF into B_queued (self-join). bp_insert_self
+-- was dropped in migration 20261127000000; with no permissive INSERT
+-- policy left on battle_participants, RLS denies (42501).
+do $$
+begin
+  insert into public.battle_participants (battle_id, user_id, seat, entry_ap)
+    values ('bb000002-0000-0000-0000-000000000002', 'd4444444-4444-4444-4444-444444444444', 2, 100);
+  raise exception 'A7 FAIL: self-insert not blocked (expected 42501 after bp_insert_self drop)';
+exception when sqlstate '42501' then
+  raise notice 'A7 PASS';
+end $$;
 
--- A8: d4 tries to insert e5 (cross-user). `bp_insert_self`'s with-check
--- denies; PG raises 42501 (insufficient_privilege — the RLS-policy
--- violation sqlstate for INSERT/UPDATE).
+-- A8: d4 tries to insert e5 (cross-user) — also denied. Same mechanism
+-- as A7; included so the deny covers both self- and other-user shapes.
 do $$
 begin
   insert into public.battle_participants (battle_id, user_id, seat, entry_ap)
