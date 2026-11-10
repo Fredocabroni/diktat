@@ -305,6 +305,106 @@ export type Database = {
           },
         ]
       }
+      comment_likes: {
+        Row: {
+          comment_id: string
+          created_at: string
+          user_id: string
+        }
+        Insert: {
+          comment_id: string
+          created_at?: string
+          user_id: string
+        }
+        Update: {
+          comment_id?: string
+          created_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "comment_likes_comment_id_fkey"
+            columns: ["comment_id"]
+            isOneToOne: false
+            referencedRelation: "comments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "comment_likes_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "users"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      comments: {
+        Row: {
+          body: string
+          created_at: string
+          deleted_at: string | null
+          handle: string
+          id: string
+          like_count: number
+          parent_id: string | null
+          reply_count: number
+          stance: string
+          topic_id: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          body: string
+          created_at?: string
+          deleted_at?: string | null
+          handle: string
+          id?: string
+          like_count?: number
+          parent_id?: string | null
+          reply_count?: number
+          stance: string
+          topic_id: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          body?: string
+          created_at?: string
+          deleted_at?: string | null
+          handle?: string
+          id?: string
+          like_count?: number
+          parent_id?: string | null
+          reply_count?: number
+          stance?: string
+          topic_id?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "comments_parent_id_fkey"
+            columns: ["parent_id"]
+            isOneToOne: false
+            referencedRelation: "comments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "comments_topic_id_fkey"
+            columns: ["topic_id"]
+            isOneToOne: false
+            referencedRelation: "news_topics"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "comments_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "users"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       debate_arguments: {
         Row: {
           battle_id: string
@@ -1743,8 +1843,54 @@ export type Database = {
         }
       }
       complete_onboarding: { Args: never; Returns: string }
+      create_comment: {
+        Args: { p_topic_id: string; p_parent_id: string | null; p_body: string }
+        Returns: {
+          body: string
+          created_at: string
+          deleted_at: string | null
+          handle: string
+          id: string
+          like_count: number
+          parent_id: string | null
+          reply_count: number
+          stance: string
+          topic_id: string
+          updated_at: string
+          user_id: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "comments"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
       data_minimization_sweep: { Args: { p_dry_run: boolean }; Returns: Json }
       delete_my_account: { Args: never; Returns: Json }
+      delete_own_comment: {
+        Args: { p_comment_id: string }
+        Returns: {
+          body: string
+          created_at: string
+          deleted_at: string | null
+          handle: string
+          id: string
+          like_count: number
+          parent_id: string | null
+          reply_count: number
+          stance: string
+          topic_id: string
+          updated_at: string
+          user_id: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "comments"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
       evaluate_risk_push: {
         Args: { p_local_date: string; p_user_id: string }
         Returns: Json
@@ -1880,6 +2026,13 @@ export type Database = {
         Returns: {
           correct: boolean
           latency_ms: number
+        }[]
+      }
+      toggle_comment_like: {
+        Args: { p_comment_id: string }
+        Returns: {
+          liked: boolean
+          like_count: number
         }[]
       }
       topic_stance_split: {
