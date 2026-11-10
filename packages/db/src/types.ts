@@ -1882,6 +1882,15 @@ export type Database = {
           latency_ms: number
         }[]
       }
+      topic_stance_split: {
+        Args: { p_topic_id: string }
+        Returns: {
+          agree_count: number | null
+          disagree_count: number | null
+          total: number | null
+          early: boolean
+        }[]
+      }
       update_notification_preferences: {
         Args: { p_prefs: Json }
         Returns: Json

@@ -687,16 +687,23 @@ describe('feedRouter.list', () => {
 });
 
 describe('feedRouter.getSplit', () => {
-  // The getSplit handler drives ctx.db.rpc('topic_stance_split', ...)
-  // and returns either:
-  //   { total, early: true }                — total < 5 privacy floor
-  //   { agreePct, disagreePct, total, early: false }
-  // Same rpcFake shape as recordShift, but with a single-row payload
-  // from the SETOF RPC (PostgREST sometimes wraps as array — the
-  // handler tolerates both).
+  // The getSplit handler drives ctx.db.rpc('topic_stance_split', ...).
+  // The RPC applies the <5 floor in SQL and returns:
+  //   { agree_count: null, disagree_count: null, total: null, early: true }
+  //     — small-N band, no counts leak even to a direct PostgREST caller
+  //   { agree_count: N, disagree_count: M, total: N+M, early: false }
+  //     — real counts
+  // The handler returns either:
+  //   { early: true }                                — no numbers at all
+  //   { agreePct, disagreePct, total, early: false } — full split
+  // PostgREST sometimes wraps SETOF results in an array — the handler
+  // tolerates both.
   it('maps a full split (>=5 votes) to whole-integer percentages that sum to 100', async () => {
     const { db, calls } = rpcFake([
-      { data: [{ agree_count: 62, disagree_count: 38, total: 100 }], error: null },
+      {
+        data: [{ agree_count: 62, disagree_count: 38, total: 100, early: false }],
+        error: null,
+      },
     ]);
     const caller = appRouter.createCaller(makeCtx({ db }));
     const result = await caller.feed.getSplit({ topicId: TOPIC_ID });
@@ -706,40 +713,63 @@ describe('feedRouter.getSplit', () => {
     expect(result).toEqual({ agreePct: 62, disagreePct: 38, total: 100, early: false });
   });
 
-  it('privacy floor: total < 5 returns { total, early: true } with no percentages', async () => {
+  it('privacy floor: RPC with 4 voters returns nulls + early=true; handler surfaces { early: true } only', async () => {
     const { db } = rpcFake([
-      { data: [{ agree_count: 2, disagree_count: 2, total: 4 }], error: null },
+      {
+        data: [{ agree_count: null, disagree_count: null, total: null, early: true }],
+        error: null,
+      },
     ]);
     const caller = appRouter.createCaller(makeCtx({ db }));
     const result = await caller.feed.getSplit({ topicId: TOPIC_ID });
-    expect(result).toEqual({ total: 4, early: true });
-    // No agreePct / disagreePct keys at all — the UI is driven off
-    // the `early` discriminator and must never see a number to
-    // anchor on in this band.
+    expect(result).toEqual({ early: true });
+    // No numbers on the wire at all — not agreePct, not disagreePct,
+    // and not total (the SQL-side floor nulled it, and the handler
+    // does not fabricate a total for the early branch).
     expect(result).not.toHaveProperty('agreePct');
     expect(result).not.toHaveProperty('disagreePct');
+    expect(result).not.toHaveProperty('total');
   });
 
-  it('exactly 5 votes clears the floor and renders percentages', async () => {
+  it('exactly 5 voters: RPC returns real counts + early=false; handler renders percentages', async () => {
     const { db } = rpcFake([
-      { data: [{ agree_count: 3, disagree_count: 2, total: 5 }], error: null },
+      {
+        data: [{ agree_count: 3, disagree_count: 2, total: 5, early: false }],
+        error: null,
+      },
     ]);
     const caller = appRouter.createCaller(makeCtx({ db }));
     const result = await caller.feed.getSplit({ topicId: TOPIC_ID });
     expect(result).toEqual({ agreePct: 60, disagreePct: 40, total: 5, early: false });
   });
 
-  it('percentages always sum to exactly 100 under rounding (floor agree, remainder to disagree)', async () => {
+  it('belt-and-braces: a non-null total <5 (misbehaving RPC) still trips the handler floor', async () => {
+    // If a future RPC rewrite drops the SQL-side floor, the handler
+    // must NOT publish small-N percentages. Simulate that failure
+    // mode: non-null counts, early=false, total=3. Handler re-checks
+    // and returns the early shape.
     const { db } = rpcFake([
-      // 1/3 agree — naive rounding would give 33/67 = 100, but
-      // 2/3 agree → 66.66..% / 33.33..%. Handler: floor agree (66),
-      // disagree = 100 - 66 = 34. Sum = 100 exactly.
-      { data: [{ agree_count: 2, disagree_count: 1, total: 3 }], error: null },
-      { data: [{ agree_count: 20, disagree_count: 10, total: 30 }], error: null },
+      {
+        data: [{ agree_count: 2, disagree_count: 1, total: 3, early: false }],
+        error: null,
+      },
     ]);
     const caller = appRouter.createCaller(makeCtx({ db }));
-    const belowFloor = await caller.feed.getSplit({ topicId: TOPIC_ID });
-    expect(belowFloor).toEqual({ total: 3, early: true });
+    const result = await caller.feed.getSplit({ topicId: TOPIC_ID });
+    expect(result).toEqual({ early: true });
+  });
+
+  it('percentages always sum to exactly 100 under rounding (floor agree, remainder to disagree)', async () => {
+    const { db } = rpcFake([
+      // 2/3 agree → 66.66..% / 33.33..%. Handler: floor agree (66),
+      // disagree = 100 - 66 = 34. Sum = 100 exactly. At 30 total,
+      // the <5 floor is cleared so this is a real-counts case.
+      {
+        data: [{ agree_count: 20, disagree_count: 10, total: 30, early: false }],
+        error: null,
+      },
+    ]);
+    const caller = appRouter.createCaller(makeCtx({ db }));
     const aboveFloor = await caller.feed.getSplit({ topicId: TOPIC_ID });
     if (aboveFloor.early) throw new Error('expected full split');
     expect(aboveFloor.agreePct + aboveFloor.disagreePct).toBe(100);
@@ -748,7 +778,10 @@ describe('feedRouter.getSplit', () => {
 
   it('tolerates PostgREST returning a single-row object (not wrapped in an array)', async () => {
     const { db } = rpcFake([
-      { data: { agree_count: 6, disagree_count: 4, total: 10 }, error: null },
+      {
+        data: { agree_count: 6, disagree_count: 4, total: 10, early: false },
+        error: null,
+      },
     ]);
     const caller = appRouter.createCaller(makeCtx({ db }));
     const result = await caller.feed.getSplit({ topicId: TOPIC_ID });
@@ -760,7 +793,10 @@ describe('feedRouter.getSplit', () => {
     // string. The handler normalises so the client never sees a
     // string masquerading as a number.
     const { db } = rpcFake([
-      { data: [{ agree_count: '60', disagree_count: '40', total: '100' }], error: null },
+      {
+        data: [{ agree_count: '60', disagree_count: '40', total: '100', early: false }],
+        error: null,
+      },
     ]);
     const caller = appRouter.createCaller(makeCtx({ db }));
     const result = await caller.feed.getSplit({ topicId: TOPIC_ID });

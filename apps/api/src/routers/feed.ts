@@ -348,13 +348,16 @@ export const feedRouter = router({
       return { topics };
     }),
 
-  // Post-vote split surface. The RPC `topic_stance_split` returns
-  // latest-stance-per-user counts (agree / disagree / total, skip
-  // rows excluded from total). This handler adds the privacy floor:
-  // under 5 effective votes, percentages are suppressed and the UI
-  // renders "you're early" copy. At ≥ 5 the floor is clear and we
-  // compute whole-integer percentages that sum to 100 (lossy rounding
-  // handled explicitly — see below).
+  // Post-vote split surface. The RPC `topic_stance_split` applies
+  // the privacy floor in SQL: when fewer than 5 users have a non-
+  // skip stance it returns {null, null, null, early: true} so even
+  // a direct `POST /rest/v1/rpc/topic_stance_split` by any
+  // authenticated JWT cannot read small-N counts. At >= 5 it
+  // returns real counts + early: false. This handler trusts the
+  // `early` flag and ALSO re-checks agree + total against the <5
+  // floor as belt-and-braces (if a future RPC rewrite drops the
+  // SQL-side guard, this handler still refuses to publish small-N
+  // percentages).
   //
   // Why floor at 5: with n=1..4 and a public split, an attacker who
   // votes and refetches can infer any other user's stance by
@@ -369,11 +372,13 @@ export const feedRouter = router({
     .use(queryLimit('feed.getSplit', { perMin: 60 }))
     .input(z.object({ topicId: z.string().uuid() }))
     .query(async ({ ctx, input }) => {
-      // Cast the rpc callsite: `topic_stance_split` is new in this PR
-      // and has not been through `supabase gen types typescript` yet,
-      // so the strict `.rpc(<known>)` overload rejects the name. The
-      // runtime shape is enforced by the `as unknown as ...` on the
-      // result and the Zod-like `toNum` narrowing below.
+      // Cast the rpc callsite for symmetry with the rest of the file;
+      // the hand-added Functions entry in packages/db/src/types.ts
+      // (`topic_stance_split`) covers the type side, but keeping the
+      // cast tolerates a stale types.ts regen on a CI node that
+      // hasn't pulled the latest generator output yet. The runtime
+      // shape is enforced by `toNum` + the `early` discriminator
+      // below.
       const rpc = ctx.db.rpc as unknown as (
         fn: string,
         args: Record<string, unknown>,
@@ -386,14 +391,16 @@ export const feedRouter = router({
       })) as unknown as {
         data:
           | {
-              agree_count: number | string;
-              disagree_count: number | string;
-              total: number | string;
+              agree_count: number | string | null;
+              disagree_count: number | string | null;
+              total: number | string | null;
+              early: boolean | null;
             }
           | Array<{
-              agree_count: number | string;
-              disagree_count: number | string;
-              total: number | string;
+              agree_count: number | string | null;
+              disagree_count: number | string | null;
+              total: number | string | null;
+              early: boolean | null;
             }>
           | null;
         error: { code?: string; message: string } | null;
@@ -429,12 +436,14 @@ export const feedRouter = router({
       };
       const agree = toNum(row?.agree_count);
       const total = toNum(row?.total);
+      const earlyFromSql = row?.early === true;
 
-      // Privacy floor. The UI renders "you're early — split shows at
-      // 5 votes." No percentages are computed or transmitted in this
-      // band, so there is no number to anchor on.
-      if (total < 5) {
-        return { total, early: true as const };
+      // Trust the SQL-side `early` flag, AND re-apply the <5 check on
+      // whatever `total` came back as. In early mode SQL returns
+      // total = null which `toNum` normalises to 0 — so the belt-and-
+      // braces condition also trips, as it should.
+      if (earlyFromSql || total < 5) {
+        return { early: true as const };
       }
 
       // Whole-integer percentages that sum to 100. Floor agree, give

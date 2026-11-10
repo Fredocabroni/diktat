@@ -315,7 +315,7 @@ function DropFlow({
   const split: SplitState | undefined = (() => {
     const data = splitQuery.data;
     if (!data) return undefined;
-    if (data.early) return { kind: 'early', total: data.total };
+    if (data.early) return { kind: 'early' };
     return {
       kind: 'full',
       agreePct: data.agreePct,

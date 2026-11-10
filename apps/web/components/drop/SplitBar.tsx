@@ -13,7 +13,7 @@
 'use client';
 
 export type SplitState =
-  | { readonly kind: 'early'; readonly total: number }
+  | { readonly kind: 'early' }
   | {
       readonly kind: 'full';
       readonly agreePct: number;
@@ -38,6 +38,10 @@ function formatCount(n: number): string {
 
 export function SplitBar({ split }: SplitBarProps): React.JSX.Element {
   if (split.kind === 'early') {
+    // Note: `total` is deliberately NOT rendered here. The RPC
+    // returns null counts + null total in the <5 band so even a
+    // direct PostgREST POST cannot read small-N numbers; the UI
+    // honours the same contract and shows no number to anchor on.
     return (
       <div
         data-component="SplitBar"
@@ -46,10 +50,7 @@ export function SplitBar({ split }: SplitBarProps): React.JSX.Element {
         aria-live="polite"
         className="rounded-xl border border-ink-300 bg-surface-raised px-3 py-2 text-sm text-text-secondary"
       >
-        <p>
-          you&rsquo;re early. split shows at 5 votes.{' '}
-          <span className="text-text-tertiary">{`(${formatCount(split.total)} so far.)`}</span>
-        </p>
+        <p>you&rsquo;re early. split shows at 5 votes.</p>
       </div>
     );
   }
