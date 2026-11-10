@@ -215,12 +215,16 @@ jobs:
       - name: Run schema-reviewer
         if: ${{ needs.changes.outputs.code == 'true' && env.LABEL_READY == 'true' }}
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # 2026-10-22 cost cut: prefer DIKTAT_CI_ANTHROPIC_KEY so CI
+          # reviewers and prod workers/api can be on different
+          # Anthropic workspaces. See claude-review.yml for the full
+          # rollout note.
+          ANTHROPIC_API_KEY: ${{ secrets.DIKTAT_CI_ANTHROPIC_KEY || secrets.ANTHROPIC_API_KEY }}
         run: |
           set +e
           claude -p "Run the schema-reviewer subagent on the migration diff at ./pr.diff. Review ONLY the migration files that appear in that diff (added, modified, or renamed under supabase/migrations/ or packages/db/). You MAY read earlier migrations for context (schema state at apply time, prior constraints a new migration depends on), but a finding on a migration file that the diff doesn't touch must be omitted entirely. The newest already-applied migration is the newest migration file that exists on the base branch, not any file in the diff. Output ONLY the review report in markdown. The VERY FIRST non-blank line of your output MUST be a markdown header (e.g. '# Schema Review') — do not precede it with any preamble. The VERY LAST non-blank line of your output MUST be EXACTLY \`VERDICT: PASS\` or \`VERDICT: BLOCK\` (no decoration, no trailing period, nothing after it). Nothing else — no closing summary, no meta-comment, no note about the report itself. The report + final VERDICT line IS your entire output. Do NOT edit files, request write or file permissions, run shell commands, or take any tool action of any kind. You are a read-only reviewer: if the diff has defects, name them and recommend the fix IN THE REPORT — never apply or offer to apply changes yourself. A human approves every change." \
             --model claude-sonnet-4-6 \
-            --max-turns 25 \
+            --max-turns 10 \
             --output-format text > review_output.md
           echo "$?" > review_exit_code
           set -e
