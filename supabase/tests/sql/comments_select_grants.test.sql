@@ -36,7 +36,7 @@ begin
   for t in select unnest(array['public.comments', 'public.comment_likes']) loop
     for p in select unnest(array['INSERT', 'UPDATE', 'DELETE']) loop
       if has_table_privilege('authenticated', t, p) then
-        raise exception 'T2 FAIL: authenticated has %% on % — must be RPC-only', p, t;
+        raise exception 'T2 FAIL: authenticated has % on % — must be RPC-only', p, t;
       end if;
     end loop;
   end loop;
