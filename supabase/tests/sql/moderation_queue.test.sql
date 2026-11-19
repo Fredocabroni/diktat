@@ -82,14 +82,15 @@ declare
   v_op  uuid := current_setting('tests.mq_op')::uuid;
   v_cid uuid := current_setting('tests.mq_cid')::uuid;
   v_user uuid := current_setting('tests.mq_user')::uuid;
-  v_tid  uuid := current_setting('tests.mq_tid')::uuid;
   v_rid2 uuid;
   v_del  timestamptz;
   v_body text;
   v_status text;
 begin
+  -- target_id is not FK'd; a synthetic uuid avoids the reporter+target
+  -- unique collision with the M1 fixture.
   insert into public.reports (reporter_user_id, target_type, target_id, reason)
-    values (v_op, 'drop', v_tid, 'spam2')
+    values (v_op, 'drop', gen_random_uuid(), 'spam2')
     returning id into v_rid2;
 
   perform public.admin_hide_comment(v_op, v_cid, v_rid2);
@@ -109,13 +110,12 @@ do $$
 declare
   v_op   uuid := current_setting('tests.mq_op')::uuid;
   v_user uuid := current_setting('tests.mq_user')::uuid;
-  v_tid  uuid := current_setting('tests.mq_tid')::uuid;
   v_rid3 uuid;
   v_banned_count int;
   v_status text;
 begin
   insert into public.reports (reporter_user_id, target_type, target_id, reason)
-    values (v_op, 'drop', v_tid, 'spam3')
+    values (v_op, 'drop', gen_random_uuid(), 'spam3')
     returning id into v_rid3;
 
   perform public.admin_ban_from_commenting(v_op, v_user, 'abuse', v_rid3);
