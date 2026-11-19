@@ -17,8 +17,19 @@
 
 begin;
 
+-- Rationale for `has_any_column_privilege`:
+-- A policy TO authenticated is useful even when the SELECT grant is
+-- column-level only (e.g. public.users and public.fact_check_claims
+-- ship intentional column-level grants to keep private columns out of
+-- the authenticated surface — see 20260618120000_users_access_column_grants).
+-- `has_table_privilege(..., 'SELECT')` returns false on column-only
+-- grants and would false-positive here. `has_any_column_privilege`
+-- returns true for BOTH table-level and column-level grants, which is
+-- exactly the semantics we want: "can this role reach at least one
+-- column through the RLS policy?"
+
 -- T1 — no public.* table with a SELECT policy targeting `authenticated`
--- lacks the matching SELECT table privilege.
+-- lacks SELECT on any column for `authenticated`.
 do $$
 declare
   r record;
@@ -31,21 +42,19 @@ begin
       and p.cmd = 'SELECT'
       and ('authenticated' = any(p.roles) or 'public' = any(p.roles))
   loop
-    if not has_table_privilege('authenticated', format('public.%I', r.tablename), 'SELECT') then
+    if not has_any_column_privilege('authenticated', format('public.%I', r.tablename), 'SELECT') then
       violations := violations || format('  - %s%s', r.tablename, E'\n');
     end if;
   end loop;
   if length(violations) > 0 then
     raise exception
-      E'T1 FAIL: public.* tables with a SELECT RLS policy targeting authenticated/public that lack GRANT SELECT TO authenticated:\n%',
+      E'T1 FAIL: public.* tables with a SELECT RLS policy targeting authenticated/public that lack any SELECT column grant for authenticated:\n%',
       violations;
   end if;
-  raise notice 'T1 PASS: every SELECT RLS policy on public.* has a paired SELECT GRANT for authenticated';
+  raise notice 'T1 PASS: every SELECT RLS policy on public.* has a paired SELECT grant (table- or column-level) for authenticated';
 end $$;
 
--- T2 — same shape for `anon`: a policy targeting `anon` (directly or
--- through `public`) requires the matching SELECT privilege for anon.
--- Keeps the signed-out read paths honest.
+-- T2 — same shape for `anon`.
 do $$
 declare
   r record;
@@ -58,16 +67,16 @@ begin
       and p.cmd = 'SELECT'
       and ('anon' = any(p.roles) or 'public' = any(p.roles))
   loop
-    if not has_table_privilege('anon', format('public.%I', r.tablename), 'SELECT') then
+    if not has_any_column_privilege('anon', format('public.%I', r.tablename), 'SELECT') then
       violations := violations || format('  - %s%s', r.tablename, E'\n');
     end if;
   end loop;
   if length(violations) > 0 then
     raise exception
-      E'T2 FAIL: public.* tables with a SELECT RLS policy targeting anon/public that lack GRANT SELECT TO anon:\n%',
+      E'T2 FAIL: public.* tables with a SELECT RLS policy targeting anon/public that lack any SELECT column grant for anon:\n%',
       violations;
   end if;
-  raise notice 'T2 PASS: every SELECT RLS policy targeting anon on public.* has a paired SELECT GRANT for anon';
+  raise notice 'T2 PASS: every SELECT RLS policy targeting anon on public.* has a paired SELECT grant (table- or column-level) for anon';
 end $$;
 
 rollback;
