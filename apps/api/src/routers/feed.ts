@@ -372,93 +372,104 @@ export const feedRouter = router({
     .use(queryLimit('feed.getSplit', { perMin: 60 }))
     .input(z.object({ topicId: z.string().uuid() }))
     .query(async ({ ctx, input }) => {
-      // Cast the rpc callsite for symmetry with the rest of the file;
-      // the hand-added Functions entry in packages/db/src/types.ts
-      // (`topic_stance_split`) covers the type side, but keeping the
-      // cast tolerates a stale types.ts regen on a CI node that
-      // hasn't pulled the latest generator output yet. The runtime
-      // shape is enforced by `toNum` + the `early` discriminator
-      // below.
-      const rpc = ctx.db.rpc as unknown as (
-        fn: string,
-        args: Record<string, unknown>,
-      ) => Promise<{
-        data: unknown;
-        error: { code?: string; message: string } | null;
-      }>;
-      const { data, error } = (await rpc('topic_stance_split', {
-        p_topic_id: input.topicId,
-      })) as unknown as {
-        data:
-          | {
-              agree_count: number | string | null;
-              disagree_count: number | string | null;
-              total: number | string | null;
-              early: boolean | null;
-            }
-          | Array<{
-              agree_count: number | string | null;
-              disagree_count: number | string | null;
-              total: number | string | null;
-              early: boolean | null;
-            }>
-          | null;
-        error: { code?: string; message: string } | null;
-      };
+      try {
+        // Call `ctx.db.rpc` as a method (bound) — supabase-js' PostgrestClient
+        // implements `rpc` as an instance method that reads `this` (fetch /
+        // headers / schema). Hoisting it into `const rpc = ctx.db.rpc` and
+        // calling `rpc(...)` loses the binding and throws before any DB
+        // call — the prod 500 for feed.getSplit landed with no
+        // `feed.getSplit.rpc_failed` log because that path is never
+        // reached. Cast the result for shape instead.
+        const { data, error } = (await ctx.db.rpc('topic_stance_split', {
+          p_topic_id: input.topicId,
+        })) as unknown as {
+          data:
+            | {
+                agree_count: number | string | null;
+                disagree_count: number | string | null;
+                total: number | string | null;
+                early: boolean | null;
+              }
+            | Array<{
+                agree_count: number | string | null;
+                disagree_count: number | string | null;
+                total: number | string | null;
+                early: boolean | null;
+              }>
+            | null;
+          error: { code?: string; message: string } | null;
+        };
 
-      if (error) {
-        // Log the PG error code (short, enum-like); omit the message
-        // so a raised-exception string or query-shape text can never
-        // leak through the tRPC wire response.
+        if (error) {
+          // Log the PG error code (short, enum-like); omit the message
+          // so a raised-exception string or query-shape text can never
+          // leak through the tRPC wire response.
+          console.warn(
+            JSON.stringify({
+              event: 'feed.getSplit.rpc_failed',
+              code: error.code ?? 'unknown',
+            }),
+          );
+          throw new TRPCError({
+            code: 'INTERNAL_SERVER_ERROR',
+            message: 'Failed to load split.',
+            cause: new Error(error.code ?? 'db_error'),
+          });
+        }
+
+        // The RPC returns a SETOF row (always one row; PostgREST
+        // sometimes wraps SETOF results in an array). Normalise.
+        const row = Array.isArray(data) ? data[0] : data;
+        const toNum = (v: number | string | undefined | null): number => {
+          if (typeof v === 'number') return v;
+          if (typeof v === 'string') {
+            const n = Number(v);
+            return Number.isFinite(n) ? n : 0;
+          }
+          return 0;
+        };
+        const agree = toNum(row?.agree_count);
+        const total = toNum(row?.total);
+        const earlyFromSql = row?.early === true;
+
+        // Trust the SQL-side `early` flag, AND re-apply the <5 check on
+        // whatever `total` came back as. In early mode SQL returns
+        // total = null which `toNum` normalises to 0 — so the belt-and-
+        // braces condition also trips, as it should.
+        if (earlyFromSql || total < 5) {
+          return { early: true as const };
+        }
+
+        // Whole-integer percentages that sum to 100. Floor agree, give
+        // the remainder to disagree so the two bars always tile the
+        // bar width exactly. (Alternative: round-half-up on both and
+        // accept a 1pp drift — we prefer exact tiling over symmetric
+        // rounding, since the bar renders directly from these numbers.)
+        const agreePct = Math.floor((agree / total) * 100);
+        const disagreePct = 100 - agreePct;
+
+        return {
+          agreePct,
+          disagreePct,
+          total,
+          early: false as const,
+        };
+      } catch (err) {
+        // A TRPCError raised above is the handled-error path; re-throw it
+        // as-is so the tRPC machinery keeps the original code + message.
+        if (err instanceof TRPCError) throw err;
+        // Anything else is an *unexpected* throw — the prod 500 class
+        // this PR fixes. Log the error name (short, enum-like) so a
+        // repeat regression surfaces with an event, not a silent 500.
+        // Message is omitted to keep stack-trace strings out of the
+        // observability pipe.
         console.warn(
           JSON.stringify({
-            event: 'feed.getSplit.rpc_failed',
-            code: error.code ?? 'unknown',
+            event: 'feed.getSplit.unexpected',
+            name: err instanceof Error ? err.name : 'unknown',
           }),
         );
-        throw new TRPCError({
-          code: 'INTERNAL_SERVER_ERROR',
-          message: 'Failed to load split.',
-          cause: new Error(error.code ?? 'db_error'),
-        });
+        throw err;
       }
-
-      // The RPC returns a SETOF row (always one row; PostgREST
-      // sometimes wraps SETOF results in an array). Normalise.
-      const row = Array.isArray(data) ? data[0] : data;
-      const toNum = (v: number | string | undefined | null): number => {
-        if (typeof v === 'number') return v;
-        if (typeof v === 'string') {
-          const n = Number(v);
-          return Number.isFinite(n) ? n : 0;
-        }
-        return 0;
-      };
-      const agree = toNum(row?.agree_count);
-      const total = toNum(row?.total);
-      const earlyFromSql = row?.early === true;
-
-      // Trust the SQL-side `early` flag, AND re-apply the <5 check on
-      // whatever `total` came back as. In early mode SQL returns
-      // total = null which `toNum` normalises to 0 — so the belt-and-
-      // braces condition also trips, as it should.
-      if (earlyFromSql || total < 5) {
-        return { early: true as const };
-      }
-
-      // Whole-integer percentages that sum to 100. Floor agree, give
-      // the remainder to disagree so the two bars always tile the
-      // bar width exactly. (Alternative: round-half-up on both and
-      // accept a 1pp drift — we prefer exact tiling over symmetric
-      // rounding, since the bar renders directly from these numbers.)
-      const agreePct = Math.floor((agree / total) * 100);
-      const disagreePct = 100 - agreePct;
-
-      return {
-        agreePct,
-        disagreePct,
-        total,
-        early: false as const,
-      };
     }),
 });

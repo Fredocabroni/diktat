@@ -20,22 +20,34 @@ interface RpcCall {
   readonly fn: string;
   readonly args: Record<string, unknown>;
 }
-function rpcFake(results: RpcResult[]): { db: { rpc: unknown; from: unknown }; calls: RpcCall[] } {
-  const calls: RpcCall[] = [];
-  let cursor = 0;
-  const rpc = (fn: string, args: Record<string, unknown>): Promise<RpcResult> => {
-    calls.push({ fn, args });
-    const r = results[cursor] ?? { data: null, error: null };
-    cursor += 1;
+// The fake's `rpc` is implemented as a class method that reads a
+// PRIVATE instance field (`#sentinel`). Calling it unbound
+// (`const r = db.rpc; r(...)`) loses `this` and throws
+// `TypeError: Cannot read private member #sentinel from an object
+// whose class did not declare it` — the same class of failure
+// supabase-js' real PostgrestClient produces. This catches the prod
+// 500 that lost `this` and never reached the DB.
+class FakeDb {
+  readonly calls: RpcCall[] = [];
+  #sentinel = 'bound';
+  #cursor = 0;
+  constructor(private readonly results: RpcResult[]) {}
+  rpc(fn: string, args: Record<string, unknown>): Promise<RpcResult> {
+    // Touch the private field so an unbound call blows up here.
+    void this.#sentinel;
+    this.calls.push({ fn, args });
+    const r = this.results[this.#cursor] ?? { data: null, error: null };
+    this.#cursor += 1;
     return Promise.resolve(r);
-  };
-  // `.from()` should never be reached for recordShift post-swap; wire a
-  // trap that makes the test fail loudly if someone accidentally
-  // reintroduces a direct-INSERT path.
-  const from = (t: string) => {
+  }
+  from(t: string): never {
     throw new Error(`rpcFake: unexpected .from('${t}') — recordShift must only call .rpc()`);
-  };
-  return { db: { rpc, from }, calls };
+  }
+}
+
+function rpcFake(results: RpcResult[]): { db: { rpc: unknown; from: unknown }; calls: RpcCall[] } {
+  const db = new FakeDb(results);
+  return { db, calls: db.calls };
 }
 
 describe('feedRouter.recordShift', () => {
@@ -835,5 +847,21 @@ describe('feedRouter.getSplit', () => {
       // @ts-expect-error — intentional runtime schema violation
       caller.feed.getSplit({ topicId: 'not-a-uuid' }),
     ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+  });
+
+  it('calls rpc bound to the db client (regression: supabase-js rpc uses `this`)', async () => {
+    // Direct method-shape smoke: calling `db.rpc` as a method succeeds;
+    // hoisting it into a free variable loses `this` and throws, mirroring
+    // supabase-js' real PostgrestClient. The getSplit handler's happy
+    // path above proves the call-site is bound; this guards the fake
+    // itself so a future test can't paper over the regression.
+    const fake = rpcFake([{ data: null, error: null }]);
+    const db = fake.db as {
+      rpc: (fn: string, args: Record<string, unknown>) => Promise<RpcResult>;
+    };
+    await expect(db.rpc('any', {})).resolves.toBeDefined();
+
+    const unbound = db.rpc;
+    expect(() => unbound('any', {})).toThrow(TypeError);
   });
 });
