@@ -486,18 +486,23 @@ export function buildTelegramDigestSendHandler(opts?: {
     //     doesn't drop the digest.
     let yesterday: YesterdayResults | undefined;
     try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      // dropDate is YYYY-MM-DD in ET. Convert to an upper bound of
+      // the start of that ET day in UTC — anything with drop_at
+      // strictly earlier than that moment is "yesterday's Drop" or
+      // older. Picking the max drop_at under that bound gives us the
+      // most recent prior Drop.
+      const dropDateUpperBoundIso = new Date(`${dropDate}T05:00:00Z`).toISOString();
       const yFrom = (deps.supabase as any)
         .from('news_topics')
-        .select('id, title, drop_date, published_at')
-        .eq('published', true)
+        .select('id, headline, drop_at, published_at')
+        .not('published_at', 'is', null)
         .eq('is_drop', true)
-        .lt('drop_date', dropDate)
-        .order('drop_date', { ascending: false })
+        .lt('drop_at', dropDateUpperBoundIso)
+        .order('drop_at', { ascending: false })
         .limit(1)
         .maybeSingle();
       const { data: yRow, error: yErr } = (await yFrom) as {
-        data: { id: string; title: string; drop_date: string } | null;
+        data: { id: string; headline: string; drop_at: string } | null;
         error: { message?: string } | null;
       };
       if (!yErr && yRow) {
@@ -522,7 +527,7 @@ export function buildTelegramDigestSendHandler(opts?: {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const s = split as any;
         yesterday = {
-          headline: yRow.title,
+          headline: yRow.headline,
           total: Number(s?.total ?? 0) || 0,
           agree: Number(s?.agree_count ?? 0) || 0,
           disagree: Number(s?.disagree_count ?? 0) || 0,
