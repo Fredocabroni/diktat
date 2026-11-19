@@ -444,7 +444,7 @@ export const dropPublishHandler: JobHandler = async (row, deps) => {
           'error',
           'drop_publish operator pick failed sourcing',
           `candidate=${operatorCandidateId} reason=not_in_eligible_set`,
-          { dedupKey: 'drop:operator_pick_failed', dedupTtlMs: 60 * 60_000 },
+          { dedupKey: 'drop:operator_pick_failed:eligibility', dedupTtlMs: 60 * 60_000 },
         );
         deps.logger.warn({
           event: 'drop_publish.operator_pick_sourcing_failed',
@@ -461,7 +461,7 @@ export const dropPublishHandler: JobHandler = async (row, deps) => {
             'error',
             'drop_publish operator pick failed sourcing',
             `candidate=${operatorCandidateId} reason=text_fetch_failed`,
-            { dedupKey: 'drop:operator_pick_failed', dedupTtlMs: 60 * 60_000 },
+            { dedupKey: 'drop:operator_pick_failed:text_fetch', dedupTtlMs: 60 * 60_000 },
           );
           deps.logger.warn({
             event: 'drop_publish.operator_pick_sourcing_failed',
