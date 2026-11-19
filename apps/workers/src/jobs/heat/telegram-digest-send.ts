@@ -492,6 +492,7 @@ export function buildTelegramDigestSendHandler(opts?: {
       // older. Picking the max drop_at under that bound gives us the
       // most recent prior Drop.
       const dropDateUpperBoundIso = new Date(`${dropDate}T05:00:00Z`).toISOString();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const yFrom = (deps.supabase as any)
         .from('news_topics')
         .select('id, headline, drop_at, published_at')
