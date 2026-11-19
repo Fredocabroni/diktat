@@ -1,4 +1,4 @@
--- Behavioural tests for migration 20261203000000: moderation queue.
+-- Behavioural tests for migration 20261130000000: moderation queue.
 --
 -- Runs as `postgres` (BYPASSRLS). Writes live inside a BEGIN..ROLLBACK
 -- so nothing leaks out.
@@ -145,7 +145,7 @@ begin
     insert into public.comments (topic_id, parent_id, user_id, handle, stance, body)
       values (v_tid, null, v_user, v_handle, 'agree', 'banned user direct insert');
     raise exception 'M4 FAIL: expected 23506, got success';
-  exception when restrict_violation then
+  exception when sqlstate '23506' then
     v_caught := SQLERRM;
     if position('user_banned' in v_caught) = 0 then
       raise exception 'M4 FAIL: expected user_banned, got "%"', v_caught;
