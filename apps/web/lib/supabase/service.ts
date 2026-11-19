@@ -3,6 +3,8 @@
 // RPCs that are granted to service_role only. Never import this from a
 // Client Component — the key would land in the browser bundle.
 
+import 'server-only';
+
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 
 import { clientEnv } from '../env';

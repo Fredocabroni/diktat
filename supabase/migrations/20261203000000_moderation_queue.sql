@@ -42,11 +42,14 @@ begin;
 create table public.comment_bans (
   user_id         uuid primary key references public.users(id) on delete cascade,
   banned_at       timestamptz not null default now(),
-  banned_by       uuid not null references public.users(id) on delete set null,
+  -- Nullable so the operator row can be deleted without blocking the
+  -- ban record. ON DELETE SET NULL would otherwise contradict NOT NULL.
+  banned_by       uuid references public.users(id) on delete set null,
   reason          text not null check (char_length(reason) between 1 and 500)
 );
 
 create index comment_bans_banned_at_idx on public.comment_bans (banned_at desc);
+create index comment_bans_banned_by_idx on public.comment_bans (banned_by);
 
 alter table public.comment_bans enable row level security;
 
@@ -62,7 +65,9 @@ comment on table public.comment_bans is
 
 create table public.moderation_audit_log (
   id              uuid primary key default gen_random_uuid(),
-  operator_id     uuid not null references public.users(id) on delete set null,
+  -- Nullable so the operator row can be deleted without breaking the
+  -- audit trail. Same ON DELETE / NOT NULL contradiction otherwise.
+  operator_id     uuid references public.users(id) on delete set null,
   action          text not null check (
     action in ('dismiss_report', 'hide_comment', 'ban_from_commenting')
   ),
@@ -77,6 +82,12 @@ create index moderation_audit_log_recent_idx
   on public.moderation_audit_log (created_at desc);
 create index moderation_audit_log_operator_idx
   on public.moderation_audit_log (operator_id, created_at desc);
+create index moderation_audit_log_report_idx
+  on public.moderation_audit_log (report_id) where report_id is not null;
+create index moderation_audit_log_comment_idx
+  on public.moderation_audit_log (comment_id) where comment_id is not null;
+create index moderation_audit_log_target_user_idx
+  on public.moderation_audit_log (target_user_id) where target_user_id is not null;
 
 alter table public.moderation_audit_log enable row level security;
 
