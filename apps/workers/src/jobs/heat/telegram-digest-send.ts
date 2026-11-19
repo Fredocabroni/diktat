@@ -62,12 +62,55 @@ interface ShadowTopEntry {
   readonly source_title: string;
   readonly source_url: string | null;
   readonly heat_score: number;
+  readonly global_event_id?: string | null;
+  readonly source_host?: string | null;
 }
 
 interface ShadowLogRow {
   readonly drop_date: string;
   readonly real_drop_topic_id: string | null;
   readonly shadow_top_5: ShadowTopEntry[];
+}
+
+/** Heuristic: a single alphanumeric blob of 6+ chars with both a
+ *  letter and a digit and no whitespace is an opaque id, not a
+ *  headline. Matches shapes like "C574290jvk8wo" that leak from
+ *  humanizeUrlSlug when the source URL has no readable slug. */
+export function looksLikeId(s: string): boolean {
+  const t = s.trim();
+  if (t.length < 6) return false;
+  if (/\s/.test(t)) return false;
+  if (!/^[A-Za-z0-9_-]+$/.test(t)) return false;
+  return /[A-Za-z]/.test(t) && /\d/.test(t);
+}
+
+/** Prefer the stored source_host, else derive from source_url, else null. */
+export function hostOf(entry: {
+  readonly source_host?: string | null;
+  readonly source_url: string | null;
+}): string | null {
+  if (entry.source_host) return entry.source_host;
+  if (!entry.source_url) return null;
+  try {
+    return new URL(entry.source_url).hostname;
+  } catch {
+    return null;
+  }
+}
+
+/** Pick the display title for a digest line.
+ *   1. a non-id alternate found elsewhere in the cluster
+ *   2. the entry's own source_title if it isn't id-shaped
+ *   3. the source host as a last-resort label
+ *  Never returns an opaque id. */
+export function displayTitle(
+  entry: { readonly source_title: string } & Parameters<typeof hostOf>[0],
+  clusterAlternate: string | null,
+): string {
+  if (clusterAlternate && !looksLikeId(clusterAlternate)) return clusterAlternate;
+  if (!looksLikeId(entry.source_title)) return entry.source_title;
+  const h = hostOf(entry);
+  return h ?? '(headline unavailable)';
 }
 
 interface InlineKeyboardButton {
@@ -128,6 +171,11 @@ export function buildMessageText(
    *  nights." as a one-line summary. When n === 0 the summary is
    *  omitted (nothing honest to say yet). */
   agreement?: { readonly x: number; readonly n: number },
+  /** Optional map: candidate_id → a title pulled from another
+   *  candidate in the same cluster, used when this entry's own
+   *  source_title is id-shaped. Falls back to host when neither is
+   *  readable. */
+  clusterAlternates?: ReadonlyMap<string, string | null>,
 ): string {
   const lines: string[] = [];
   lines.push(`📊 <b>Shadow digest · ${escapeHtml(dropDate)}</b>`);
@@ -144,7 +192,11 @@ export function buildMessageText(
     lines.push(`<b>Top ${top5.length} by heat_score:</b>`);
     top5.forEach((e, i) => {
       const star = i === 0 ? '⭐ ' : '';
-      lines.push(`${i + 1}. ${star}${escapeHtml(e.source_title)}  (${fmtScore(e.heat_score)})`);
+      const alt = clusterAlternates?.get(e.candidate_id) ?? null;
+      const title = displayTitle(e, alt);
+      const host = hostOf(e);
+      const hostSuffix = host ? ` · ${escapeHtml(host)}` : '';
+      lines.push(`${i + 1}. ${star}${escapeHtml(title)}${hostSuffix}  (${fmtScore(e.heat_score)})`);
     });
   }
   lines.push('');
@@ -367,11 +419,47 @@ export function buildTelegramDigestSendHandler(opts?: {
       }
     }
 
+    // 3b. For any top-5 entry whose stored source_title is
+    //     id-shaped (humanizeUrlSlug sometimes keeps a bare slug),
+    //     look for a readable alternate title elsewhere in the same
+    //     cluster. One batched query, fail-soft.
+    let clusterAlternates: Map<string, string | null> | undefined;
+    const needsAlternate = top5.filter(
+      (e) => looksLikeId(e.source_title) && typeof e.global_event_id === 'string',
+    );
+    if (needsAlternate.length > 0) {
+      const gids = Array.from(new Set(needsAlternate.map((e) => e.global_event_id!)));
+      const { data: altRows, error: altErr } = await deps.supabase
+        .from('news_topics_candidates')
+        .select('global_event_id, source_title, source_host')
+        .in('global_event_id', gids);
+      if (altErr) {
+        deps.logger.debug({
+          event: 'telegram_digest_send.alternates_load_failed',
+          message: scrubMessage(altErr.message),
+        });
+      } else {
+        const bestByGid = new Map<string, string>();
+        for (const r of altRows ?? []) {
+          if (!r.global_event_id || !r.source_title) continue;
+          if (looksLikeId(r.source_title)) continue;
+          const prev = bestByGid.get(r.global_event_id);
+          if (!prev || r.source_title.length > prev.length) {
+            bestByGid.set(r.global_event_id, r.source_title);
+          }
+        }
+        clusterAlternates = new Map();
+        for (const e of needsAlternate) {
+          clusterAlternates.set(e.candidate_id, bestByGid.get(e.global_event_id!) ?? null);
+        }
+      }
+    }
+
     // 4. Build message + keyboard. The "📰 Actual Drop" button is
     //    always offered when real_drop_topic_id is present — the
     //    operator sees the headline in the message body and can
     //    decide whether it was already one of the top-5 picks.
-    const text = buildMessageText(dropDate, realDropHeadline, top5, agreement);
+    const text = buildMessageText(dropDate, realDropHeadline, top5, agreement, clusterAlternates);
     const keyboard = buildInlineKeyboard(dropDate, top5, shadow.real_drop_topic_id);
 
     // 5. POST to Telegram. URL carries the bot token — never logged.

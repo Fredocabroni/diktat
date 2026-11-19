@@ -5,7 +5,10 @@ import {
   buildMessageText,
   buildTelegramDigestSendHandler,
   digestDate,
+  displayTitle,
   escapeHtml,
+  hostOf,
+  looksLikeId,
 } from '../../../src/jobs/heat/telegram-digest-send.js';
 import type { Env } from '../../../src/env.js';
 import type { Logger } from '../../../src/logger.js';
@@ -81,6 +84,56 @@ function buildRow(): ScheduledJobRow {
 describe('escapeHtml', () => {
   it('escapes the four Telegram-HTML-sensitive chars', () => {
     expect(escapeHtml('a & b <c> "d"')).toBe('a &amp; b &lt;c&gt; &quot;d&quot;');
+  });
+});
+
+describe('looksLikeId', () => {
+  it('flags opaque slug-ids that leak from humanizeUrlSlug', () => {
+    expect(looksLikeId('C574290jvk8wo')).toBe(true);
+    expect(looksLikeId('abc123def')).toBe(true);
+  });
+
+  it('accepts real headlines', () => {
+    expect(looksLikeId('Us Air Travel Resumes Faa')).toBe(false);
+    expect(looksLikeId('The Guardian launches culture podcast')).toBe(false);
+    expect(looksLikeId('short')).toBe(false);
+    expect(looksLikeId('NoDigitsHere')).toBe(false);
+    expect(looksLikeId('123456')).toBe(false);
+  });
+});
+
+describe('hostOf', () => {
+  it('prefers source_host, else derives from URL, else null', () => {
+    expect(hostOf({ source_host: 'www.example.com', source_url: null })).toBe('www.example.com');
+    expect(hostOf({ source_host: null, source_url: 'https://foo.bar/x' })).toBe('foo.bar');
+    expect(hostOf({ source_host: null, source_url: 'not a url' })).toBeNull();
+    expect(hostOf({ source_url: null })).toBeNull();
+  });
+});
+
+describe('displayTitle', () => {
+  const entry = {
+    source_title: 'C574290jvk8wo',
+    source_url: 'https://foo.bar/abc',
+    source_host: null,
+  };
+
+  it('uses a non-id cluster alternate when provided', () => {
+    expect(displayTitle(entry, 'FAA grounds all US flights')).toBe('FAA grounds all US flights');
+  });
+
+  it('ignores an id-shaped cluster alternate', () => {
+    expect(displayTitle({ ...entry, source_title: 'Real headline' }, 'C1234abcde')).toBe(
+      'Real headline',
+    );
+  });
+
+  it('falls back to host when title is id-shaped and no alternate', () => {
+    expect(displayTitle(entry, null)).toBe('foo.bar');
+  });
+
+  it('final fallback is a human-readable placeholder, never the id', () => {
+    expect(displayTitle({ ...entry, source_url: null }, null)).toBe('(headline unavailable)');
   });
 });
 
@@ -183,6 +236,13 @@ function buildSupabase(opts: {
    *  heat refit tool). Default: empty — no history yet. */
   readonly reviewedHistory?: ReadonlyArray<Record<string, unknown>>;
   readonly historyErr?: { message: string } | null;
+  /** Rows the handler reads from news_topics_candidates when it
+   *  looks for a non-id alternate title for an id-shaped source_title. */
+  readonly alternateRows?: ReadonlyArray<{
+    global_event_id: string;
+    source_title: string;
+    source_host?: string | null;
+  }>;
 }): { client: ServiceClient; stamped: FakeStamp[] } {
   const stamped: FakeStamp[] = [];
   const fromImpl = (table: string) => {
@@ -221,6 +281,14 @@ function buildSupabase(opts: {
           eq: (_c: string, _v: string) => ({
             maybeSingle: () => Promise.resolve({ data: opts.topicRow ?? null, error: null }),
           }),
+        }),
+      };
+    }
+    if (table === 'news_topics_candidates') {
+      return {
+        select: (_cols: string) => ({
+          in: (_c: string, _v: unknown) =>
+            Promise.resolve({ data: opts.alternateRows ?? [], error: null }),
         }),
       };
     }
@@ -430,6 +498,111 @@ describe('telegram_digest_send handler', () => {
     });
     await handler(buildRow(), { supabase: supa.client, logger });
     expect(captured.body.text).not.toContain('Heat agreed with you');
+  });
+
+  it('id-shaped source_title: resolves via cluster alternate and shows host suffix', async () => {
+    const supa = buildSupabase({
+      logRow: {
+        drop_date: '2026-10-18',
+        real_drop_topic_id: null,
+        shadow_top_5: [
+          {
+            candidate_id: 'c1',
+            source_title: 'C574290jvk8wo',
+            source_url: 'https://www.faa.gov/newsroom/foo',
+            heat_score: 12,
+            global_event_id: 'G-faa',
+          },
+          {
+            candidate_id: 'c2',
+            source_title: 'Readable headline',
+            source_url: 'https://www.reuters.com/article/bar',
+            heat_score: 8,
+            global_event_id: 'G-other',
+          },
+        ],
+      },
+      alternateRows: [
+        { global_event_id: 'G-faa', source_title: 'US air travel resumes as FAA lifts hold' },
+      ],
+    });
+    const logger = buildLogger();
+    const captured: { body: Record<string, unknown> } = { body: {} };
+    const fetchImpl = vi.fn(async (_url: string, init: RequestInit) => {
+      captured.body = JSON.parse(init.body as string);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, result: { message_id: 1 } }),
+      } as unknown as Response;
+    }) as unknown as typeof globalThis.fetch;
+    const handler = buildTelegramDigestSendHandler({
+      now: () => new Date('2026-10-19T01:15:00Z'),
+      envProvider: () =>
+        env({
+          TELEGRAM_DIGEST_ENABLED: true,
+          TELEGRAM_BOT_TOKEN: 'bot-token',
+          TELEGRAM_CHAT_ID: '42',
+        }),
+      fetchImpl,
+    });
+    await handler(buildRow(), { supabase: supa.client, logger });
+    const text = captured.body.text as string;
+    // The id "C574290jvk8wo" must never appear in the message body.
+    expect(text).not.toContain('C574290jvk8wo');
+    // Cluster alternate replaces it.
+    expect(text).toContain('US air travel resumes as FAA lifts hold');
+    // Host suffix appears for both entries.
+    expect(text).toContain('· www.faa.gov');
+    expect(text).toContain('· www.reuters.com');
+    // Original readable headline for c2 is preserved.
+    expect(text).toContain('Readable headline');
+  });
+
+  it('id-shaped source_title with no cluster alternate: falls back to host as the label', async () => {
+    const supa = buildSupabase({
+      logRow: {
+        drop_date: '2026-10-18',
+        real_drop_topic_id: null,
+        shadow_top_5: [
+          {
+            candidate_id: 'c1',
+            source_title: 'C574290jvk8wo',
+            source_url: 'https://www.faa.gov/x',
+            heat_score: 5,
+            global_event_id: 'G-faa',
+          },
+        ],
+      },
+      alternateRows: [], // no non-id titles found in the cluster
+    });
+    const logger = buildLogger();
+    const captured: { body: Record<string, unknown> } = { body: {} };
+    const fetchImpl = vi.fn(async (_url: string, init: RequestInit) => {
+      captured.body = JSON.parse(init.body as string);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, result: { message_id: 2 } }),
+      } as unknown as Response;
+    }) as unknown as typeof globalThis.fetch;
+    const handler = buildTelegramDigestSendHandler({
+      now: () => new Date('2026-10-19T01:15:00Z'),
+      envProvider: () =>
+        env({
+          TELEGRAM_DIGEST_ENABLED: true,
+          TELEGRAM_BOT_TOKEN: 'bot-token',
+          TELEGRAM_CHAT_ID: '42',
+        }),
+      fetchImpl,
+    });
+    await handler(buildRow(), { supabase: supa.client, logger });
+    const text = captured.body.text as string;
+    expect(text).not.toContain('C574290jvk8wo');
+    // Falls back to the host (which also appears as the suffix,
+    // producing "www.faa.gov · www.faa.gov" — intentionally; the
+    // operator sees at least a readable label).
+    expect(text).toContain('www.faa.gov');
   });
 
   it('Telegram 403 (bot blocked): stamps degraded_send', async () => {
