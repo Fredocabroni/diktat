@@ -25,8 +25,8 @@ begin
   insert into public.users (id, handle, current_ap, created_at)
     values (v_uid, ('cx' || substr(replace(v_uid::text, '-', ''), 1, 8))::extensions.citext, 100, now())
     on conflict (id) do update set handle = excluded.handle;
-  insert into public.news_topics (id, slug, title, published, published_at, drop_date)
-    values (v_tid, 'cx-topic-' || substr(replace(v_tid::text, '-', ''), 1, 8), 'Test topic', true, now(), (now() at time zone 'America/New_York')::date);
+  insert into public.news_topics (id, slug, headline, published_at, is_drop, drop_at)
+    values (v_tid, ('cx-topic-' || substr(replace(v_tid::text, '-', ''), 1, 8))::extensions.citext, 'Test topic', now(), true, now());
   insert into public.opinion_shifts (user_id, topic_id, before_position, after_position, created_at)
     values (v_uid, v_tid, 0, 1, now());
   perform set_config('tests.cx_uid', v_uid::text, true);
