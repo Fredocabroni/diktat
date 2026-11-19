@@ -174,6 +174,7 @@ describe('runSchedulerTick', () => {
           'wikimedia_pageviews_validate',
           'drop_shadow_digest',
           'telegram_digest_send',
+          'lopsided_drop_check',
         ],
         p_worker_id: 'w1',
       },
