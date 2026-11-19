@@ -67,7 +67,7 @@
 
 import { createHash } from 'crypto';
 
-import { scrubMessage } from '@diktat/shared/alerts';
+import { escapeHtml, scrubMessage } from '@diktat/shared/alerts';
 
 import {
   DROP_HEADLINE_REWRITE_SYSTEM_PROMPT,
@@ -443,7 +443,7 @@ export const dropPublishHandler: JobHandler = async (row, deps) => {
         void deps.alerter?.alert(
           'error',
           'drop_publish operator pick failed sourcing',
-          `candidate=${operatorCandidateId} reason=not_in_eligible_set`,
+          `candidate=${escapeHtml(operatorCandidateId ?? '')} reason=not_in_eligible_set`,
           { dedupKey: 'drop:operator_pick_failed:eligibility', dedupTtlMs: 60 * 60_000 },
         );
         deps.logger.warn({
@@ -460,7 +460,7 @@ export const dropPublishHandler: JobHandler = async (row, deps) => {
           void deps.alerter?.alert(
             'error',
             'drop_publish operator pick failed sourcing',
-            `candidate=${operatorCandidateId} reason=text_fetch_failed`,
+            `candidate=${escapeHtml(operatorCandidateId ?? '')} reason=text_fetch_failed`,
             { dedupKey: 'drop:operator_pick_failed:text_fetch', dedupTtlMs: 60 * 60_000 },
           );
           deps.logger.warn({

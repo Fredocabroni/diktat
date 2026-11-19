@@ -108,7 +108,21 @@ language plpgsql
 security definer
 set search_path = ''
 as $$
+declare
+  today_et date := (now() at time zone 'America/New_York')::date;
 begin
+  -- Bound the valid window to ±1 ET-day. Telegram callback_data is
+  -- not server-signed, so a replayed or crafted payload could supply
+  -- an arbitrary date; this guard prevents pre-seeding
+  -- operator_skipped=true for a future date the operator never
+  -- intended to skip. ±1 tolerates UTC/ET midnight skew.
+  -- (PR #328 security-reviewer LOW-1.)
+  if p_drop_date < today_et - 1 or p_drop_date > today_et + 1 then
+    raise exception 'record_drop_shadow_operator_skip: drop_date % out of valid window [%, %]',
+      p_drop_date, today_et - 1, today_et + 1
+      using errcode = 'check_violation';
+  end if;
+
   insert into public.drop_shadow_log as d (
     drop_date,
     operator_skipped,
