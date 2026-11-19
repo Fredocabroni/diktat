@@ -50,8 +50,10 @@ interface StanceSplitRow {
 
 interface TopicRow {
   readonly id: string;
-  readonly title: string;
-  readonly drop_date: string;
+  readonly headline: string;
+  readonly drop_at: string | null;
+  readonly published_at: string | null;
+  readonly is_drop: boolean;
   readonly lopsided_alert_sent_at: string | null;
 }
 
@@ -67,10 +69,10 @@ export const lopsidedDropCheckHandler: JobHandler = async (row, deps) => {
   const supabase = deps.supabase as any;
   const { data: topic, error: topicErr } = (await supabase
     .from('news_topics')
-    .select('id, title, drop_date, lopsided_alert_sent_at, published')
+    .select('id, headline, drop_at, published_at, is_drop, lopsided_alert_sent_at')
     .eq('id', payload.topic_id)
     .maybeSingle()) as {
-    data: (TopicRow & { published: boolean }) | null;
+    data: TopicRow | null;
     error: { message?: string } | null;
   };
   if (topicErr) {
@@ -82,7 +84,7 @@ export const lopsidedDropCheckHandler: JobHandler = async (row, deps) => {
     deps.logger.info({ event: 'lopsided_drop_check.topic_missing', topic_id: payload.topic_id });
     return;
   }
-  if (!topic.published) {
+  if (!topic.published_at || !topic.is_drop) {
     deps.logger.info({ event: 'lopsided_drop_check.unpublished', topic_id: payload.topic_id });
     return;
   }
@@ -139,9 +141,17 @@ export const lopsidedDropCheckHandler: JobHandler = async (row, deps) => {
     const winner = agree > disagree ? 'agree' : 'disagree';
     const winnerCount = Math.max(agree, disagree);
     const pct = Math.round(topShare * 100);
+    const dropDate = topic.drop_at
+      ? new Intl.DateTimeFormat('en-CA', {
+          timeZone: 'America/New_York',
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+        }).format(new Date(topic.drop_at))
+      : (payload.drop_date ?? '');
     const text =
-      `📉 <b>Not much of a debate · ${topic.drop_date}</b>\n\n` +
-      `${topic.title}\n\n` +
+      `📉 <b>Not much of a debate · ${dropDate}</b>\n\n` +
+      `${topic.headline}\n\n` +
       `<b>${winner.toUpperCase()}</b> ${winnerCount} / ${total} (${pct}%)` +
       ` · locked split\n\n` +
       `<i>Consider a tougher question tomorrow.</i>`;

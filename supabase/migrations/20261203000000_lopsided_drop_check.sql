@@ -32,7 +32,7 @@ comment on column public.news_topics.lopsided_alert_sent_at is
 -- published Drops. The handler walks this set every 30 minutes.
 create index if not exists news_topics_lopsided_pending_idx
   on public.news_topics (published_at desc)
-  where published = true
+  where published_at is not null
     and lopsided_alert_sent_at is null;
 
 select cron.schedule(
@@ -50,12 +50,12 @@ select cron.schedule(
       t.id::text || ':' || to_char(date_trunc('minute', now()), 'YYYY-MM-DD HH24:MI'),
       jsonb_build_object(
         'topic_id', t.id,
-        'drop_date', t.drop_date,
+        'drop_date', to_char((t.drop_at at time zone 'America/New_York')::date, 'YYYY-MM-DD'),
         'enqueued_at', now()
       )
     from public.news_topics t
-    where t.published = true
-      and t.lopsided_alert_sent_at is null
+    where t.lopsided_alert_sent_at is null
+      and t.published_at is not null
       and t.published_at >= now() - interval '48 hours'
       and t.is_drop = true
     on conflict (job_type, idempotency_key) where target_user_id is null
