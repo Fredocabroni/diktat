@@ -45,7 +45,7 @@ jobs:
       # process. The config reads PLAYWRIGHT_BASE_URL so we don't need
       # to touch the dev server.
       - name: Build web
-        run: pnpm --filter=@diktat/web build
+        run: pnpm turbo run build --filter=@diktat/web
         env:
           NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:54321
           NEXT_PUBLIC_SUPABASE_ANON_KEY: dummy
