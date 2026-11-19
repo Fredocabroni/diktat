@@ -22,7 +22,16 @@ const interDisplay = Inter({
   weight: ['600', '700', '800', '900'],
 });
 
+// Share metadata is brand-only: title, description, and a static OG
+// image. The OG card is identical for every page by design — a
+// Drop-specific or user-specific card would leak private app state
+// (who's voting what, which topic you commented on) to anyone who can
+// scrape a URL. See the "Taboo" section in CLAUDE.md and the
+// autonomy guardrail in ADDICTION_ARCHITECTURE §12. If a public
+// landing page later needs a per-page card, override `openGraph` on
+// that route only and still never include user-identifiable text.
 export const metadata: Metadata = {
+  metadataBase: new URL('https://diktat.app'),
   title: 'Diktat',
   description: 'Politics is a combat sport. We built the arena.',
   manifest: '/manifest.json',
@@ -30,6 +39,26 @@ export const metadata: Metadata = {
     capable: true,
     statusBarStyle: 'black-translucent',
     title: 'Diktat',
+  },
+  openGraph: {
+    type: 'website',
+    siteName: 'Diktat',
+    title: 'Diktat',
+    description: 'Politics is a combat sport. We built the arena.',
+    images: [
+      {
+        url: '/icons/icon-512.png',
+        width: 512,
+        height: 512,
+        alt: 'Diktat',
+      },
+    ],
+  },
+  twitter: {
+    card: 'summary',
+    title: 'Diktat',
+    description: 'Politics is a combat sport. We built the arena.',
+    images: ['/icons/icon-512.png'],
   },
 };
 
