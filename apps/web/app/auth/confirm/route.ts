@@ -14,6 +14,7 @@
 
 import { NextResponse } from 'next/server';
 
+import { isAllowedCountry } from '../../../lib/country-gate';
 import { getServerSupabaseClient } from '../../../lib/supabase/server';
 
 // Supabase's verifyOtp accepts a constrained set of `type` strings for the
@@ -43,7 +44,7 @@ export async function GET(request: Request) {
   // `x-vercel-ip-country` header is set at the edge; a non-US value
   // refuses the token exchange so no session cookie is set.
   const country = (request.headers.get('x-vercel-ip-country') ?? '').toUpperCase();
-  if (country && country !== 'US') {
+  if (!isAllowedCountry(country)) {
     return NextResponse.redirect(new URL('/login?error=not_us', url.origin));
   }
 
