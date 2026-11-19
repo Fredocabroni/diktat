@@ -12,6 +12,7 @@ import { useSearchParams } from 'next/navigation';
 import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 
 import { TurnstileWidget } from '../../components/TurnstileWidget';
+import { isAllowedCountry } from '../../lib/country-gate';
 import { clientEnv } from '../../lib/env';
 import { getBrowserSupabaseClient } from '../../lib/supabase/browser';
 
@@ -88,7 +89,7 @@ function LoginInner() {
         // failure). The callback re-checks server-side so a
         // false-allow here still gets caught before session cookies
         // are set.
-        setGeo({ kind: c && c !== 'US' ? 'block' : 'allow' });
+        setGeo({ kind: isAllowedCountry(c) ? 'allow' : 'block' });
       })
       .catch(() => {
         if (!cancelled) setGeo({ kind: 'allow' });
