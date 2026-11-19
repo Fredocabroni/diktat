@@ -176,14 +176,22 @@ export function buildMessageText(
    *  source_title is id-shaped. Falls back to host when neither is
    *  readable. */
   clusterAlternates?: ReadonlyMap<string, string | null>,
+  /** Pick-source of the previous Drop (stamped by drop_publish).
+   *  Rendered as "Last Drop came from: X" when provided. */
+  lastDropPickSource?: string | null,
 ): string {
   const lines: string[] = [];
-  lines.push(`📊 <b>Shadow digest · ${escapeHtml(dropDate)}</b>`);
+  lines.push(
+    `📊 <b>Digest · for tonight's Drop (publishes 8:00 PM ET · ${escapeHtml(dropDate)})</b>`,
+  );
   lines.push('');
   if (realDropHeadline === null) {
-    lines.push(`<b>Actual Drop:</b> <i>no Drop in the last 24h</i>`);
+    lines.push(`<b>Last Drop:</b> <i>no Drop in the last 24h</i>`);
   } else {
-    lines.push(`<b>Actual Drop:</b> ${escapeHtml(realDropHeadline)}`);
+    lines.push(`<b>Last Drop:</b> ${escapeHtml(realDropHeadline)}`);
+  }
+  if (lastDropPickSource) {
+    lines.push(`<i>Last Drop came from: ${escapeHtml(lastDropPickSource)}</i>`);
   }
   lines.push('');
   if (top5.length === 0) {
@@ -204,7 +212,9 @@ export function buildMessageText(
     lines.push(`<i>Heat agreed with you ${agreement.x} of last ${agreement.n} nights.</i>`);
     lines.push('');
   }
-  lines.push('<i>Pick one — writes to drop_shadow_log.operator_pick.</i>');
+  lines.push(
+    "<i>Pick one — writes to drop_shadow_log.operator_pick and drives tonight's Drop.</i>",
+  );
   return lines.join('\n');
 }
 
@@ -374,6 +384,24 @@ export function buildTelegramDigestSendHandler(opts?: {
       realDropHeadline = topicRow?.headline ?? null;
     }
 
+    // 2b. Pick-source of the previous Drop. Look up the most-recent
+    //     drop_shadow_log row prior to today whose pick_source is set.
+    //     Fail-soft: missing / error → omit the line.
+    let lastDropPickSource: string | null = null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data: prevRow } = (await (deps.supabase as any)
+      .from('drop_shadow_log')
+      .select('pick_source')
+      .lt('drop_date', dropDate)
+      .not('pick_source', 'is', null)
+      .order('drop_date', { ascending: false })
+      .limit(1)
+      .maybeSingle()) as {
+      data: { pick_source: string | null } | null;
+      error: { message: string } | null;
+    };
+    if (prevRow?.pick_source) lastDropPickSource = prevRow.pick_source;
+
     // 3. Pull the last 14 reviewed drop_shadow_log rows (operator
     //    has filled in operator_pick_candidate_id OR explicitly
     //    skipped by setting operator_picked_at with a null
@@ -459,7 +487,14 @@ export function buildTelegramDigestSendHandler(opts?: {
     //    always offered when real_drop_topic_id is present — the
     //    operator sees the headline in the message body and can
     //    decide whether it was already one of the top-5 picks.
-    const text = buildMessageText(dropDate, realDropHeadline, top5, agreement, clusterAlternates);
+    const text = buildMessageText(
+      dropDate,
+      realDropHeadline,
+      top5,
+      agreement,
+      clusterAlternates,
+      lastDropPickSource,
+    );
     const keyboard = buildInlineKeyboard(dropDate, top5, shadow.real_drop_topic_id);
 
     // 5. POST to Telegram. URL carries the bot token — never logged.
