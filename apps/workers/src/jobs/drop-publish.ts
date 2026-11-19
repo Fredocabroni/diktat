@@ -122,6 +122,7 @@ interface DropOutcome {
   readonly text_fetched: boolean;
   readonly fetched_host: string | null;
   readonly cluster_stamped: boolean;
+  readonly pick_source: 'operator' | 'skip' | 'heat' | 'walker';
 }
 
 /** Structured-output contract for the LLM rewrite. Empty strings are
@@ -374,6 +375,8 @@ function pickedFromText(text: DropTextSource): PickedSource {
 
 export const dropPublishHandler: JobHandler = async (row, deps) => {
   const now = new Date();
+  const heatEnabled = process.env.HEAT_ENABLED === 'true';
+  const etDropDate = etDateYMD(now);
 
   // (1) Fetch Drop-eligible candidates via the SECURITY DEFINER RPC
   //     that enforces S3 (migration 20261019000000).
@@ -384,13 +387,12 @@ export const dropPublishHandler: JobHandler = async (row, deps) => {
   )) as { data: ActiveCandidate[] | null; error: { message: string } | null };
   if (candErr) throw new Error(`drop_publish: fetch candidates: ${scrubMessage(candErr.message)}`);
   const candidates = candData ?? [];
-  if (candidates.length === 0) {
-    await stampPayload(deps, row.id, { ...row.payload, no_candidates: true });
-    deps.logger.warn({ event: 'drop_publish.no_candidates', jobId: row.id });
-    return;
-  }
 
-  // (2) Blocked clusters from the last 3 days of Drops.
+  // (2) Blocked clusters from the last 3 days of Drops. Loaded up
+  //     front — the walker fallback needs this; operator-pick and
+  //     heat-top branches intentionally bypass the block set
+  //     (operator pick is authoritative; heat-top is a single pick
+  //     and runs only when operator did not act).
   const blockCutoff = new Date(now.getTime() - CLUSTER_BLOCK_DAYS * 86_400_000).toISOString();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { data: blockedData, error: blockedErr } = (await (deps.supabase as any)
@@ -406,14 +408,107 @@ export const dropPublishHandler: JobHandler = async (row, deps) => {
     throw new Error(`drop_publish: fetch blocked clusters: ${scrubMessage(blockedErr.message)}`);
   const blockedClusters = new Set((blockedData ?? []).map((r) => r.dedup_cluster_id));
 
-  // (3) Walk ranked candidates, honoring blocked set. Reputable candidates
-  //     must yield readable news-type outlet text; if none, skip to next.
-  //     On full exhaustion of the unblocked pool, pass B tries the
-  //     entire pool regardless of block state (§5 "never skip a day").
-  const walkResult = await walkCandidates(deps, candidates, blockedClusters, false);
-  const picked = walkResult ?? (await walkCandidates(deps, candidates, blockedClusters, true));
+  // (2.5) HEAT_ENABLED branch — operator-driven Drop. Reads the
+  //       drop_shadow_log row for today's ET date (written by the
+  //       21:00 UTC generator; operator picks via Telegram buttons
+  //       between then and 20:00 ET). If operator_skipped=true we
+  //       no-Drop the day. If operator_pick_candidate_id is a top-5
+  //       pick that passes sourcing, that's the Drop. Otherwise
+  //       fall through to heat-top → walker.
+  let picked: WalkResult | null = null;
+  let pickSource: 'operator' | 'skip' | 'heat' | 'walker' = 'walker';
+  if (heatEnabled) {
+    const shadow = await loadShadowRow(deps, etDropDate);
+    if (shadow?.operator_skipped) {
+      await recordPickSource(deps, etDropDate, 'skip');
+      await stampPayload(deps, row.id, {
+        ...row.payload,
+        pick_source: 'skip',
+        no_drop: true,
+        reason: 'operator_skipped',
+      });
+      deps.logger.info({
+        event: 'drop_publish.operator_skip',
+        jobId: row.id,
+        drop_date: etDropDate,
+      });
+      return;
+    }
+    const operatorCandidateId = isTopFiveOperatorPick(shadow)
+      ? shadow!.operator_pick_candidate_id
+      : null;
+    if (operatorCandidateId) {
+      const match = candidates.find((c) => c.id === operatorCandidateId);
+      if (!match) {
+        void deps.alerter?.alert(
+          'error',
+          'drop_publish operator pick failed sourcing',
+          `candidate=${operatorCandidateId} reason=not_in_eligible_set`,
+          { dedupKey: 'drop:operator_pick_failed', dedupTtlMs: 60 * 60_000 },
+        );
+        deps.logger.warn({
+          event: 'drop_publish.operator_pick_sourcing_failed',
+          candidateId: operatorCandidateId,
+          reason: 'not_in_eligible_set',
+        });
+      } else {
+        const result = await walkCandidates(deps, [match], new Set(), true);
+        if (result) {
+          picked = result;
+          pickSource = 'operator';
+        } else {
+          void deps.alerter?.alert(
+            'error',
+            'drop_publish operator pick failed sourcing',
+            `candidate=${operatorCandidateId} reason=text_fetch_failed`,
+            { dedupKey: 'drop:operator_pick_failed', dedupTtlMs: 60 * 60_000 },
+          );
+          deps.logger.warn({
+            event: 'drop_publish.operator_pick_sourcing_failed',
+            candidateId: operatorCandidateId,
+            reason: 'text_fetch_failed',
+          });
+        }
+      }
+    }
+    // Heat top-1 fallback (no pick, or pick failed sourcing).
+    if (!picked && candidates.length > 0) {
+      const heatTop = await pickHeatTopCandidate(deps, candidates);
+      if (heatTop) {
+        const result = await walkCandidates(deps, [heatTop], new Set(), true);
+        if (result) {
+          picked = result;
+          pickSource = 'heat';
+        } else {
+          deps.logger.info({
+            event: 'drop_publish.heat_top_sourcing_failed',
+            candidateId: heatTop.id,
+          });
+        }
+      }
+    }
+  }
+
+  if (candidates.length === 0 && !picked) {
+    if (heatEnabled) await recordPickSource(deps, etDropDate, 'walker');
+    await stampPayload(deps, row.id, { ...row.payload, no_candidates: true });
+    deps.logger.warn({ event: 'drop_publish.no_candidates', jobId: row.id });
+    return;
+  }
+
+  // (3) Walker fallback. Walk ranked candidates, honoring the blocked
+  //     set. Reputable candidates must yield readable news-type outlet
+  //     text; if none, skip to next. On full exhaustion of the unblocked
+  //     pool, pass B tries the entire pool regardless of block state
+  //     (§5 "never skip a day").
+  if (!picked) {
+    const walkResult = await walkCandidates(deps, candidates, blockedClusters, false);
+    picked = walkResult ?? (await walkCandidates(deps, candidates, blockedClusters, true));
+    pickSource = 'walker';
+  }
 
   if (!picked) {
+    if (heatEnabled) await recordPickSource(deps, etDropDate, 'walker');
     await stampPayload(deps, row.id, { ...row.payload, no_candidates: true });
     deps.logger.warn({ event: 'drop_publish.no_eligible_candidate', jobId: row.id });
     return;
@@ -563,7 +658,9 @@ export const dropPublishHandler: JobHandler = async (row, deps) => {
     text_fetched: source.fromClusterOutletFetch,
     fetched_host: source.fromClusterOutletFetch ? source.host : null,
     cluster_stamped: clusterStamped,
+    pick_source: pickSource,
   };
+  if (heatEnabled) await recordPickSource(deps, etDropDate, pickSource);
   await stampPayload(deps, row.id, { ...row.payload, outcome });
 
   deps.logger.info({
@@ -576,6 +673,112 @@ export const dropPublishHandler: JobHandler = async (row, deps) => {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/** YYYY-MM-DD in America/New_York — matches the digest handlers so
+ *  the drop_shadow_log row the operator reviews at 17:00 ET keys to
+ *  the same row drop_publish reads at 20:00 ET. */
+function etDateYMD(now: Date): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/New_York',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(now);
+}
+
+interface ShadowRow {
+  readonly drop_date: string;
+  readonly operator_pick_candidate_id: string | null;
+  readonly operator_picked_at: string | null;
+  readonly operator_notes: string | null;
+  readonly operator_skipped: boolean;
+}
+
+/** Load the drop_shadow_log row for today's ET Drop. Missing row =
+ *  null (digest did not run, or HEAT_SHADOW_ENABLED=false). */
+async function loadShadowRow(
+  deps: Parameters<JobHandler>[1],
+  dropDate: string,
+): Promise<ShadowRow | null> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data, error } = (await (deps.supabase as any)
+    .from('drop_shadow_log')
+    .select(
+      'drop_date, operator_pick_candidate_id, operator_picked_at, operator_notes, operator_skipped',
+    )
+    .eq('drop_date', dropDate)
+    .maybeSingle()) as { data: ShadowRow | null; error: { message: string } | null };
+  if (error) {
+    deps.logger.warn({
+      event: 'drop_publish.shadow_load_failed',
+      message: scrubMessage(error.message),
+    });
+    return null;
+  }
+  return data;
+}
+
+/** True iff the shadow row carries a top-5-candidate operator pick
+ *  for today (not a legacy "actual-Drop feedback" pick, which has
+ *  no meaning for tonight's upcoming Drop). */
+function isTopFiveOperatorPick(shadow: ShadowRow | null): boolean {
+  if (!shadow) return false;
+  if (!shadow.operator_pick_candidate_id) return false;
+  if (!shadow.operator_picked_at) return false;
+  const notes = shadow.operator_notes ?? '';
+  return notes.startsWith('telegram: top5_candidate');
+}
+
+/** Pick the eligible candidate with the highest heat_score. Returns
+ *  null if no candidate has a scored heat_score, or on DB error. */
+async function pickHeatTopCandidate(
+  deps: Parameters<JobHandler>[1],
+  eligible: ReadonlyArray<ActiveCandidate>,
+): Promise<ActiveCandidate | null> {
+  if (eligible.length === 0) return null;
+  const ids = eligible.map((c) => c.id);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data, error } = (await (deps.supabase as any)
+    .from('news_topics_candidates')
+    .select('id, heat_score')
+    .in('id', ids)
+    .not('heat_score', 'is', null)
+    .order('heat_score', { ascending: false, nullsFirst: false })
+    .limit(1)
+    .maybeSingle()) as {
+    data: { id: string; heat_score: number | null } | null;
+    error: { message: string } | null;
+  };
+  if (error) {
+    deps.logger.warn({
+      event: 'drop_publish.heat_top_load_failed',
+      message: scrubMessage(error.message),
+    });
+    return null;
+  }
+  if (!data) return null;
+  return eligible.find((c) => c.id === data.id) ?? null;
+}
+
+async function recordPickSource(
+  deps: Parameters<JobHandler>[1],
+  dropDate: string,
+  source: 'operator' | 'skip' | 'heat' | 'walker',
+): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { error } = (await (deps.supabase as any).rpc('record_drop_pick_source', {
+    p_drop_date: dropDate,
+    p_pick_source: source,
+  })) as { error: { message: string } | null };
+  if (error) {
+    deps.logger.warn({
+      event: 'drop_publish.record_pick_source_failed',
+      drop_date: dropDate,
+      pick_source: source,
+      message: scrubMessage(error.message),
+    });
+  }
+}
 
 interface WalkResult {
   chosen: ActiveCandidate;

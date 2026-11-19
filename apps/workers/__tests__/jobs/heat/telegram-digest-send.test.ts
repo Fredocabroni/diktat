@@ -163,12 +163,24 @@ describe('buildMessageText', () => {
     { candidate_id: 'c2', source_title: 'Beta <tag>', source_url: null, heat_score: 9.0 },
   ];
 
-  it('includes the actual Drop headline when present and HTML-escapes it', () => {
+  it('includes the last Drop headline when present and HTML-escapes it', () => {
     const txt = buildMessageText('2026-10-19', 'Breaking: X & Y', top5);
-    expect(txt).toContain('Shadow digest · 2026-10-19');
+    expect(txt).toContain("for tonight's Drop (publishes 8:00 PM ET · 2026-10-19)");
     expect(txt).toContain('Breaking: X &amp; Y');
     expect(txt).toContain('⭐ Alpha');
     expect(txt).toContain('Beta &lt;tag&gt;'); // headline escaped
+  });
+
+  it('includes "Last Drop came from: <source>" when provided', () => {
+    const txt = buildMessageText(
+      '2026-10-19',
+      'Yesterday headline',
+      top5,
+      undefined,
+      undefined,
+      'operator',
+    );
+    expect(txt).toContain('Last Drop came from: operator');
   });
 
   it('shows "no Drop" fallback when real_drop is null', () => {
@@ -243,15 +255,23 @@ function buildSupabase(opts: {
     source_title: string;
     source_host?: string | null;
   }>;
+  /** Pick-source of the prior Drop, read by the handler to render
+   *  the "Last Drop came from: X" digest line. */
+  readonly lastDropPickSource?: string | null;
 }): { client: ServiceClient; stamped: FakeStamp[] } {
   const stamped: FakeStamp[] = [];
   const fromImpl = (table: string) => {
     if (table === 'drop_shadow_log') {
-      // The handler walks TWO distinct chains on this table:
+      // The handler walks THREE distinct chains on this table:
       //   (a) current-day row: .select(...).eq('drop_date', ...).maybeSingle()
       //   (b) reviewed history: .select(...).not(...).lt(...).order(...).limit(...)
+      //   (c) prev-pick-source: .select(...).lt(...).not(...).order(...).limit(...).maybeSingle()
       // The select() stub returns a shim object that routes
       // whichever chain the caller walks next.
+      const prevPickSourceResult = Promise.resolve({
+        data: opts.lastDropPickSource != null ? { pick_source: opts.lastDropPickSource } : null,
+        error: null,
+      });
       return {
         select: (_cols: string) => ({
           // (a) current-day fetch
@@ -269,6 +289,17 @@ function buildSupabase(opts: {
                     data: opts.reviewedHistory ?? [],
                     error: opts.historyErr ?? null,
                   }),
+              }),
+            }),
+          }),
+          // (c) prev-pick-source lookup. Begins with `.lt`, then
+          // `.not(...).order(...).limit(1).maybeSingle()`.
+          lt: (_c: string, _v: unknown) => ({
+            not: (_c2: string, _op: string, _v2: unknown) => ({
+              order: (_c3: string, _opts: unknown) => ({
+                limit: (_n: number) => ({
+                  maybeSingle: () => prevPickSourceResult,
+                }),
               }),
             }),
           }),
