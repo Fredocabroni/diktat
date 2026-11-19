@@ -130,18 +130,20 @@ begin
   raise notice 'M3 PASS';
 end $$;
 
--- M4 — banned user's create_comment call is refused with 23506.
+-- M4 — the BEFORE INSERT trigger refuses a direct insert by a banned
+-- user with 23506. Using a direct INSERT (rather than create_comment)
+-- keeps this test independent of any create_comment migration variant.
 do $$
 declare
   v_user uuid := current_setting('tests.mq_user')::uuid;
   v_tid  uuid := current_setting('tests.mq_tid')::uuid;
+  v_handle extensions.citext;
   v_caught text;
 begin
-  perform set_config('request.jwt.claims',
-    json_build_object('sub', v_user::text, 'role', 'authenticated')::text,
-    true);
+  select handle into v_handle from public.users where id = v_user;
   begin
-    perform public.create_comment(v_tid, null, 'banned user try');
+    insert into public.comments (topic_id, parent_id, user_id, handle, stance, body)
+      values (v_tid, null, v_user, v_handle, 'agree', 'banned user direct insert');
     raise exception 'M4 FAIL: expected 23506, got success';
   exception when restrict_violation then
     v_caught := SQLERRM;
