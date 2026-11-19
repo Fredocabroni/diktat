@@ -271,7 +271,10 @@ export async function handleCallbackQuery(q: TelegramCallbackQuery, deps: Deps):
   });
   await postJson(deps.fetch, answerUrl, {
     callback_query_id: q.id,
-    text: parsed.kind === 'pick' ? '✓ Logged your top-5 pick.' : '✓ Logged actual-Drop pick.',
+    text:
+      parsed.kind === 'pick'
+        ? "✓ Logged your top-5 pick — drives tonight's Drop."
+        : "✓ Logged for refit history (does NOT drive tonight's Drop).",
   });
 }
 
