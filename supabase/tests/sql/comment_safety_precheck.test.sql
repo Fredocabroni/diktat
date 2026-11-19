@@ -135,7 +135,7 @@ declare
   v_caught text;
 begin
   insert into public.comment_block_patterns (pattern, reason_label)
-    values ('\mforbidden-word\m', 'operator_wordlist');
+    values ('\mforbidden-word\M', 'operator_wordlist');
   begin
     perform pg_temp.cx_create('this line has a forbidden-word in it');
     raise exception 'C6 FAIL: expected 23514, got success';
