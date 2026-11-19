@@ -1,0 +1,77 @@
+name: playwright smoke
+
+# Runs the <3 min smoke suite on PRs that touch the web surface.
+# Also runs on workflow_dispatch so a maintainer can kick the suite
+# without pushing. Target: fast enough to run on every PR without
+# becoming the merge-gate bottleneck; isolated enough that a flaky
+# auth flow doesn't block the unauth'd slice.
+
+on:
+  pull_request:
+    paths:
+      - 'apps/web/**'
+      - 'packages/ui/**'
+      - '.github/workflows/playwright-smoke.yml'
+  workflow_dispatch: {}
+
+concurrency:
+  group: playwright-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke-unauthenticated:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v3
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # Install only Chromium — Firefox + WebKit double the install
+      # size and we don't need cross-browser coverage at smoke scope.
+      - name: Install Playwright Chromium
+        run: pnpm --filter=@diktat/web exec playwright install --with-deps chromium
+
+      # Build + start the web app on 127.0.0.1:3000 as a background
+      # process. The config reads PLAYWRIGHT_BASE_URL so we don't need
+      # to touch the dev server.
+      - name: Build web
+        run: pnpm turbo run build --filter=@diktat/web
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:54321
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: dummy
+
+      - name: Start web
+        run: |
+          pnpm --filter=@diktat/web start > /tmp/web.log 2>&1 &
+          echo $! > /tmp/web.pid
+          for i in $(seq 1 60); do
+            curl -sSf http://127.0.0.1:3000 > /dev/null && break || sleep 1
+          done
+
+      - name: Run unauthenticated smoke project
+        run: |
+          pnpm --filter=@diktat/web exec playwright test \
+            --project=smoke-unauthenticated \
+            --reporter=github
+
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-unauthenticated
+          path: apps/web/playwright-report/
+          retention-days: 7
+
+      - name: Tail web log on failure
+        if: failure()
+        run: tail -200 /tmp/web.log || true
