@@ -495,13 +495,15 @@ jobs:
       - name: Run ${{ matrix.reviewer.name }}
         if: ${{ env.SHOULD_RUN == 'true' }}
         env:
-          # 2026-10-22 cost cut: prefer DIKTAT_CI_ANTHROPIC_KEY when
-          # set so CI reviewers and prod workers/api can run on
-          # different Anthropic workspaces / billing. Falls back to
-          # ANTHROPIC_API_KEY so the switch is a one-step rollout:
-          # add the new secret and the next workflow run picks it up;
-          # unset to roll back.
-          ANTHROPIC_API_KEY: ${{ secrets.DIKTAT_CI_ANTHROPIC_KEY || secrets.ANTHROPIC_API_KEY }}
+          # Auth precedence: when CLAUDE_CODE_OAUTH_TOKEN is set (the
+          # subscription token minted by `claude setup-token`), the
+          # reviewer authenticates as the operator's Claude subscription
+          # and the CLI MUST NOT fall back to the API key — the shell
+          # block below `unset`s ANTHROPIC_API_KEY on that path. When the
+          # OAuth token is absent, the Anthropic API key (CI workspace
+          # preferred, prod fallback) authenticates instead.
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          API_KEY_FALLBACK: ${{ secrets.DIKTAT_CI_ANTHROPIC_KEY || secrets.ANTHROPIC_API_KEY }}
           REVIEW_PROMPT: ${{ matrix.reviewer.prompt }}
           REVIEW_MODEL: ${{ matrix.reviewer.model }}
         # The previous `|| true` swallowed claude -p's exit code,
@@ -524,6 +526,17 @@ jobs:
         # `claude -p`'s own argument parser.
         run: |
           set +e
+          # Pick auth mode. Subscription (OAuth) wins when the token is
+          # present; ANTHROPIC_API_KEY is unset on that path so the CLI
+          # can't silently fall back to it. One log line records which
+          # mode was used — never the credential itself.
+          if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+            echo "reviewer auth: subscription"
+            unset ANTHROPIC_API_KEY
+          else
+            echo "reviewer auth: api-key"
+            export ANTHROPIC_API_KEY="$API_KEY_FALLBACK"
+          fi
           # security-reviewer caps at 25 turns (operator decision after
           # the credit-exhaustion incident on 2026-10-19 — the reviewer
           # was burning tokens on exploratory tool-use loops without
@@ -545,6 +558,15 @@ jobs:
             --max-turns "$MAX_TURNS" \
             --output-format text > review_output.md
           echo "$?" > review_exit_code
+          # Subscription quota detection: if the CLI emitted a
+          # usage-limit message into the review body, fail the job with
+          # an explicit, grep-friendly marker instead of posting the
+          # quota text as if it were a review.
+          if grep -qiE 'usage limit|claude .*(usage|rate) limit|5-hour limit|quota (exceeded|reached)' review_output.md; then
+            echo "QUOTA: subscription limit reached, retry later"
+            set -e
+            exit 1
+          fi
           set -e
 
       # Gate the captured output via the shared detection script. The
