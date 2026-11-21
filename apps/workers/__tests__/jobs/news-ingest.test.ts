@@ -443,6 +443,28 @@ describe('humanizeUrlSlug — title derivation from URL path', () => {
     );
   });
 
+  it('rejects an id-shaped slug (bbc.com-style c574290jvk8wo) and falls back to host+event', () => {
+    expect(humanizeUrlSlug('https://bbc.com/news/c574290jvk8wo', 'bbc.com', 'evt987654321')).toBe(
+      'bbc.com event evt9876543',
+    );
+  });
+
+  it('rejects a slug that is all-digits-plus-one-letter mixed', () => {
+    expect(
+      humanizeUrlSlug('https://reuters.com/x/A1B2C3D4E5F6', 'reuters.com', 'reutersId00'),
+    ).toBe('reuters.com event reutersId0');
+  });
+
+  it('keeps a readable slug that happens to contain digits', () => {
+    const t = humanizeUrlSlug(
+      'https://congress.gov/bill/118-hr-1234-tax-reform',
+      'congress.gov',
+      '1',
+    );
+    expect(t.toLowerCase()).toContain('tax');
+    expect(t.toLowerCase()).toContain('reform');
+  });
+
   it('caps overlong slugs at INGEST_MAX_TITLE_CHARS', () => {
     const long = 'x-'.repeat(1500); // 3000 chars
     const url = `https://congress.gov/bill/${long}`;
