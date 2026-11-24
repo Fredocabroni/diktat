@@ -558,11 +558,12 @@ jobs:
             --max-turns "$MAX_TURNS" \
             --output-format text > review_output.md
           echo "$?" > review_exit_code
-          # Subscription quota detection: if the CLI emitted a
-          # usage-limit message into the review body, fail the job with
-          # an explicit, grep-friendly marker instead of posting the
-          # quota text as if it were a review.
-          if grep -qiE 'usage limit|claude .*(usage|rate) limit|5-hour limit|quota (exceeded|reached)' review_output.md; then
+          # Subscription quota detection. Classification lives in
+          # .github/scripts/is-quota-exhausted.sh so the false-positive
+          # fix (push #2 — a real review that discusses the sentinel's
+          # own "usage limit" wording was misread as a quota hit) is
+          # test-covered and matches both workflows.
+          if .github/scripts/is-quota-exhausted.sh review_output.md; then
             echo "QUOTA: subscription limit reached, retry later"
             set -e
             exit 1

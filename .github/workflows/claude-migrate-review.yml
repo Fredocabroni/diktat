@@ -236,7 +236,7 @@ jobs:
             --max-turns 10 \
             --output-format text > review_output.md
           echo "$?" > review_exit_code
-          if grep -qiE 'usage limit|claude .*(usage|rate) limit|5-hour limit|quota (exceeded|reached)' review_output.md; then
+          if .github/scripts/is-quota-exhausted.sh review_output.md; then
             echo "QUOTA: subscription limit reached, retry later"
             set -e
             exit 1
