@@ -11,6 +11,7 @@
 Humans don't return for features. They return because the app solved a need in a way that, on reflection, felt good. The feeling is the moat.
 
 Four meta-drivers:
+
 1. **Competence** — "I did a thing and got better at it."
 2. **Tribe** — "My people are here, and we're winning."
 3. **Curiosity** — "I'll learn something that surprises me."
@@ -24,13 +25,13 @@ Diktat combines all four. Unfair psychological advantage.
 
 Trigger → Action → Variable Reward → Investment.
 
-| Stage | Diktat mechanic |
-|---|---|
-| External trigger | "The Drop is live in 10 min" push; X timeline clip; friend just beat you in trivia |
-| Internal trigger | Boredom, outrage at news, desire to prove a point, FOMO on Drop |
-| Action (minimum effort) | Tap app → 3 swipes on feed = 15 seconds to first AP gain |
-| Variable reward | Tribe ("247 agreed"), Hunt (AP gain 15–120 per battle), Self (surprise tier-up animation) |
-| Investment | AP banked, streak extended, Fingerprint deepens, tribe loyalty accrues, friend connections form |
+| Stage                   | Diktat mechanic                                                                                 |
+| ----------------------- | ----------------------------------------------------------------------------------------------- |
+| External trigger        | "The Drop is live in 10 min" push; X timeline clip; friend just beat you in trivia              |
+| Internal trigger        | Boredom, outrage at news, desire to prove a point, FOMO on Drop                                 |
+| Action (minimum effort) | Tap app → 3 swipes on feed = 15 seconds to first AP gain                                        |
+| Variable reward         | Tribe ("247 agreed"), Hunt (AP gain 15–120 per battle), Self (surprise tier-up animation)       |
+| Investment              | AP banked, streak extended, Fingerprint deepens, tribe loyalty accrues, friend connections form |
 
 **Rule:** Variable rewards must never feel manipulative. A loss should feel fair.
 
@@ -45,6 +46,7 @@ Behavior happens when Motivation × Ability × Prompt align. If any is zero, no 
 **Ability:** custodial wallet (no crypto friction), one-tap to battle, 15-second engagement floor, mobile default mic for voice.
 
 **Prompts:**
+
 - Daily Drop push at 8 PM ET local
 - Streak risk push at 9 PM if mission incomplete
 - Opponent match push
@@ -72,13 +74,16 @@ Flow = challenge matches skill, clear goals, immediate feedback.
 Cue → Routine → Reward.
 
 Daily:
+
 - Cue: 8 PM ET Drop push. Synchronized across users. Same time every day. Pavlovian.
 - Routine: tap → read 30 sec → vote or challenge → watch tribal response
 - Reward: AP + tribe leaderboard movement + social proof + next debate on deck
 
 Weekly: Tribe Sunday. Leaderboard resets Sunday 9 PM ET.
 
-**Rule:** Never move The Drop time. Never skip a day.
+**Rule:** Never move The Drop time. A day may be skipped only when nothing clears the bar (operator decision via the nightly digest). When skipped, Home says so plainly ("No Drop today. Nothing cleared the bar.") and offers Take 5 — never a silent gap, never a filler Drop.
+
+_Changelog — founder decision, Nov 2026: allow operator skip on slow days; no-Drop-day experience shipped in P4 (#272 / #273)._
 
 ---
 
@@ -99,6 +104,7 @@ Weekly: Tribe Sunday. Leaderboard resets Sunday 9 PM ET.
 Variable-ratio = highest resistance to extinction. We use the mechanic, not the spirit.
 
 Applied:
+
 - AP per battle varies within predictable band
 - Opinion-shift feedback varies
 - Fact-check victories occasionally featured in Theater (5-10x AP)
@@ -124,6 +130,7 @@ Losses feel ~2x as strong as gains.
 ## 9. FOGG TINY HABITS — ANCHORS
 
 Every new habit rides an existing one:
+
 - After waking + checking phone → Morning Brief card
 - After lunch → 3 swipes to burn streak tick
 - After bed + scrolling → 10 PM battle (Drop is 8 PM, battle window prime)
@@ -176,20 +183,20 @@ Every mechanic answers: does this make users trust us more or less?
 
 ## 13. RETENTION SCORECARD
 
-| Metric | Week 8 | Week 24 |
-|---|---|---|
-| D1 retention | 55% | 65% |
-| D7 retention | 28% | 40% |
-| D30 retention | 15% | 25% |
-| DAU/MAU | 0.35 | 0.50 |
-| Sessions per DAU per day | 3.5 | 5.0 |
-| Median session length | 6 min | 9 min |
-| Battles per DAU per day | 1.2 | 2.5 |
-| 7+ day streak holders | 10% MAU | 25% MAU |
-| Tribe membership | 60% | 85% |
-| Fingerprint completion | 40% | 75% |
-| NPS | +20 | +40 |
-| Toxicity / 1K sessions | <5 | <2 |
+| Metric                   | Week 8  | Week 24 |
+| ------------------------ | ------- | ------- |
+| D1 retention             | 55%     | 65%     |
+| D7 retention             | 28%     | 40%     |
+| D30 retention            | 15%     | 25%     |
+| DAU/MAU                  | 0.35    | 0.50    |
+| Sessions per DAU per day | 3.5     | 5.0     |
+| Median session length    | 6 min   | 9 min   |
+| Battles per DAU per day  | 1.2     | 2.5     |
+| 7+ day streak holders    | 10% MAU | 25% MAU |
+| Tribe membership         | 60%     | 85%     |
+| Fingerprint completion   | 40%     | 75%     |
+| NPS                      | +20     | +40     |
+| Toxicity / 1K sessions   | <5      | <2      |
 
 ---
 
@@ -198,22 +205,27 @@ Every mechanic answers: does this make users trust us more or less?
 Rituals > features. Features fade. Rituals compound.
 
 **Daily:**
+
 - 8 PM ET The Drop — most important ritual
 - Morning Brief 6–10 AM (3 overnight topics)
 - Streak lock midnight local
 
 **Weekly:**
+
 - Sunday 9 PM tribe reset + leaderboard close
 - Friday 5 PM Week in Review
 
 **Monthly:**
+
 - 1st of month tier reconciliation
 
 **Seasonal:**
+
 - Election cycles = live mode, 2x AP multipliers, special tier cosmetics
 - SOTU, SCOTUS, major hearings = pre-scheduled live events
 
 **Annual:**
+
 - Year-end Fingerprint (Spotify Wrapped for politics)
 - Mythic class induction ceremony
 
@@ -221,8 +233,8 @@ Rituals > features. Features fade. Rituals compound.
 
 ## 15. META-GOAL
 
-Users finish a session thinking: *I am slightly smarter and slightly angrier at the right things than I was 10 minutes ago.*
+Users finish a session thinking: _I am slightly smarter and slightly angrier at the right things than I was 10 minutes ago._
 
-Not: *I wasted an hour.*
+Not: _I wasted an hour._
 
 If meta-goal is satisfied, metrics follow.
