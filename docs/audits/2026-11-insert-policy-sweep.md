@@ -167,3 +167,60 @@ authenticated` policy. The one-command check is the top of **Method**.
 Also re-run when a currently-inert policy's row shape grows a coupled
 effect (e.g. tribe_memberships picks up a cooldown column, or sessions
 gains an AFTER INSERT trigger with economy side-effects).
+
+---
+
+## Sweep re-run — 2026-11-19
+
+Re-run after the comments / comment_likes / reports surfaces shipped.
+No new live client INSERT policies landed; the four write-at-write
+tables added since 2026-11-10 all route through SECURITY DEFINER RPCs.
+
+**Grep output on this date** (full output; everything else was already
+on the table above):
+
+```
+20260420090002_identity_and_economy.sql       sessions_insert_self
+20260420090004_battles_and_trivia.sql         bp_insert_self              — DROPPED (F1, 20261127000000)
+20260420090005_news_predictions_factchecks…   opinion_shifts_insert_self  — DROPPED (20261010100000)
+20260420090005_news_predictions_factchecks…   predictions_insert_self     — DROPPED (PR #107, 20260729120000)
+20260420090006_tribes_and_xposts.sql          tribe_memberships_insert_self
+20260523_open_debate_schema.sql               debate_args_insert_self     — DROPPED (F2, 20261128000000)
+20260523_open_debate_schema.sql               debate_votes_insert_self    — DROPPED (PR #114, 20260730120000)
+20260615120000_web_push_delivery.sql          user_push_subscriptions_insert_self
+```
+
+### Tables added since 2026-11-10 — RPC-only, no client INSERT policy
+
+| Migration                        | Table                         | Write path                               | Verdict                  |
+| -------------------------------- | ----------------------------- | ---------------------------------------- | ------------------------ |
+| `20261112000000_reports.sql`     | `public.reports`              | `submit_report` (SECURITY DEFINER)       | **COMPLIANT** (RPC-only) |
+| `20261123000000_geoip_country_…` | `public.geoip_country_blocks` | service_role only (no client write path) | **COMPLIANT** (deny-all) |
+| `20261126000000_comments.sql`    | `public.comments`             | `create_comment` (SECURITY DEFINER)      | **COMPLIANT** (RPC-only) |
+| `20261126000000_comments.sql`    | `public.comment_likes`        | `toggle_comment_like` (SECURITY DEFINER) | **COMPLIANT** (RPC-only) |
+
+Each of these tables was written H3-first by design: the coupled
+invariants they carry (reports' submitter identity + stance snapshot,
+comments' 60/24h rate-limit + locked-stance gate + parent-reply
+tree-depth + handle-snapshot, comment_likes' idempotent-toggle-with-counter)
+are all expressed inside a SECURITY DEFINER RPC that reads
+authoritative server-side state. No `*_insert_self` policy exists on
+any of them.
+
+### Live policies on `main` — unchanged
+
+The table at the top of this file is the current state. Verdicts for
+rows 1 / 3 / 5 (sessions / tribe_memberships / user_push_subscriptions)
+re-reviewed under the 2026-11-19 shape and still inert — none of them
+grew a trigger or a coupled column since 2026-11-10.
+
+### F3 — watchlist: future comment moderation surface
+
+PR #334's \[comment safety pre-check\] ships the shape-based doxxing
+filter via the `create_comment` body gate (same RPC boundary) and
+adds the `public.comment_block_patterns` table (service_role-only, no
+client grant). A future `public.comment_bans` table (the /admin/reports
+moderation queue follow-up) MUST land H3-first with an RPC-only write
+path — the write will couple `banned_until` + `created_by` + a trigger
+that reads the active ban into `create_comment`, which the RLS
+`with check` cannot express. Flag at migration time, not after.
