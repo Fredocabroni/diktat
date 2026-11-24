@@ -25,7 +25,8 @@
 --       walker path can still land a pick_source).
 --
 -- Prod max applied at author time: 20261129000000 (comments_select
--- _grants). This file sorts strictly after at 20261130000000.
+-- _grants). This file sorts strictly after at 20261204000000
+-- (renumbered from 20261130000000 to clear #343's collision).
 --
 -- Up:
 --   select cron.schedule('drop_shadow_digest', '0 21 * * *', ...);

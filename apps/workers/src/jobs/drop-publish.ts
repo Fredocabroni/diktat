@@ -998,7 +998,7 @@ async function rewriteHeadlineSafely(
     void deps.alerter?.alert(
       'error',
       'drop_publish rewrite_failed',
-      `candidate=${candidate.id} · see workers log for message`,
+      `candidate=${escapeHtml(candidate.id)} · see workers log for message`,
       {
         dedupKey: 'ai:rewrite_failed:drop_headline_rewrite',
         dedupTtlMs: 60 * 60_000,
@@ -1059,7 +1059,7 @@ async function generateFactExplainerSafely(
     void deps.alerter?.alert(
       'error',
       'drop_publish fact_explainer_failed',
-      `candidate=${candidate.id} · see workers log for message`,
+      `candidate=${escapeHtml(candidate.id)} · see workers log for message`,
       {
         dedupKey: 'ai:failed:topic_fact_explainer',
         dedupTtlMs: 60 * 60_000,
