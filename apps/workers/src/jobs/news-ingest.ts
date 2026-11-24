@@ -753,7 +753,10 @@ const INGEST_MAX_SUMMARY_CHARS = 1000;
  *   - uppercase first letter of each token
  *   - join with single spaces, cap at INGEST_MAX_TITLE_CHARS
  *   - fall back to `<host> event <GLOBALEVENTID-shortened>` when the
- *     slug produces nothing readable (<3 chars) — never emit empty. */
+ *     slug produces nothing readable (<3 chars) OR is id-shaped (a
+ *     single alphanumeric blob of 6+ chars with both a letter and a
+ *     digit, e.g. `c574290jvk8wo` — bbc.com-style opaque ids were
+ *     leaking into Drop titles) — never emit empty. */
 export function humanizeUrlSlug(url: string, fallbackHost: string, fallbackId: string): string {
   let path: string;
   try {
@@ -770,10 +773,23 @@ export function humanizeUrlSlug(url: string, fallbackHost: string, fallbackId: s
     .filter((t) => t.length > 0)
     .map((t) => t.charAt(0).toUpperCase() + t.slice(1));
   const title = tokens.join(' ').trim();
-  if (title.length < 3) {
+  if (title.length < 3 || isIdShapedTitle(title)) {
     return `${fallbackHost} event ${fallbackId.slice(0, 10)}`;
   }
   return title.slice(0, INGEST_MAX_TITLE_CHARS);
+}
+
+/** True when the title is a single alphanumeric blob of 6+ chars with
+ *  both a letter and a digit and no whitespace — i.e. an opaque id
+ *  (bbc.com `c574290jvk8wo`, Reuters uuids), not a headline. Mirrors
+ *  the shadow-digest display-time guard in telegram-digest-send.ts so
+ *  the ingest root-fix and the display fallback agree on what counts
+ *  as id-shaped. */
+function isIdShapedTitle(t: string): boolean {
+  if (t.length < 6) return false;
+  if (/\s/.test(t)) return false;
+  if (!/^[A-Za-z0-9_-]+$/.test(t)) return false;
+  return /[A-Za-z]/.test(t) && /\d/.test(t);
 }
 
 /** Group mentions by GLOBALEVENTID and produce one CandidateInput per
