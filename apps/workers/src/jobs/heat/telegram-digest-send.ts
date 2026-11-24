@@ -160,6 +160,15 @@ export function digestDate(now: Date): string {
   }).format(now);
 }
 
+export interface YesterdayResults {
+  readonly headline: string;
+  readonly total: number;
+  readonly agree: number;
+  readonly disagree: number;
+  readonly comments: number;
+  readonly reports: number;
+}
+
 export function buildMessageText(
   dropDate: string,
   realDropHeadline: string | null,
@@ -176,6 +185,11 @@ export function buildMessageText(
    *  source_title is id-shaped. Falls back to host when neither is
    *  readable. */
   clusterAlternates?: ReadonlyMap<string, string | null>,
+  /** Optional "Yesterday's Drop" results block. When present, renders
+   *  a one-line activity recap below the agreement counter so the
+   *  operator sees the previous Drop's locked split + engagement
+   *  before they pick tonight's candidate. */
+  yesterday?: YesterdayResults,
 ): string {
   const lines: string[] = [];
   lines.push(`📊 <b>Shadow digest · ${escapeHtml(dropDate)}</b>`);
@@ -202,6 +216,17 @@ export function buildMessageText(
   lines.push('');
   if (agreement && agreement.n > 0) {
     lines.push(`<i>Heat agreed with you ${agreement.x} of last ${agreement.n} nights.</i>`);
+    lines.push('');
+  }
+  if (yesterday) {
+    const pctAgree =
+      yesterday.total > 0 ? Math.round((yesterday.agree / yesterday.total) * 100) : 0;
+    const pctDisagree = yesterday.total > 0 ? 100 - pctAgree : 0;
+    lines.push(`🗳 <b>Yesterday's Drop:</b> ${escapeHtml(yesterday.headline)}`);
+    lines.push(
+      `   ${yesterday.total} votes · ${pctAgree}% agree / ${pctDisagree}% disagree` +
+        ` · ${yesterday.comments} comments · ${yesterday.reports} reports`,
+    );
     lines.push('');
   }
   lines.push('<i>Pick one — writes to drop_shadow_log.operator_pick.</i>');
@@ -455,11 +480,81 @@ export function buildTelegramDigestSendHandler(opts?: {
       }
     }
 
+    // 3c. Yesterday's Drop results. Reads the most recent published
+    //     Drop before dropDate and its stance split + comment/report
+    //     counts. Fail-soft — a lookup error omits the block but
+    //     doesn't drop the digest.
+    let yesterday: YesterdayResults | undefined;
+    try {
+      // dropDate is YYYY-MM-DD in ET. Convert to an upper bound of
+      // the start of that ET day in UTC — anything with drop_at
+      // strictly earlier than that moment is "yesterday's Drop" or
+      // older. Picking the max drop_at under that bound gives us the
+      // most recent prior Drop.
+      const dropDateUpperBoundIso = new Date(`${dropDate}T05:00:00Z`).toISOString();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const yFrom = (deps.supabase as any)
+        .from('news_topics')
+        .select('id, headline, drop_at, published_at')
+        .not('published_at', 'is', null)
+        .eq('is_drop', true)
+        .lt('drop_at', dropDateUpperBoundIso)
+        .order('drop_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      const { data: yRow, error: yErr } = (await yFrom) as {
+        data: { id: string; headline: string; drop_at: string } | null;
+        error: { message?: string } | null;
+      };
+      if (!yErr && yRow) {
+        const [splitRes, commentsRes, reportsRes] = await Promise.all([
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (deps.supabase as any).rpc('topic_stance_split', { p_topic_id: yRow.id }),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (deps.supabase as any)
+            .from('comments')
+            .select('id', { count: 'exact', head: true })
+            .eq('topic_id', yRow.id)
+            .is('deleted_at', null),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (deps.supabase as any)
+            .from('reports')
+            .select('id', { count: 'exact', head: true })
+            .eq('ref_type', 'topic')
+            .eq('ref_id', yRow.id),
+        ]);
+        const splitRows = (splitRes as { data: unknown }).data;
+        const split = Array.isArray(splitRows) ? splitRows[0] : splitRows;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const s = split as any;
+        yesterday = {
+          headline: yRow.headline,
+          total: Number(s?.total ?? 0) || 0,
+          agree: Number(s?.agree_count ?? 0) || 0,
+          disagree: Number(s?.disagree_count ?? 0) || 0,
+          comments: (commentsRes as { count: number | null }).count ?? 0,
+          reports: (reportsRes as { count: number | null }).count ?? 0,
+        };
+      }
+    } catch (err) {
+      deps.logger.debug({
+        event: 'telegram_digest_send.yesterday_load_failed',
+        message: scrubMessage(err instanceof Error ? err.message : String(err)),
+      });
+    }
+
     // 4. Build message + keyboard. The "📰 Actual Drop" button is
     //    always offered when real_drop_topic_id is present — the
     //    operator sees the headline in the message body and can
     //    decide whether it was already one of the top-5 picks.
-    const text = buildMessageText(dropDate, realDropHeadline, top5, agreement, clusterAlternates);
+    const text = buildMessageText(
+      dropDate,
+      realDropHeadline,
+      top5,
+      agreement,
+      clusterAlternates,
+      yesterday,
+    );
     const keyboard = buildInlineKeyboard(dropDate, top5, shadow.real_drop_topic_id);
 
     // 5. POST to Telegram. URL carries the bot token — never logged.
