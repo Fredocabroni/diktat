@@ -71,6 +71,15 @@ values
   -- M5 pre-launch orphan: a human created before 2026-10-21 with no
   -- age stamp. Whether this counts depends on the clock vs launch+30d.
   ('44444444-dddd-4444-8444-444444444444', 'pre-launch@test', 'authenticated',
+   'authenticated', '{}'::jsonb, date '2026-05-01', now()),
+  -- M5 post-gate survivors: both created the same day as the orphan.
+  --   55555555 — ATTESTED (age_verified_at set) → predicate excludes.
+  --   66666666 — PROTECTED (sweep_protected_users) → allowlist excludes.
+  -- These assert the live sweep spares the two legitimate carve-outs
+  -- when the pre-launch gate has opened.
+  ('55555555-eeee-4555-8555-555555555555', 'pre-launch-attested@test', 'authenticated',
+   'authenticated', '{}'::jsonb, date '2026-05-01', now()),
+  ('66666666-ffff-4666-8666-666666666666', 'pre-launch-protected@test', 'authenticated',
    'authenticated', '{}'::jsonb, date '2026-05-01', now())
 on conflict (id) do nothing;
 
@@ -98,6 +107,21 @@ update public.users
        display_name = 'PreLaunch',
        created_at = date '2026-05-01'
  where id = '44444444-dddd-4444-8444-444444444444';
+update public.users
+   set handle = 'pre_att',
+       display_name = 'PreLaunchAttested',
+       created_at = date '2026-05-01',
+       age_verified_at = date '2026-05-01' + interval '2 hours'
+ where id = '55555555-eeee-4555-8555-555555555555';
+update public.users
+   set handle = 'pre_prt',
+       display_name = 'PreLaunchProtected',
+       created_at = date '2026-05-01'
+ where id = '66666666-ffff-4666-8666-666666666666';
+insert into public.sweep_protected_users (user_id, note)
+  values ('66666666-ffff-4666-8666-666666666666',
+          'M5 pre-launch protected fixture')
+  on conflict (user_id) do nothing;
 
 -- Stamp age_blocked_at manually (bypassing attest_age so the test
 -- stays focused on the sweep). For the bot row, the BEFORE INSERT
@@ -332,6 +356,19 @@ begin
   if v_still_there <> 2 then
     raise exception 'M4: live run deleted the fresh human or the bot';
   end if;
+  -- The two pre-launch carve-outs (attested + allowlisted) MUST survive
+  -- the live sweep regardless of which side of the launch+30d gate we
+  -- are on. Pre-gate: nothing pre-launch is deleted at all. Post-gate:
+  -- only the UNattested, UNprotected orphan (44444444) is swept.
+  select count(*) into v_still_there
+    from auth.users
+    where id in (
+      '55555555-eeee-4555-8555-555555555555',
+      '66666666-ffff-4666-8666-666666666666'
+    );
+  if v_still_there <> 2 then
+    raise exception 'M4: live run deleted the attested or protected pre-launch user';
+  end if;
   if (v_out->>'deleted_blocked')::int < 1 then
     raise exception 'M4: deleted_blocked count is zero';
   end if;
@@ -362,37 +399,46 @@ end
 $$;
 
 -- --------------------------------------------------------------------
--- M5: pre-launch orphan shape. The query itself is what we assert;
--- the clock-dependence (current_date > launch + 30d) is a separate
--- deployment concern that this test cannot time-travel into.
+-- M5: pre-launch gate behaviour. This test runs AFTER M4's live sweep,
+-- so the orphan's post-gate state is "deleted by the sweep" — asserting
+-- its original shape unconditionally was a time bomb that fired on
+-- 2026-11-21 when the function's clock gate opened.
+--
+-- The gate expression is lifted verbatim from data_minimization_sweep
+-- (v_launch_date + v_pre_launch_window): single source of truth,
+-- cannot drift from the function.
 -- --------------------------------------------------------------------
 do $$
 declare
-  v_candidate_count int;
+  v_post_gate boolean := current_date > date '2026-10-21' + interval '30 days';
 begin
   perform set_config('role', 'postgres', true);
-  select count(*)
-    into v_candidate_count
-    from public.users
-    where is_bot = false
-      and age_verified_at is null
-      and age_blocked_at is null
-      and created_at < date '2026-10-21'
-      and current_date > date '2026-10-21' + interval '30 days';
-  -- v_candidate_count is >=1 only if the clock is past 2026-11-20.
-  -- Either way, the orphan row (id 44444444) must satisfy the shape
-  -- of the predicate up to the clock gate. Positive assertion: the
-  -- row exists with the required column states.
-  if not exists (
-    select 1
-      from public.users
-      where id = '44444444-dddd-4444-8444-444444444444'
-        and is_bot = false
-        and age_verified_at is null
-        and age_blocked_at is null
-        and created_at < date '2026-10-21'
-  ) then
-    raise exception 'M5: pre-launch orphan fixture missing expected column shape';
+  if v_post_gate then
+    -- Post-gate: M4's live sweep must have deleted the unattested
+    -- pre-launch orphan. The two carve-outs (attested, protected) are
+    -- asserted inside M4 itself; their survival is what makes the
+    -- sweep safe to let run post-gate.
+    if exists (select 1 from auth.users
+                 where id = '44444444-dddd-4444-8444-444444444444') then
+      raise exception 'M5 post-gate: unattested pre-launch orphan survived the sweep';
+    end if;
+    if (public.data_minimization_sweep(true)->>'pre_launch_candidates')::int < 0 then
+      raise exception 'M5 post-gate: pre_launch_candidates must stay >= 0';
+    end if;
+  else
+    -- Pre-gate: nothing pre-launch is swept; the orphan still has its
+    -- original column shape.
+    if not exists (
+      select 1
+        from public.users
+        where id = '44444444-dddd-4444-8444-444444444444'
+          and is_bot = false
+          and age_verified_at is null
+          and age_blocked_at is null
+          and created_at < date '2026-10-21'
+    ) then
+      raise exception 'M5 pre-gate: pre-launch orphan fixture missing expected column shape';
+    end if;
   end if;
 end
 $$;
