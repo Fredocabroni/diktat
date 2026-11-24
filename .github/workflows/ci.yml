@@ -127,6 +127,13 @@ jobs:
       - name: Verify paths-filter non-test scope helper
         run: bash .github/scripts/__tests__/filter-non-test-scope.test.sh
 
+      # Quota-exhausted detector test. Prompted by PR #344 push 1,
+      # where the bare `grep usage limit` sentinel tripped on a real
+      # review that discussed the sentinel. The script now requires
+      # a short body AND no VERDICT line AND the limit wording.
+      - name: Verify reviewer quota-exhausted detector
+        run: bash .github/scripts/__tests__/is-quota-exhausted.test.sh
+
       # Activation-safety gate. Fails the build red when an ENABLE_*
       # deploy flag is set to 'true' on the repo while the corresponding
       # deploy workflow file regresses on its pin requirements (floating
