@@ -378,6 +378,15 @@ export const commentsRouter = router({
             cause: new Error('rate_limited'),
           });
         }
+        if (code === '23514' && msg.includes('body_blocked_')) {
+          // Safety pre-check tripped (migration 20261202000000).
+          // Generic message — never leak the matched pattern reason.
+          throw new TRPCError({
+            code: 'BAD_REQUEST',
+            message: 'This comment violates our rules.',
+            cause: new Error('body_blocked'),
+          });
+        }
         if (code === 'P0002') {
           throw new TRPCError({ code: 'NOT_FOUND', message: 'Topic not found.' });
         }
