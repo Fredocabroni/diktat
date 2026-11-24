@@ -230,6 +230,16 @@ interface FakeState {
   // PR C: optionally force the stamp RPC to return false (already
   // stamped) or an error path.
   stampReturn?: boolean;
+  // Operator-pick path fixtures.
+  shadowRow?: {
+    drop_date: string;
+    operator_pick_candidate_id: string | null;
+    operator_picked_at: string | null;
+    operator_notes: string | null;
+    operator_skipped: boolean;
+  } | null;
+  pickSourceCalls?: { p_drop_date: string; p_pick_source: string }[];
+  heatScoreById?: Record<string, number | null>;
 }
 
 function buildSupabase(state: FakeState): ServiceClient {
@@ -256,6 +266,13 @@ function buildSupabase(state: FakeState): ServiceClient {
       (state.stampCalls ??= []).push({ p_global_event_id: geid, p_at: at });
       return Promise.resolve({ data: state.stampReturn ?? true, error: null });
     }
+    if (name === 'record_drop_pick_source') {
+      (state.pickSourceCalls ??= []).push({
+        p_drop_date: args.p_drop_date as string,
+        p_pick_source: args.p_pick_source as string,
+      });
+      return Promise.resolve({ data: null, error: null });
+    }
     return Promise.resolve({ data: null, error: { message: `unknown rpc: ${name}` } });
   };
   const fromImpl = (table: string) => ({
@@ -265,8 +282,14 @@ function buildSupabase(state: FakeState): ServiceClient {
         _isNotNull: [] as string[],
         _eq: [] as { col: string; val: unknown }[],
         _gte: [] as { col: string; val: unknown }[],
+        _in: [] as { col: string; vals: unknown[] }[],
+        _limit: Number.POSITIVE_INFINITY,
         eq(col: string, val: unknown) {
           this._eq.push({ col, val });
+          return this;
+        },
+        in(col: string, vals: unknown[]) {
+          this._in.push({ col, vals });
           return this;
         },
         is(col: string, val: unknown) {
@@ -284,6 +307,10 @@ function buildSupabase(state: FakeState): ServiceClient {
         order() {
           return this;
         },
+        limit(n: number) {
+          this._limit = n;
+          return this;
+        },
         single() {
           const data = this._collect();
           return Promise.resolve({ data: data[0] ?? null, error: null });
@@ -298,7 +325,18 @@ function buildSupabase(state: FakeState): ServiceClient {
         _collect(): Record<string, unknown>[] {
           let rows: Record<string, unknown>[];
           if (table === 'news_topics_candidates') {
-            rows = state.candidates as unknown as Record<string, unknown>[];
+            // When filtered by id with a heat_score projection, build
+            // rows from heatScoreById so the heat-top lookup can see
+            // ranked scores independent from candidate-pool fields.
+            const needsHeat = this._isNotNull.includes('heat_score');
+            if (needsHeat && state.heatScoreById) {
+              rows = state.candidates
+                .filter((c) => state.heatScoreById![c.id] != null)
+                .map((c) => ({ id: c.id, heat_score: state.heatScoreById![c.id] }))
+                .sort((a, b) => ((b.heat_score as number) ?? 0) - ((a.heat_score as number) ?? 0));
+            } else {
+              rows = state.candidates as unknown as Record<string, unknown>[];
+            }
           } else if (table === 'news_topics') {
             rows = state.recentDrops as unknown as Record<string, unknown>[];
           } else if (table === 'fact_check_claims') {
@@ -307,12 +345,20 @@ function buildSupabase(state: FakeState): ServiceClient {
             rows = (state.clusterRows ?? []) as unknown as Record<string, unknown>[];
           } else if (table === 'gdelt_event_cluster_outlet') {
             rows = (state.outletRows ?? []) as unknown as Record<string, unknown>[];
+          } else if (table === 'drop_shadow_log') {
+            rows = (state.shadowRow ? [state.shadowRow] : []) as unknown as Record<
+              string,
+              unknown
+            >[];
           } else {
             rows = [];
           }
-          return rows.filter((r) => {
+          const filtered = rows.filter((r) => {
             for (const f of this._eq) {
               if (r[f.col] !== f.val) return false;
+            }
+            for (const f of this._in) {
+              if (!f.vals.includes(r[f.col])) return false;
             }
             for (const c of this._isNull) {
               if (r[c] != null) return false;
@@ -325,6 +371,7 @@ function buildSupabase(state: FakeState): ServiceClient {
             }
             return true;
           });
+          return Number.isFinite(this._limit) ? filtered.slice(0, this._limit) : filtered;
         },
       };
       return handler;
@@ -1690,5 +1737,234 @@ describe('dropPublishHandler — PR C: S3 enforcement + reputable text wiring', 
     // Commentary never surfaces as the published source.
     expect(state.newsTopicInserts[0]!.primary_source_url).toBe('https://www.sec.gov/pr/y');
     expect(state.newsTopicInserts[0]!.source_title).not.toContain('motherjones');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HEAT_ENABLED — operator pick / skip / heat fallthrough / wrong-day guard
+// ---------------------------------------------------------------------------
+
+function etYMD(d: Date): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/New_York',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(d);
+}
+
+function baseOperatorState(opts: {
+  candidates?: MinimalCandidate[];
+  shadowRow?: FakeState['shadowRow'];
+  heatScoreById?: Record<string, number | null>;
+}): FakeState {
+  return {
+    candidates: opts.candidates ?? [],
+    recentDrops: [],
+    newsTopicInserts: [],
+    candidateUpdates: [],
+    payloadUpdates: [],
+    insertError: null,
+    nextNewsTopicId: 'nt-op',
+    factCheckClaimUpserts: [],
+    factCheckClaims: [],
+    factCheckJobInserts: [],
+    factCheckJobInsertError: null,
+    nextFactCheckClaimId: 'fc-op',
+    shadowRow: opts.shadowRow ?? null,
+    pickSourceCalls: [],
+    heatScoreById: opts.heatScoreById,
+  };
+}
+
+describe('dropPublishHandler — HEAT_ENABLED operator-pick path', () => {
+  beforeEach(() => {
+    vi.stubEnv('HEAT_ENABLED', 'true');
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('operator_skipped=true → no Drop, pick_source=skip recorded, logs operator_skip', async () => {
+    const today = etYMD(new Date());
+    const state = baseOperatorState({
+      candidates: [cand({ id: 'a', dedup_cluster_id: 'A', rank_score: 5.0 })],
+      shadowRow: {
+        drop_date: today,
+        operator_pick_candidate_id: null,
+        operator_picked_at: new Date().toISOString(),
+        operator_notes: 'telegram: skip',
+        operator_skipped: true,
+      },
+    });
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+    await dropPublishHandler(row(), { supabase, logger });
+
+    expect(state.newsTopicInserts).toHaveLength(0);
+    expect(state.pickSourceCalls).toEqual([{ p_drop_date: today, p_pick_source: 'skip' }]);
+    expect(logger.calls.find((c) => c.obj.event === 'drop_publish.operator_skip')).toBeDefined();
+  });
+
+  it('operator pick on eligible top-5 candidate → that cluster is the Drop, pick_source=operator', async () => {
+    const today = etYMD(new Date());
+    const state = baseOperatorState({
+      candidates: [
+        // Walker would pick A (rank 100); operator overrides to B.
+        cand({ id: 'a', dedup_cluster_id: 'A', rank_score: 100.0, source_title: 'Walker pick' }),
+        cand({ id: 'b', dedup_cluster_id: 'B', rank_score: 1.0, source_title: 'Operator pick' }),
+      ],
+      shadowRow: {
+        drop_date: today,
+        operator_pick_candidate_id: 'b',
+        operator_picked_at: new Date().toISOString(),
+        operator_notes: 'telegram: top5_candidate',
+        operator_skipped: false,
+      },
+    });
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+    await dropPublishHandler(row(), { supabase, logger });
+
+    expect(state.newsTopicInserts).toHaveLength(1);
+    expect(state.newsTopicInserts[0]!.dedup_cluster_id).toBe('B');
+    expect(state.newsTopicInserts[0]!.source_title).toBe('Operator pick');
+    expect(state.pickSourceCalls).toEqual([{ p_drop_date: today, p_pick_source: 'operator' }]);
+    const outcomeLog = logger.calls.find((c) => c.obj.event === 'drop_publish.complete');
+    expect(outcomeLog?.obj.pick_source).toBe('operator');
+  });
+
+  it('operator pick on a non-eligible candidate id → alert fires + falls through to heat #1', async () => {
+    const today = etYMD(new Date());
+    const state = baseOperatorState({
+      candidates: [
+        cand({ id: 'a', dedup_cluster_id: 'A', rank_score: 2.0, source_title: 'Heat winner' }),
+        cand({ id: 'b', dedup_cluster_id: 'B', rank_score: 5.0, source_title: 'Rank winner' }),
+      ],
+      heatScoreById: { a: 99.0, b: 1.0 },
+      shadowRow: {
+        drop_date: today,
+        operator_pick_candidate_id: 'ghost-not-in-pool',
+        operator_picked_at: new Date().toISOString(),
+        operator_notes: 'telegram: top5_candidate',
+        operator_skipped: false,
+      },
+    });
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+    const alertCalls: Array<{ title: string; detail: string }> = [];
+    const alerter = {
+      enabled: true,
+      alert: async (_sev: string, title: string, detail: string) => {
+        alertCalls.push({ title, detail });
+      },
+    };
+
+    await dropPublishHandler(row(), {
+      supabase,
+      logger,
+      alerter: alerter as unknown as Parameters<typeof dropPublishHandler>[1]['alerter'],
+    });
+
+    expect(alertCalls.some((a) => a.title === 'drop_publish operator pick failed sourcing')).toBe(
+      true,
+    );
+    // Heat #1 is candidate 'a' (heat_score 99). It gets the Drop.
+    expect(state.newsTopicInserts).toHaveLength(1);
+    expect(state.newsTopicInserts[0]!.dedup_cluster_id).toBe('A');
+    expect(state.pickSourceCalls).toEqual([{ p_drop_date: today, p_pick_source: 'heat' }]);
+  });
+
+  it('no pick + heat scores present → heat #1 wins, pick_source=heat', async () => {
+    const today = etYMD(new Date());
+    const state = baseOperatorState({
+      candidates: [
+        // Rank would pick B (5.0). Heat picks A (heat_score 99).
+        cand({ id: 'a', dedup_cluster_id: 'A', rank_score: 1.0, source_title: 'Heat winner' }),
+        cand({ id: 'b', dedup_cluster_id: 'B', rank_score: 5.0, source_title: 'Rank winner' }),
+      ],
+      heatScoreById: { a: 99.0, b: 1.0 },
+      shadowRow: {
+        drop_date: today,
+        operator_pick_candidate_id: null,
+        operator_picked_at: null,
+        operator_notes: null,
+        operator_skipped: false,
+      },
+    });
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+    await dropPublishHandler(row(), { supabase, logger });
+
+    expect(state.newsTopicInserts[0]!.dedup_cluster_id).toBe('A');
+    expect(state.pickSourceCalls).toEqual([{ p_drop_date: today, p_pick_source: 'heat' }]);
+  });
+
+  it('no pick + no heat scores → walker fallback, pick_source=walker', async () => {
+    const today = etYMD(new Date());
+    const state = baseOperatorState({
+      candidates: [
+        cand({ id: 'a', dedup_cluster_id: 'A', rank_score: 3.0, source_title: 'Walker A' }),
+        cand({ id: 'b', dedup_cluster_id: 'B', rank_score: 1.0 }),
+      ],
+      // No heat scores.
+      shadowRow: null,
+    });
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+    await dropPublishHandler(row(), { supabase, logger });
+
+    expect(state.newsTopicInserts[0]!.dedup_cluster_id).toBe('A');
+    expect(state.pickSourceCalls).toEqual([{ p_drop_date: today, p_pick_source: 'walker' }]);
+  });
+
+  it('shadow row drop_date != today → ignored, falls through to walker', async () => {
+    const today = etYMD(new Date());
+    const state = baseOperatorState({
+      candidates: [
+        cand({ id: 'a', dedup_cluster_id: 'A', rank_score: 5.0, source_title: 'Walker A' }),
+        cand({ id: 'b', dedup_cluster_id: 'B', rank_score: 1.0 }),
+      ],
+      // Shadow row exists but for yesterday — operator_pick must NOT drive today.
+      shadowRow: {
+        drop_date: '2020-01-01',
+        operator_pick_candidate_id: 'b',
+        operator_picked_at: new Date().toISOString(),
+        operator_notes: 'telegram: top5_candidate',
+        operator_skipped: false,
+      },
+    });
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+    await dropPublishHandler(row(), { supabase, logger });
+
+    expect(state.newsTopicInserts[0]!.dedup_cluster_id).toBe('A');
+    expect(state.pickSourceCalls).toEqual([{ p_drop_date: today, p_pick_source: 'walker' }]);
+  });
+});
+
+describe("dropPublishHandler — HEAT_ENABLED=false keeps today's behavior", () => {
+  it('ignores a pending operator pick when flag is unset, falls through to walker without stamping pick_source', async () => {
+    const state = baseOperatorState({
+      candidates: [
+        cand({ id: 'a', dedup_cluster_id: 'A', rank_score: 100.0, source_title: 'Walker wins' }),
+        cand({ id: 'b', dedup_cluster_id: 'B', rank_score: 1.0, source_title: 'Operator ignored' }),
+      ],
+      shadowRow: {
+        drop_date: etYMD(new Date()),
+        operator_pick_candidate_id: 'b',
+        operator_picked_at: new Date().toISOString(),
+        operator_notes: 'telegram: top5_candidate',
+        operator_skipped: false,
+      },
+    });
+    const supabase = buildSupabase(state);
+    const logger = buildLogger();
+    await dropPublishHandler(row(), { supabase, logger });
+
+    // Walker picks A (highest rank_score) as it did pre-flag.
+    expect(state.newsTopicInserts[0]!.dedup_cluster_id).toBe('A');
+    // No pick_source RPC call under HEAT_ENABLED=false.
+    expect(state.pickSourceCalls ?? []).toEqual([]);
   });
 });

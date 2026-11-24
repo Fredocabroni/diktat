@@ -264,7 +264,7 @@ describe('handleCallbackQuery', () => {
     expect(supa.calls[0]!.args.p_candidate_id).toBe(UUID_B);
   });
 
-  it('skip: no RPC call, still answers callback', async () => {
+  it('skip: calls record_drop_shadow_operator_skip and answers callback', async () => {
     const supa = buildSupabase({});
     const logger = buildLogger();
     const fetchImpl = vi.fn(
@@ -276,7 +276,9 @@ describe('handleCallbackQuery', () => {
       fetch: fetchImpl,
       env: env(),
     });
-    expect(supa.calls).toHaveLength(0);
+    expect(supa.calls).toHaveLength(1);
+    expect(supa.calls[0]!.fn).toBe('record_drop_shadow_operator_skip');
+    expect(supa.calls[0]!.args.p_drop_date).toBe('2026-10-19');
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 

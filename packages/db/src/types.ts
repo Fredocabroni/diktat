@@ -510,6 +510,8 @@ export type Database = {
           operator_notes: string | null
           operator_pick_candidate_id: string | null
           operator_picked_at: string | null
+          operator_skipped: boolean
+          pick_source: string | null
           real_drop_topic_id: string | null
           shadow_top_5: Json
           updated_at: string
@@ -521,6 +523,8 @@ export type Database = {
           operator_notes?: string | null
           operator_pick_candidate_id?: string | null
           operator_picked_at?: string | null
+          operator_skipped?: boolean
+          pick_source?: string | null
           real_drop_topic_id?: string | null
           shadow_top_5?: Json
           updated_at?: string
@@ -532,6 +536,8 @@ export type Database = {
           operator_notes?: string | null
           operator_pick_candidate_id?: string | null
           operator_picked_at?: string | null
+          operator_skipped?: boolean
+          pick_source?: string | null
           real_drop_topic_id?: string | null
           shadow_top_5?: Json
           updated_at?: string
@@ -1965,11 +1971,24 @@ export type Database = {
         }
         Returns: undefined
       }
+      record_drop_pick_source: {
+        Args: {
+          p_drop_date: string
+          p_pick_source: string
+        }
+        Returns: undefined
+      }
       record_drop_shadow_operator_pick: {
         Args: {
           p_drop_date: string
           p_candidate_id: string | null
           p_notes: string | null
+        }
+        Returns: undefined
+      }
+      record_drop_shadow_operator_skip: {
+        Args: {
+          p_drop_date: string
         }
         Returns: undefined
       }

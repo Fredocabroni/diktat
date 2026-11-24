@@ -211,13 +211,30 @@ export async function handleCallbackQuery(q: TelegramCallbackQuery, deps: Deps):
   }
 
   if (parsed.kind === 'skip') {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { error: skipErr } = (await (deps.supabase as any).rpc(
+      'record_drop_shadow_operator_skip',
+      { p_drop_date: parsed.dropDate },
+    )) as { error: { message: string } | null };
+    if (skipErr) {
+      deps.logger.warn({
+        event: 'telegram_digest_poll.skip_rpc_failed',
+        drop_date: parsed.dropDate,
+        message: scrubMessage(skipErr.message),
+      });
+      await postJson(deps.fetch, answerUrl, {
+        callback_query_id: q.id,
+        text: '⚠️ Failed to record skip — see logs.',
+      });
+      return;
+    }
     deps.logger.info({
       event: 'telegram_digest_poll.operator_skip',
       drop_date: parsed.dropDate,
     });
     await postJson(deps.fetch, answerUrl, {
       callback_query_id: q.id,
-      text: '⏭ Skipped — no operator pick recorded.',
+      text: '⏭ Skipped — no Drop tonight.',
     });
     return;
   }
@@ -254,7 +271,10 @@ export async function handleCallbackQuery(q: TelegramCallbackQuery, deps: Deps):
   });
   await postJson(deps.fetch, answerUrl, {
     callback_query_id: q.id,
-    text: parsed.kind === 'pick' ? '✓ Logged your top-5 pick.' : '✓ Logged actual-Drop pick.',
+    text:
+      parsed.kind === 'pick'
+        ? "✓ Logged your top-5 pick — drives tonight's Drop."
+        : "✓ Logged for refit history (does NOT drive tonight's Drop).",
   });
 }
 
