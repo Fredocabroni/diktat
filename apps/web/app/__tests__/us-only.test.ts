@@ -38,10 +38,11 @@ describe('/login — client-side geo gate', () => {
     expect(LOGIN).toMatch(/fetch\('\/api\/geo'/);
   });
 
-  it("blocks on a non-US country but allows '' (unknown, local dev)", () => {
+  it("blocks on a non-allowed country but allows '' (unknown, local dev)", () => {
     // Guard against a regression that would block local-dev users
-    // whose edge has no country tag.
-    expect(LOGIN).toMatch(/c && c !== 'US' \? 'block' : 'allow'/);
+    // whose edge has no country tag. The gate uses isAllowedCountry()
+    // which covers US + the five permanently inhabited territories.
+    expect(LOGIN).toMatch(/isAllowedCountry\(c\) \? 'allow' : 'block'/);
   });
 
   it('disables the Send-code button when geoBlocked', () => {
@@ -89,14 +90,14 @@ describe('/auth/callback — server-side geo gate (final enforcement)', () => {
     expect(exchangeIdx).toBeGreaterThan(headerIdx);
   });
 
-  it('bounces non-US to /login?error=not_us without setting a session cookie', () => {
-    expect(CALLBACK).toMatch(/country && country !== 'US'/);
+  it('bounces non-allowed to /login?error=not_us without setting a session cookie', () => {
+    expect(CALLBACK).toMatch(/!isAllowedCountry\(country\)/);
     expect(CALLBACK).toMatch(/\/login\?error=not_us/);
   });
 
   it("allows empty country (local dev / lookup failure) — mirrors /login's posture", () => {
-    // `country && country !== 'US'` short-circuits on empty.
-    expect(CALLBACK).toMatch(/if \(country && country !== 'US'\) \{\s*return/);
+    // isAllowedCountry('') returns true — see apps/web/lib/country-gate.ts.
+    expect(CALLBACK).toMatch(/if \(!isAllowedCountry\(country\)\) \{\s*return/);
   });
 });
 
@@ -110,8 +111,8 @@ describe('/auth/confirm — magic-link path hits the same gate', () => {
     expect(verifyIdx).toBeGreaterThan(headerIdx);
   });
 
-  it('bounces non-US to /login?error=not_us', () => {
-    expect(CONFIRM).toMatch(/country && country !== 'US'/);
+  it('bounces non-allowed to /login?error=not_us', () => {
+    expect(CONFIRM).toMatch(/!isAllowedCountry\(country\)/);
     expect(CONFIRM).toMatch(/\/login\?error=not_us/);
   });
 });
